@@ -1,0 +1,10 @@
+# Python bytecode
+*.pyc
+__pycache__/
+
+# Environment variables
+.env
+
+# Other common ignores
+*.log
+.DS_Store
