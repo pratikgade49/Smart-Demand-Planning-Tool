@@ -118,6 +118,12 @@ class SchemaManager:
                     
                     conn.commit()
                     logger.info(f"Database initialized successfully for tenant: {tenant_id}")
+
+                    # Initialize forecasting tables and seed default data
+                    SchemaManager.initialize_forecasting_tables(tenant_id, database_name)
+                    SchemaManager.seed_default_algorithms(tenant_id, database_name)
+                    SchemaManager.seed_default_versions(tenant_id, database_name, created_by="system")
+
                     return True
                     
                 finally:
@@ -364,3 +370,308 @@ class SchemaManager:
         except Exception as e:
             logger.error(f"Failed to drop tenant database: {str(e)}")
             raise DatabaseException(f"Failed to drop tenant database: {str(e)}")
+        
+    @staticmethod
+    def initialize_forecasting_tables(tenant_id: str, database_name: str) -> bool:
+        """
+        Initialize all forecasting tables in tenant database.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            
+        Returns:
+            True if initialization successful
+            
+        Raises:
+            DatabaseException: If initialization fails
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Read and execute forecasting schema
+                    forecasting_schema = """
+                    CREATE TABLE IF NOT EXISTS algorithms (
+                        algorithm_id SERIAL PRIMARY KEY,
+                        algorithm_name VARCHAR(255) NOT NULL UNIQUE,
+                        default_parameters JSONB NOT NULL,
+                        algorithm_type VARCHAR(50) NOT NULL,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT check_algorithm_type CHECK (algorithm_type IN ('ML', 'Statistic', 'Hybrid'))
+                    );
+
+                    CREATE TABLE IF NOT EXISTS forecast_versions (
+                        version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        version_name VARCHAR(255) NOT NULL,
+                        version_type VARCHAR(50) NOT NULL,
+                        is_active BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255),
+                        updated_by VARCHAR(255),
+                        CONSTRAINT check_version_type CHECK (version_type IN ('Baseline', 'Simulation', 'Final')),
+                        CONSTRAINT unique_version_name_per_tenant UNIQUE(tenant_id, version_name)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_tenant ON forecast_versions(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_active ON forecast_versions(tenant_id, is_active);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_type ON forecast_versions(tenant_id, version_type);
+
+                    CREATE TABLE IF NOT EXISTS external_factors (
+                        factor_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        date DATE NOT NULL,
+                        factor_name VARCHAR(255) NOT NULL,
+                        factor_value DECIMAL(18, 4) NOT NULL,
+                        unit VARCHAR(50),
+                        source VARCHAR(255),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255),
+                        updated_by VARCHAR(255),
+                        deleted_at TIMESTAMP
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_tenant ON external_factors(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_date ON external_factors(tenant_id, date);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_name ON external_factors(tenant_id, factor_name);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_composite ON external_factors(tenant_id, factor_name, date);
+
+                    CREATE TABLE IF NOT EXISTS forecast_runs (
+                        forecast_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
+                        forecast_filters JSONB,
+                        forecast_start DATE NOT NULL,
+                        forecast_end DATE NOT NULL,
+                        run_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+                        run_progress INTEGER DEFAULT 0,
+                        run_percentage_frequency INTEGER DEFAULT 10,
+                        total_records INTEGER DEFAULT 0,
+                        processed_records INTEGER DEFAULT 0,
+                        failed_records INTEGER DEFAULT 0,
+                        error_message TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        started_at TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        created_by VARCHAR(255),
+                        updated_by VARCHAR(255),
+                        CONSTRAINT check_run_status CHECK (run_status IN ('Pending', 'In-Progress', 'Completed', 'Failed', 'Cancelled')),
+                        CONSTRAINT check_run_progress CHECK (run_progress >= 0 AND run_progress <= 100),
+                        CONSTRAINT check_forecast_dates CHECK (forecast_end >= forecast_start)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_tenant ON forecast_runs(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_status ON forecast_runs(tenant_id, run_status);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_version ON forecast_runs(tenant_id, version_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_created ON forecast_runs(tenant_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_composite ON forecast_runs(tenant_id, run_status, created_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS forecast_algorithms_mapping (
+                        mapping_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
+                        algorithm_id INTEGER NOT NULL REFERENCES algorithms(algorithm_id),
+                        algorithm_name VARCHAR(255) NOT NULL,
+                        custom_parameters JSONB,
+                        execution_order INTEGER NOT NULL DEFAULT 1,
+                        execution_status VARCHAR(50) DEFAULT 'Pending',
+                        started_at TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        error_message TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255),
+                        CONSTRAINT check_execution_status CHECK (execution_status IN ('Pending', 'Running', 'Completed', 'Failed')),
+                        CONSTRAINT unique_algo_per_run UNIQUE(forecast_run_id, algorithm_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_tenant ON forecast_algorithms_mapping(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_run ON forecast_algorithms_mapping(forecast_run_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_algo ON forecast_algorithms_mapping(algorithm_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_status ON forecast_algorithms_mapping(forecast_run_id, execution_status);
+
+                    CREATE TABLE IF NOT EXISTS forecast_results (
+                        result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
+                        version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
+                        mapping_id UUID NOT NULL REFERENCES forecast_algorithms_mapping(mapping_id) ON DELETE CASCADE,
+                        algorithm_id INTEGER NOT NULL REFERENCES algorithms(algorithm_id),
+                        forecast_date DATE NOT NULL,
+                        forecast_quantity DECIMAL(18, 4) NOT NULL,
+                        confidence_interval_lower DECIMAL(18, 4),
+                        confidence_interval_upper DECIMAL(18, 4),
+                        confidence_level VARCHAR(20),
+                        accuracy_metric DECIMAL(5, 2),
+                        metric_type VARCHAR(50),
+                        metadata JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_tenant ON forecast_results(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_run ON forecast_results(forecast_run_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_date ON forecast_results(tenant_id, forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_algo ON forecast_results(algorithm_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(tenant_id, forecast_run_id, forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_version ON forecast_results(version_id);
+
+                    CREATE TABLE IF NOT EXISTS forecast_audit_log (
+                        audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID NOT NULL,
+                        forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
+                        action VARCHAR(50) NOT NULL,
+                        entity_type VARCHAR(100),
+                        entity_id UUID,
+                        performed_by VARCHAR(255),
+                        performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        details JSONB,
+                        CONSTRAINT check_action CHECK (action IN ('Created', 'Updated', 'Deleted', 'Executed', 'Cancelled'))
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_audit_tenant ON forecast_audit_log(tenant_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_audit_run ON forecast_audit_log(forecast_run_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_audit_timestamp ON forecast_audit_log(performed_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_audit_action ON forecast_audit_log(action);
+                    """
+                    
+                    cursor.execute(forecasting_schema)
+                    conn.commit()
+                    logger.info(f"Forecasting tables initialized successfully for tenant: {tenant_id}")
+                    return True
+                    
+                finally:
+                    cursor.close()
+                    
+        except Exception as e:
+            logger.error(f"Failed to initialize forecasting tables for {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to initialize forecasting tables: {str(e)}")
+
+    @staticmethod
+    def seed_default_algorithms(tenant_id: str, database_name: str) -> bool:
+        """
+        Seed default algorithms in tenant database.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            
+        Returns:
+            True if seeding successful
+            
+        Raises:
+            DatabaseException: If seeding fails
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Insert default algorithms
+                    algorithms_data = [
+                        (
+                            'ARIMA',
+                            '{"alpha": 0.05, "beta": 0.1, "order": [1, 1, 1]}',
+                            'Statistic',
+                            'AutoRegressive Integrated Moving Average - suitable for univariate time series forecasting'
+                        ),
+                        (
+                            'Linear Regression',
+                            '{"alpha": 0.01, "beta": 0.1, "fit_intercept": true}',
+                            'Statistic',
+                            'Linear Regression - suitable for trend-based forecasting with external factors'
+                        ),
+                        (
+                            'Exponential Smoothing',
+                            '{"alpha": 0.3, "beta": 0.1, "gamma": 0.1, "seasonal_periods": 12}',
+                            'Statistic',
+                            'Exponential Smoothing - suitable for data with trend and seasonality'
+                        ),
+                        (
+                            'Prophet',
+                            '{"seasonality_mode": "additive", "yearly_seasonality": true, "weekly_seasonality": true, "daily_seasonality": false}',
+                            'ML',
+                            'Facebook Prophet - robust to missing data and outliers with changepoint detection'
+                        ),
+                        (
+                            'LSTM Neural Network',
+                            '{"epochs": 100, "batch_size": 32, "units": 128, "dropout": 0.2}',
+                            'ML',
+                            'Long Short-Term Memory - deep learning model for complex sequential patterns'
+                        )
+                    ]
+                    
+                    for algo_name, default_params, algo_type, description in algorithms_data:
+                        cursor.execute("""
+                            INSERT INTO algorithms (algorithm_name, default_parameters, algorithm_type, description)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (algorithm_name) DO NOTHING
+                        """, (algo_name, default_params, algo_type, description))
+                    
+                    conn.commit()
+                    logger.info(f"Default algorithms seeded for tenant: {tenant_id}")
+                    return True
+                    
+                finally:
+                    cursor.close()
+                    
+        except Exception as e:
+            logger.error(f"Failed to seed algorithms for {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to seed algorithms: {str(e)}")
+
+    @staticmethod
+    def seed_default_versions(tenant_id: str, database_name: str, created_by: str = "system") -> bool:
+        """
+        Seed default forecast versions for tenant.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            created_by: User creating the versions
+            
+        Returns:
+            True if seeding successful
+            
+        Raises:
+            DatabaseException: If seeding fails
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Insert default versions
+                    versions_data = [
+                        ('Baseline', 'Baseline', True, created_by),
+                        ('Simulation', 'Simulation', False, created_by),
+                        ('Final', 'Final', False, created_by)
+                    ]
+                    
+                    for version_name, version_type, is_active, created_by_user in versions_data:
+                        cursor.execute("""
+                            INSERT INTO forecast_versions (tenant_id, version_name, version_type, is_active, created_by)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (tenant_id, version_name) DO NOTHING
+                        """, (tenant_id, version_name, version_type, is_active, created_by_user))
+                    
+                    conn.commit()
+                    logger.info(f"Default forecast versions seeded for tenant: {tenant_id}")
+                    return True
+                    
+                finally:
+                    cursor.close()
+                    
+        except Exception as e:
+            logger.error(f"Failed to seed versions for {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to seed versions: {str(e)}")
