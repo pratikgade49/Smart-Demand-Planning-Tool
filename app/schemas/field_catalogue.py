@@ -15,27 +15,8 @@ class FieldDataType(str, Enum):
     BOOLEAN = "Boolean"
     TEXT = "Text"
 
-class CharacteristicType(str, Enum):
-    """Types of characteristics."""
-    PRODUCT = "Product"
-    CUSTOMER = "Customer"
-    LOCATION = "Location"
-    PLANT = "Plant"
-    PRODUCT_GROUP = "Product Group"
-    LOCATION_REGION = "Location Region"
-    CUSTOMER_GROUP = "Customer Group"
-    SHIP_TO_PARTY = "Ship to Party"
-    SOLD_TO_PARTY = "Sold to Party"
 
-class CharacteristicCategory(str, Enum):
-    """Categories of characteristics."""
-    FG = "FG"  # Finished Goods
-    RM = "RM"  # Raw Materials
-    MRO = "MRO"  # Maintenance, Repair, Operations
-    SERVICES = "Services"
-    LOCATION = "Location"
-    CUSTOMER = "Customer"
-
+# MODIFY FieldCatalogueItemRequest:
 class FieldCatalogueItemRequest(BaseModel):
     """Request schema for a single field in Field Catalogue."""
     
@@ -44,8 +25,7 @@ class FieldCatalogueItemRequest(BaseModel):
     field_length: Optional[int] = Field(None, ge=1, le=1000, description="Field length for Char type")
     default_value: Optional[str] = Field(None, max_length=255, description="Default value")
     is_characteristic: bool = Field(..., description="Whether this is a characteristic field")
-    characteristic_type: Optional[CharacteristicType] = Field(None, description="Type of characteristic")
-    characteristic_category: Optional[CharacteristicCategory] = Field(None, description="Category of characteristic")
+    parent_field_name: Optional[str] = Field(None, description="Parent field name if this is a characteristic")
     
     @field_validator("field_name")
     @classmethod
@@ -98,11 +78,6 @@ class FieldCatalogueResponse(BaseModel):
     created_at: str
     created_by: str
 
-class FieldCatalogueValidationRequest(BaseModel):
-    """Request schema for Field Catalogue validation."""
-    
-    fields: List[FieldCatalogueItemRequest] = Field(..., min_items=1, description="Fields to validate")
-
 class FieldCatalogueValidationResponse(BaseModel):
     """Response schema for Field Catalogue validation."""
     
@@ -110,3 +85,5 @@ class FieldCatalogueValidationResponse(BaseModel):
     errors: List[str] = []
     warnings: List[str] = []
     summary: str
+    parent_field_errors: List[str] = []  # New field for parent validation errors
+    circular_reference_errors: List[str] = []  # New field for circular reference errors

@@ -42,13 +42,13 @@ class AuthService:
     def register_tenant(request: TenantRegisterRequest) -> Dict[str, Any]:
         """
         Register a new tenant with dedicated database.
-        
+
         Args:
             request: Tenant registration request
-            
+
         Returns:
             Dictionary containing tenant_id, tenant_name, and database_name
-            
+
         Raises:
             ConflictException: If tenant already exists
             DatabaseException: If registration fails
@@ -56,7 +56,8 @@ class AuthService:
         tenant_id = str(uuid.uuid4())
         database_name = AuthService._generate_database_name(request.tenant_identifier)
         db_manager = get_db_manager()
-        
+        database_created = False
+
         try:
             # Check if tenant identifier already exists in master database
             with db_manager.get_master_connection() as conn:
@@ -64,7 +65,7 @@ class AuthService:
                 try:
                     cursor.execute(
                         """
-                        SELECT tenant_id FROM public.tenants 
+                        SELECT tenant_id FROM public.tenants
                         WHERE tenant_identifier = %s
                         """,
                         (request.tenant_identifier,)
@@ -73,11 +74,11 @@ class AuthService:
                         raise ConflictException(
                             f"Tenant identifier '{request.tenant_identifier}' already exists"
                         )
-                    
+
                     # Check if email already exists
                     cursor.execute(
                         """
-                        SELECT tenant_id FROM public.tenants 
+                        SELECT tenant_id FROM public.tenants
                         WHERE admin_email = %s
                         """,
                         (request.email,)
@@ -88,21 +89,22 @@ class AuthService:
                         )
                 finally:
                     cursor.close()
-            
+
             # Create tenant database and initialize tables
             SchemaManager.create_tenant_database(tenant_id, database_name)
-            
+            database_created = True
+
             # Hash password
             password_hash = PasswordHandler.hash_password(request.password)
-            
+
             # Insert tenant in master database
             with db_manager.get_master_connection() as conn:
                 cursor = conn.cursor()
                 try:
                     cursor.execute(
                         """
-                        INSERT INTO public.tenants 
-                        (tenant_id, tenant_name, tenant_identifier, admin_email, 
+                        INSERT INTO public.tenants
+                        (tenant_id, tenant_name, tenant_identifier, admin_email,
                          admin_password_hash, database_name, status)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
@@ -119,16 +121,15 @@ class AuthService:
                     conn.commit()
                 finally:
                     cursor.close()
-            
+
             # Insert tenant record in their own database
-                        # Insert tenant record in their own database
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
                     cursor.execute(
                         """
-                        INSERT INTO tenants 
-                        (tenant_id, tenant_name, tenant_identifier, admin_email, 
+                        INSERT INTO tenants
+                        (tenant_id, tenant_name, tenant_identifier, admin_email,
                          admin_password_hash, database_name, status)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
@@ -145,28 +146,25 @@ class AuthService:
                     conn.commit()
                 finally:
                     cursor.close()
-            
+
             logger.info(f"Tenant registered successfully: {tenant_id} with database: {database_name}")
-            
+
             return {
                 "tenant_id": tenant_id,
                 "tenant_name": request.tenant_name,
                 "database_name": database_name
             }
-            
-        except (ConflictException, DatabaseException):
-            # Cleanup: try to drop database if it was created
-            try:
-                db_manager.drop_tenant_database(database_name)
-            except:
-                pass
+
+        except ConflictException:
+            # No cleanup needed - database wasn't created yet
             raise
         except Exception as e:
-            # Cleanup: try to drop database if it was created
-            try:
-                db_manager.drop_tenant_database(database_name)
-            except:
-                pass
+            # Cleanup only if database was created
+            if database_created:
+                try:
+                    db_manager.drop_tenant_database(database_name)
+                except:
+                    pass
             logger.error(f"Tenant registration failed: {str(e)}")
             raise DatabaseException(f"Tenant registration failed: {str(e)}")
     

@@ -25,12 +25,37 @@ async def create_field_catalogue(
     request: FieldCatalogueRequest,
     tenant_data: Dict = Depends(get_tenant_database)
 ):
-
     """
     Create a new field catalogue in DRAFT status.
-    Defines the structure for master data table.
+    Validates that parent fields exist and no circular references.
     """
     try:
+        # Pre-validate parent fields
+        parent_errors = []
+        for field in request.fields:
+            if field.is_characteristic and field.parent_field_name:
+                if not FieldCatalogueService.validate_parent_field_exists(
+                    request.fields, 
+                    field.parent_field_name
+                ):
+                    parent_errors.append(
+                        f"Parent field '{field.parent_field_name}' not found for characteristic '{field.field_name}'"
+                    )
+        
+        if parent_errors:
+            raise HTTPException(
+                status_code=400, 
+                detail={"errors": parent_errors}
+            )
+        
+        # Check for circular references
+        circular_errors = FieldCatalogueService.detect_circular_references(request.fields)
+        if circular_errors:
+            raise HTTPException(
+                status_code=400, 
+                detail={"errors": circular_errors}
+            )
+        
         result = FieldCatalogueService.create_field_catalogue(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
@@ -43,6 +68,7 @@ async def create_field_catalogue(
     except Exception as e:
         logger.error(f"Unexpected error in create_field_catalogue: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 
 @router.post("/{catalogue_id}/finalize", response_model=Dict[str, Any])

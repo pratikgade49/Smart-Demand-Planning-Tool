@@ -15,16 +15,14 @@ class FieldDefinition:
         field_length: Optional[int] = None,
         default_value: Optional[str] = None,
         is_characteristic: bool = False,
-        characteristic_type: Optional[str] = None,
-        characteristic_category: Optional[str] = None
+        parent_field_name: Optional[str] = None
     ):
         self.field_name = field_name
         self.data_type = data_type
         self.field_length = field_length
         self.default_value = default_value
         self.is_characteristic = is_characteristic
-        self.characteristic_type = characteristic_type
-        self.characteristic_category = characteristic_category
+        self.parent_field_name = parent_field_name
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -34,21 +32,32 @@ class FieldDefinition:
             "field_length": self.field_length,
             "default_value": self.default_value,
             "is_characteristic": self.is_characteristic,
-            "characteristic_type": self.characteristic_type,
-            "characteristic_category": self.characteristic_category
+            "parent_field_name": self.parent_field_name
         }
-    
+
     def get_sql_type(self) -> str:
-        """Get SQL data type for this field."""
-        type_mapping = {
-            "Char": f"VARCHAR({self.field_length or 255})",
-            "Numeric": "DECIMAL(18, 2)",
-            "Date": "DATE",
-            "Timestamp": "TIMESTAMP",
-            "Boolean": "BOOLEAN",
-            "Text": "TEXT"
-        }
-        return type_mapping.get(self.data_type, "VARCHAR(255)")
+        """Convert data type to SQL type."""
+        data_type_upper = self.data_type.upper()
+
+        if data_type_upper == "CHAR":
+            if self.field_length:
+                return f"VARCHAR({self.field_length})"
+            else:
+                return "VARCHAR(255)"
+        elif data_type_upper == "NUMERIC":
+            return "DECIMAL(18,2)"
+        elif data_type_upper == "DATE":
+            return "DATE"
+        elif data_type_upper == "TIMESTAMP":
+            return "TIMESTAMP"
+        elif data_type_upper == "BOOLEAN":
+            return "BOOLEAN"
+        elif data_type_upper == "TEXT":
+            return "TEXT"
+        else:
+            # Default fallback
+            return "VARCHAR(255)"
+
 
 class TableSchemaBuilder:
     """Builds SQL DDL for dynamic tables."""

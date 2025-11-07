@@ -28,24 +28,28 @@ class FieldCatalogueService:
     ) -> Dict[str, Any]:
         """
         Create a new field catalogue in DRAFT status.
-        
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Tenant's database name
-            request: Field catalogue request
-            user_email: Email of user creating catalogue
-            
-        Returns:
-            Created field catalogue details
-            
-        Raises:
-            DatabaseException: If creation fails
-            ValidationException: If validation fails
+        Validates parent field references and circular dependencies.
         """
         catalogue_id = str(uuid.uuid4())
         db_manager = get_db_manager()
         
         try:
+            # Validate all parent field references exist
+            for field in request.fields:
+                if field.is_characteristic and field.parent_field_name:
+                    if not FieldCatalogueService.validate_parent_field_exists(
+                        request.fields, 
+                        field.parent_field_name
+                    ):
+                        raise ValidationException(
+                            f"Parent field '{field.parent_field_name}' not found for characteristic '{field.field_name}'"
+                        )
+            
+            # Detect circular references
+            circular_errors = FieldCatalogueService.detect_circular_references(request.fields)
+            if circular_errors:
+                raise ValidationException("; ".join(circular_errors))
+            
             # Convert field requests to FieldDefinition objects
             field_definitions = [
                 FieldDefinition(
@@ -54,8 +58,7 @@ class FieldCatalogueService:
                     field_length=f.field_length,
                     default_value=f.default_value,
                     is_characteristic=f.is_characteristic,
-                    characteristic_type=f.characteristic_type,
-                    characteristic_category=f.characteristic_category
+                    parent_field_name=f.parent_field_name
                 )
                 for f in request.fields
             ]
@@ -97,6 +100,8 @@ class FieldCatalogueService:
                 finally:
                     cursor.close()
                     
+        except (ValidationException, NotFoundException):
+            raise
         except Exception as e:
             logger.error(f"Failed to create field catalogue: {str(e)}")
             raise DatabaseException(f"Failed to create field catalogue: {str(e)}")
@@ -342,3 +347,48 @@ class FieldCatalogueService:
         except Exception as e:
             logger.error(f"Failed to list field catalogues: {str(e)}")
             raise DatabaseException(f"Failed to list field catalogues: {str(e)}")
+        
+
+    @staticmethod
+    def validate_parent_field_exists(
+        fields: List[FieldCatalogueItemRequest], 
+        parent_field_name: str
+    ) -> bool:
+        """Check if parent field exists in the fields list."""
+        return any(f.field_name.lower() == parent_field_name.lower() for f in fields)
+
+    @staticmethod
+    def detect_circular_references(fields: List[FieldCatalogueItemRequest]) -> List[str]:
+        """
+        Detect circular references in characteristic relationships.
+        Returns list of error messages if circular references found.
+        """
+        errors = []
+        field_dict = {f.field_name.lower(): f for f in fields}
+        
+        def has_circular_path(current: str, target: str, visited: set) -> bool:
+            """Check if there's a circular path from current to target."""
+            if current in visited:
+                return True
+            if current not in field_dict or not field_dict[current].parent_field_name:
+                return False
+            
+            visited.add(current)
+            parent = field_dict[current].parent_field_name.lower()
+            
+            if parent == target:
+                return True
+            return has_circular_path(parent, target, visited.copy())
+        
+        for field in fields:
+            if field.is_characteristic and field.parent_field_name:
+                parent = field.parent_field_name.lower()
+                # Check if parent has this field as ancestor (circular)
+                if has_circular_path(parent, field.field_name.lower(), set()):
+                    errors.append(
+                        f"Circular reference detected: {field.field_name} -> {parent}"
+                    )
+        
+        return errors
+
+
