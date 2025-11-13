@@ -14,3 +14,10 @@ httpx==0.27.2
 pandas==2.2.2
 openpyxl==3.1.5
 psutil==5.9.8
+
+# Machine Learning & Forecasting Libraries
+numpy==1.26.4
+scikit-learn==1.4.2
+scipy==1.13.0
+statsmodels==0.14.2
+python-dateutil==2.9.0

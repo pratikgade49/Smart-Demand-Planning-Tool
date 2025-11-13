@@ -463,7 +463,7 @@ class SchemaManager:
                         completed_at TIMESTAMP,
                         created_by VARCHAR(255),
                         updated_by VARCHAR(255),
-                        CONSTRAINT check_run_status CHECK (run_status IN ('Pending', 'In-Progress', 'Completed', 'Failed', 'Cancelled')),
+                        CONSTRAINT check_run_status CHECK (run_status IN ('Pending', 'In-Progress', 'Completed', 'Completed with Errors', 'Failed', 'Cancelled')),
                         CONSTRAINT check_run_progress CHECK (run_progress >= 0 AND run_progress <= 100),
                         CONSTRAINT check_forecast_dates CHECK (forecast_end >= forecast_start)
                     );

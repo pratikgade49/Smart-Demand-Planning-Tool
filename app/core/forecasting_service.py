@@ -10,8 +10,12 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import logging
 from psycopg2.extras import Json
+import warnings
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 from app.core.database import get_db_manager
+from app.config import settings
 from app.core.exceptions import (
     DatabaseException,
     ValidationException,
@@ -477,7 +481,16 @@ class ForecastingService:
                 """
                 
                 params = [tenant_id] + filter_params
-                df = pd.read_sql_query(query, conn, params=params)
+                
+                # Use SQLAlchemy engine to suppress pandas warning
+                try:
+                    engine = create_engine(f"postgresql+psycopg2://", creator=lambda: conn, echo=False)
+                    df = pd.read_sql_query(query, engine, params=params)
+                except Exception as e:
+                    # Fallback: suppress warning and use raw connection
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=UserWarning)
+                        df = pd.read_sql_query(query, conn, params=params)
                 
                 logger.info(f"Prepared {len(df)} aggregated records for forecasting")
                 return df

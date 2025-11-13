@@ -12,6 +12,8 @@ from app.schemas.forecasting import (
     ExternalFactorCreate,
     ExternalFactorUpdate
 )
+
+from app.core.forecast_execution_service import ForecastExecutionService
 from app.core.forecasting_service import ForecastingService
 from app.core.forecast_version_service import ForecastVersionService
 from app.core.external_factors_service import ExternalFactorsService
@@ -296,7 +298,7 @@ async def create_forecast_run(
 async def list_forecast_runs(
     tenant_data: Dict = Depends(get_current_tenant),
     version_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None, pattern="^(Pending|In-Progress|Completed|Failed|Cancelled)$"),
+    status: Optional[str] = Query(None, pattern="^(Pending|In-Progress|Completed|Completed with Errors|Failed|Cancelled)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100)
 ):
@@ -383,6 +385,292 @@ async def get_forecast_run_status(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error getting run status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
+@router.post("/runs/{forecast_run_id}/execute", response_model=Dict[str, Any])
+async def execute_forecast_run(
+    forecast_run_id: str,
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Execute a forecast run.
+    
+    This will:
+    1. Fetch historical data based on filters
+    2. Execute all mapped algorithms in order
+    3. Store forecast results
+    4. Update run status
+    
+    **Note**: This is an asynchronous operation that may take time for large datasets.
+    """
+    try:
+        result = ForecastExecutionService.execute_forecast_run(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            forecast_run_id=forecast_run_id,
+            user_email=tenant_data["email"]
+        )
+        return ResponseHandler.success(data=result)
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error executing forecast: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/runs/{forecast_run_id}/results", response_model=Dict[str, Any])
+async def get_forecast_results(
+    forecast_run_id: str,
+    tenant_data: Dict = Depends(get_current_tenant),
+    algorithm_id: Optional[int] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000)
+):
+    """
+    Get forecast results for a specific run.
+    
+    - **algorithm_id**: Optional filter by specific algorithm
+    - **page**: Page number
+    - **page_size**: Results per page
+    """
+    try:
+        from app.core.database import get_db_manager
+        db_manager = get_db_manager()
+        
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                # Build WHERE clause
+                where_clauses = ["tenant_id = %s", "forecast_run_id = %s"]
+                params = [tenant_data["tenant_id"], forecast_run_id]
+                
+                if algorithm_id:
+                    where_clauses.append("algorithm_id = %s")
+                    params.append(algorithm_id)
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                # Get total count
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM forecast_results WHERE {where_sql}",
+                    params
+                )
+                total_count = cursor.fetchone()[0]
+                
+                # Get paginated results
+                offset = (page - 1) * page_size
+                cursor.execute(f"""
+                    SELECT result_id, algorithm_id, forecast_date, forecast_quantity,
+                           confidence_interval_lower, confidence_interval_upper,
+                           confidence_level, accuracy_metric, metric_type, metadata,
+                           created_at, created_by
+                    FROM forecast_results
+                    WHERE {where_sql}
+                    ORDER BY forecast_date, algorithm_id
+                    LIMIT %s OFFSET %s
+                """, params + [page_size, offset])
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        "result_id": str(row[0]),
+                        "algorithm_id": row[1],
+                        "forecast_date": row[2].isoformat() if row[2] else None,
+                        "forecast_quantity": float(row[3]),
+                        "confidence_interval_lower": float(row[4]) if row[4] else None,
+                        "confidence_interval_upper": float(row[5]) if row[5] else None,
+                        "confidence_level": row[6],
+                        "accuracy_metric": float(row[7]) if row[7] else None,
+                        "metric_type": row[8],
+                        "metadata": row[9],
+                        "created_at": row[10].isoformat() if row[10] else None,
+                        "created_by": row[11]
+                    })
+                
+                return ResponseHandler.list_response(
+                    data=results,
+                    page=page,
+                    page_size=page_size,
+                    total_count=total_count
+                )
+                
+            finally:
+                cursor.close()
+                
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error getting results: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/results/compare", response_model=Dict[str, Any])
+async def compare_forecast_results(
+    tenant_data: Dict = Depends(get_current_tenant),
+    forecast_run_id: str = Query(..., description="Forecast run ID"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
+):
+    """
+    Compare results across all algorithms for a forecast run.
+    
+    Returns aggregated comparison data showing each algorithm's performance.
+    """
+    try:
+        from app.core.database import get_db_manager
+        db_manager = get_db_manager()
+        
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                # Build WHERE clause
+                where_clauses = ["fr.tenant_id = %s", "fr.forecast_run_id = %s"]
+                params = [tenant_data["tenant_id"], forecast_run_id]
+                
+                if date_from:
+                    where_clauses.append("fr.forecast_date >= %s")
+                    params.append(date_from)
+                
+                if date_to:
+                    where_clauses.append("fr.forecast_date <= %s")
+                    params.append(date_to)
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                # Get comparison data
+                cursor.execute(f"""
+                    SELECT 
+                        a.algorithm_id,
+                        a.algorithm_name,
+                        COUNT(fr.result_id) as result_count,
+                        AVG(fr.forecast_quantity) as avg_forecast,
+                        MIN(fr.forecast_quantity) as min_forecast,
+                        MAX(fr.forecast_quantity) as max_forecast,
+                        AVG(fr.accuracy_metric) as avg_accuracy
+                    FROM forecast_results fr
+                    JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
+                    WHERE {where_sql}
+                    GROUP BY a.algorithm_id, a.algorithm_name
+                    ORDER BY a.algorithm_name
+                """, params)
+                
+                comparison = []
+                for row in cursor.fetchall():
+                    comparison.append({
+                        "algorithm_id": row[0],
+                        "algorithm_name": row[1],
+                        "result_count": row[2],
+                        "avg_forecast": round(float(row[3]), 2) if row[3] else None,
+                        "min_forecast": round(float(row[4]), 2) if row[4] else None,
+                        "max_forecast": round(float(row[5]), 2) if row[5] else None,
+                        "avg_accuracy_metric": round(float(row[6]), 2) if row[6] else None
+                    })
+                
+                return ResponseHandler.success(data={
+                    "forecast_run_id": forecast_run_id,
+                    "algorithm_comparison": comparison
+                })
+                
+            finally:
+                cursor.close()
+                
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error comparing results: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/results/export/{forecast_run_id}", response_model=Dict[str, Any])
+async def export_forecast_results(
+    forecast_run_id: str,
+    tenant_data: Dict = Depends(get_current_tenant),
+    algorithm_id: Optional[int] = Query(None),
+    format: str = Query("json", pattern="^(json|csv)$")
+):
+    """
+    Export forecast results in JSON or CSV format.
+    
+    - **format**: Output format (json or csv)
+    - **algorithm_id**: Optional filter by algorithm
+    """
+    try:
+        from app.core.database import get_db_manager
+        import json
+        
+        db_manager = get_db_manager()
+        
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                where_clauses = ["fr.tenant_id = %s", "fr.forecast_run_id = %s"]
+                params = [tenant_data["tenant_id"], forecast_run_id]
+                
+                if algorithm_id:
+                    where_clauses.append("fr.algorithm_id = %s")
+                    params.append(algorithm_id)
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                cursor.execute(f"""
+                    SELECT 
+                        fr.forecast_date,
+                        a.algorithm_name,
+                        fr.forecast_quantity,
+                        fr.confidence_interval_lower,
+                        fr.confidence_interval_upper,
+                        fr.accuracy_metric,
+                        fr.metric_type
+                    FROM forecast_results fr
+                    JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
+                    WHERE {where_sql}
+                    ORDER BY fr.forecast_date, a.algorithm_name
+                """, params)
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        "forecast_date": row[0].isoformat() if row[0] else None,
+                        "algorithm_name": row[1],
+                        "forecast_quantity": float(row[2]),
+                        "confidence_interval_lower": float(row[3]) if row[3] else None,
+                        "confidence_interval_upper": float(row[4]) if row[4] else None,
+                        "accuracy_metric": float(row[5]) if row[5] else None,
+                        "metric_type": row[6]
+                    })
+                
+                if format == "csv":
+                    # Convert to CSV format
+                    import io
+                    import csv
+                    
+                    output = io.StringIO()
+                    if results:
+                        writer = csv.DictWriter(output, fieldnames=results[0].keys())
+                        writer.writeheader()
+                        writer.writerows(results)
+                    
+                    csv_data = output.getvalue()
+                    
+                    return ResponseHandler.success(data={
+                        "format": "csv",
+                        "content": csv_data,
+                        "record_count": len(results)
+                    })
+                else:
+                    return ResponseHandler.success(data={
+                        "format": "json",
+                        "results": results,
+                        "record_count": len(results)
+                    })
+                
+            finally:
+                cursor.close()
+                
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error exporting results: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
