@@ -22,7 +22,8 @@ from app.core.logging_config import (
 )
 
 # Import routers
-from app.api.routes import auth_routes, field_catalogue_routes, upload_routes
+from app.api.routes import auth_routes, field_catalogue_routes, upload_routes, forecasting_routes
+
 
 # Setup logging before anything else
 setup_logging(
@@ -239,7 +240,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Include routers
+# Then register the forecasting router with other routers
 logger.info("Registering API routes...")
 app.include_router(auth_routes.router, prefix="/api/v1")
 logger.debug("Registered auth routes")
@@ -247,6 +248,8 @@ app.include_router(field_catalogue_routes.router, prefix="/api/v1")
 logger.debug("Registered field catalogue routes")
 app.include_router(upload_routes.router, prefix="/api/v1")
 logger.debug("Registered upload routes")
+app.include_router(forecasting_routes.router, prefix="/api/v1")  # NEW LINE
+logger.debug("Registered forecasting routes")  # NEW LINE
 logger.info("All API routes registered successfully")
 
 

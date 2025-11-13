@@ -4,6 +4,7 @@ Handles PostgreSQL connections with one database per tenant architecture.
 """
 
 from psycopg2 import pool, connect
+import psycopg2.extras as extras
 from psycopg2.extensions import connection as Connection, ISOLATION_LEVEL_AUTOCOMMIT
 from contextlib import contextmanager
 from typing import Generator, Optional, Dict, Any
@@ -45,6 +46,10 @@ class DatabaseManager:
                 password=settings.DB_PASSWORD,
                 database="postgres"
             )
+            try:
+                extras.register_uuid(conn)
+            except Exception:
+                logger.debug("Could not register uuid adapter on ad-hoc master connect")
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cursor = conn.cursor()
 
@@ -69,6 +74,10 @@ class DatabaseManager:
                         password=settings.DB_PASSWORD,
                         database=master_db_name
                     )
+                    try:
+                        extras.register_uuid(master_conn)
+                    except Exception:
+                        logger.debug("Could not register uuid adapter on master_conn")
                     master_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
                     master_cursor = master_conn.cursor()
 
@@ -207,6 +216,12 @@ class DatabaseManager:
                 raise DatabaseException("Master connection pool not initialized")
             
             connection = self._master_pool.getconn()
+            # Ensure psycopg2 knows how to adapt Python's uuid.UUID objects
+            try:
+                extras.register_uuid(connection)
+            except Exception:
+                # Non-fatal: if registering fails, queries may still work with str IDs
+                logger.debug("Could not register uuid adapter on master connection")
             yield connection
             connection.commit()
             
@@ -237,6 +252,11 @@ class DatabaseManager:
                 self._initialize_tenant_pool(database_name)
             
             connection = self._tenant_pools[database_name].getconn()
+            # Ensure psycopg2 can adapt uuid.UUID objects on tenant connections
+            try:
+                extras.register_uuid(connection)
+            except Exception:
+                logger.debug(f"Could not register uuid adapter on tenant connection: {database_name}")
             yield connection
             connection.commit()
             
@@ -327,6 +347,10 @@ class DatabaseManager:
                 password=settings.DB_PASSWORD,
                 database="postgres"
             )
+            try:
+                extras.register_uuid(conn)
+            except Exception:
+                logger.debug("Could not register uuid adapter on ad-hoc connect for create_tenant_database")
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cursor = conn.cursor()
             
@@ -377,6 +401,10 @@ class DatabaseManager:
                 password=settings.DB_PASSWORD,
                 database="postgres"
             )
+            try:
+                extras.register_uuid(conn)
+            except Exception:
+                logger.debug("Could not register uuid adapter on ad-hoc connect for drop_tenant_database")
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cursor = conn.cursor()
             

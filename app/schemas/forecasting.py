@@ -50,7 +50,8 @@ class ForecastVersionResponse(ForecastVersionBase):
 class ExternalFactorBase(BaseModel):
     date: date
     factor_name: str
-    factor_value: float = Field(..., decimal_places=4)
+    # Use float without pydantic's decimal_places constraint (not applicable to float)
+    factor_value: float = Field(...)
     unit: Optional[str] = None
     source: Optional[str] = None
 
@@ -129,7 +130,8 @@ class ForecastRunResponse(ForecastRunBase):
 # Forecast Results Schemas
 class ForecastResultBase(BaseModel):
     forecast_date: date
-    forecast_quantity: float = Field(..., decimal_places=4)
+    # Use float without pydantic's decimal_places constraint (not applicable to float)
+    forecast_quantity: float = Field(...)
     confidence_interval_lower: Optional[float] = None
     confidence_interval_upper: Optional[float] = None
     confidence_level: Optional[str] = None
