@@ -345,6 +345,110 @@ class ForecastingService:
         except Exception as e:
             logger.error(f"Failed to get forecast run: {str(e)}")
             raise DatabaseException(f"Failed to get forecast run: {str(e)}")
+        
+    # Add this to app/core/forecasting_service.py
+    # In the prepare_aggregated_data method, around line 340
+
+    @staticmethod
+    def prepare_aggregated_data(
+        tenant_id: str,
+        database_name: str,
+        aggregation_level: str,
+        interval: str,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> pd.DataFrame:
+        """
+        Prepare aggregated historical data for forecasting.
+        """
+        db_manager = get_db_manager()
+
+        try:
+            # Get aggregation columns
+            agg_columns = ForecastingService._get_aggregation_columns(
+                tenant_id, database_name, aggregation_level
+            )
+            
+            # DEBUG: Log what filters are being applied
+            logger.info(f"=== DATA SELECTION DEBUG ===")
+            logger.info(f"Aggregation Level: {aggregation_level}")
+            logger.info(f"Aggregation Columns: {agg_columns}")
+            logger.info(f"Interval: {interval}")
+            logger.info(f"Raw Filters: {filters}")
+            
+            # Build filter clause
+            filter_clause = ""
+            filter_params = []
+            actual_filters_applied = {}
+            
+            if filters:
+                filter_conditions = []
+                for col, val in filters.items():
+                    if col not in ["aggregation_level", "interval"]:
+                        filter_conditions.append(f'm."{col}" = %s')
+                        filter_params.append(val)
+                        actual_filters_applied[col] = val  # Track what's actually applied
+                
+                if filter_conditions:
+                    filter_clause = "AND " + " AND ".join(filter_conditions)
+            
+            # DEBUG: Log actual SQL filters
+            logger.info(f"Filters Applied to SQL: {actual_filters_applied}")
+            logger.info(f"Filter Params: {filter_params}")
+            logger.info(f"Filter SQL Clause: {filter_clause}")
+
+            with db_manager.get_tenant_connection(database_name) as conn:
+                date_trunc = ForecastingService._get_date_trunc_expr(interval)
+                
+                query = f"""
+                    SELECT 
+                        {date_trunc} as period,
+                        {', '.join([f'm."{col}"' for col in agg_columns])},
+                        SUM(s.quantity) as total_quantity,
+                        COUNT(DISTINCT s.sales_id) as transaction_count,
+                        AVG(s.unit_price) as avg_price
+                    FROM sales_data s
+                    JOIN master_data m ON s.master_id = m.master_id
+                    WHERE s.tenant_id = %s {filter_clause}
+                    GROUP BY {date_trunc}, {', '.join([f'm."{col}"' for col in agg_columns])}
+                    ORDER BY period
+                """
+                
+                params = [tenant_id] + filter_params
+                
+                # DEBUG: Log final query
+                logger.info(f"=== FINAL SQL QUERY ===")
+                logger.info(f"Query: {query}")
+                logger.info(f"Params: {params}")
+                
+                # Execute query
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    df = pd.read_sql_query(query, conn, params=params)
+                
+                # DEBUG: Log results
+                logger.info(f"=== QUERY RESULTS ===")
+                logger.info(f"Rows Returned: {len(df)}")
+                if not df.empty:
+                    logger.info(f"Date Range: {df['period'].min()} to {df['period'].max()}")
+                    logger.info(f"Total Quantity Sum: {df['total_quantity'].sum()}")
+                    logger.info(f"Sample Data (first 5 rows):\n{df.head()}")
+                    
+                    # Show unique values for aggregation columns
+                    for col in agg_columns:
+                        if col in df.columns:
+                            unique_vals = df[col].unique()
+                            logger.info(f"Unique {col} values: {unique_vals[:10]}")  # First 10
+                else:
+                    logger.warning("⚠️ NO DATA RETURNED - Check if filters are too restrictive!")
+                
+                logger.info(f"=== END DEBUG ===\n")
+                
+                return df
+
+        except Exception as e:
+            logger.error(f"Failed to prepare aggregated data: {str(e)}")
+            raise DatabaseException(f"Failed to prepare data: {str(e)}")
 
     @staticmethod
     def list_forecast_runs(
@@ -565,15 +669,21 @@ class ForecastingService:
 
     @staticmethod
     def _get_date_trunc_expr(interval: str) -> str:
-        """Get SQL date truncation expression for interval."""
+        """
+        Get SQL date truncation expression for interval.
+        
+        FIXED: Uses DATE type directly to avoid timezone issues.
+        """
+        # Since s.date is already a DATE type (no time component),
+        # we need to convert to timestamp only for truncation, then back to date
         interval_map = {
-            "WEEKLY": "DATE_TRUNC('week', s.date)",
-            "MONTHLY": "DATE_TRUNC('month', s.date)",
-            "QUARTERLY": "DATE_TRUNC('quarter', s.date)",
-            "YEARLY": "DATE_TRUNC('year', s.date)"
+            "WEEKLY": "DATE_TRUNC('week', s.date::timestamp)::date",
+            "MONTHLY": "DATE_TRUNC('month', s.date::timestamp)::date",
+            "QUARTERLY": "DATE_TRUNC('quarter', s.date::timestamp)::date",
+            "YEARLY": "DATE_TRUNC('year', s.date::timestamp)::date"
         }
-        return interval_map.get(interval, "DATE_TRUNC('month', s.date)")
-
+        
+        return interval_map.get(interval, "DATE_TRUNC('month', s.date::timestamp)::date")
     @staticmethod
     def _validate_version_exists(
         tenant_id: str,
