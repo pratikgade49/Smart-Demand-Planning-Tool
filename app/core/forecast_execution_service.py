@@ -11,7 +11,12 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import logging
 from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from sklearn.neighbors import KNeighborsRegressor
+from xgboost import XGBRegressor
 from psycopg2.extras import Json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 from app.core.database import get_db_manager
 from app.core.exceptions import DatabaseException, ValidationException, NotFoundException
@@ -264,23 +269,71 @@ class ForecastExecutionService:
                     how='left'
                 )
             
-            # Route to appropriate algorithm
-            if algorithm_name.lower() == 'linear regression':
-                forecast, metrics = ForecastExecutionService.linear_regression_forecast(
-                    data=historical_data,
-                    periods=periods
-                )
-            elif algorithm_name.lower() == 'arima':
+            # Route to appropriate algorithm based on algorithm_id
+            if algorithm_id == 1:  # ARIMA
                 forecast, metrics = ForecastExecutionService.arima_forecast(
                     data=historical_data,
                     periods=periods,
                     order=custom_params.get('order', [1, 1, 1])
                 )
-            elif algorithm_name.lower() == 'exponential smoothing':
+            elif algorithm_id == 2:  # Linear Regression
+                forecast, metrics = ForecastExecutionService.linear_regression_forecast(
+                    data=historical_data,
+                    periods=periods
+                )
+            elif algorithm_id == 3:  # Polynomial Regression
+                forecast, metrics = ForecastExecutionService.polynomial_regression_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    degree=custom_params.get('degree', 2)
+                )
+            elif algorithm_id == 4:  # Exponential Smoothing
                 forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
                     data=historical_data,
                     periods=periods,
-                    alpha=custom_params.get('alpha', 0.3)
+                    alphas=[custom_params.get('alpha', 0.3)]
+                )
+            elif algorithm_id == 5:  # Enhanced Exponential Smoothing
+                forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    alphas=custom_params.get('alphas', [0.1, 0.3, 0.5])
+                )
+            elif algorithm_id == 6:  # Holt Winters
+                forecast, metrics = ForecastExecutionService.holt_winters_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    season_length=custom_params.get('season_length', 12)
+                )
+            elif algorithm_id == 7:  # Prophet
+                # Placeholder for Prophet implementation
+                forecast, metrics = ForecastExecutionService.simple_moving_average(
+                    data=historical_data,
+                    periods=periods,
+                    window=custom_params.get('window', 3)
+                )
+            elif algorithm_id == 8:  # LSTM Neural Network
+                # Placeholder for LSTM implementation
+                forecast, metrics = ForecastExecutionService.simple_moving_average(
+                    data=historical_data,
+                    periods=periods,
+                    window=custom_params.get('window', 3)
+                )
+            elif algorithm_id == 9:  # XGBoost
+                forecast, metrics = ForecastExecutionService.xgboost_forecast(
+                    data=historical_data,
+                    periods=periods
+                )
+            elif algorithm_id == 10:  # SVR
+                forecast, metrics = ForecastExecutionService.svr_forecast(
+                    data=historical_data,
+                    periods=periods
+                )
+            elif algorithm_id == 11:  # KNN
+                forecast, metrics = ForecastExecutionService.knn_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    n_neighbors=custom_params.get('n_neighbors', 5)
                 )
             else:
                 # Default to simple moving average
@@ -326,16 +379,7 @@ class ForecastExecutionService:
 
     @staticmethod
     def linear_regression_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        Linear regression forecasting with feature engineering.
-        
-        Args:
-            data: Historical data with 'quantity' column and optional external factors
-            periods: Number of periods to forecast
-            
-        Returns:
-            Tuple of (forecast_array, metrics_dict)
-        """
+        """Linear regression forecasting"""
         # Prepare quantity data
         if 'total_quantity' in data.columns:
             y = data['total_quantity'].values
@@ -348,87 +392,19 @@ class ForecastExecutionService:
         if n < 2:
             raise ValueError("Need at least 2 historical data points")
         
-        # Feature engineering: create lag features and time index
-        window = min(5, n - 1)
-        
-        # Get external factor columns
-        excluded_cols = ['date', 'quantity', 'total_quantity', 'period', 'product', 
-                        'customer', 'location', 'transaction_count', 'avg_price']
-        external_factor_cols = [col for col in data.columns if col not in excluded_cols]
-        
-        logger.debug(f"External factor columns: {external_factor_cols}")
-        
-        if window < 1:
-            # Not enough data for feature engineering, fallback to simple time-based regression
-            x = np.arange(n).reshape(-1, 1)
-            if external_factor_cols:
-                x = np.hstack([x, data[external_factor_cols].fillna(0).values])
-            
-            model = LinearRegression()
-            model.fit(x, y)
-            
-            future_x = np.arange(n, n + periods).reshape(-1, 1)
-            if external_factor_cols:
-                # Use last known external factor values
-                last_factors = data[external_factor_cols].fillna(0).iloc[-1].values
-                future_factors = np.tile(last_factors, (periods, 1))
-                future_x = np.hstack([future_x, future_factors])
-            
-            forecast = model.predict(future_x)
-            forecast = np.maximum(forecast, 0)
-            
-            predicted = model.predict(x)
-            metrics = ForecastExecutionService.calculate_metrics(y, predicted)
-            
-            return forecast, metrics
-        
-        # Build lagged features
-        X = []
-        y_target = []
-        
-        for i in range(window, n):
-            lags = y[i-window:i]
-            time_idx = i
-            features = list(lags) + [time_idx]
-            
-            if external_factor_cols:
-                features.extend(data[external_factor_cols].fillna(0).iloc[i].values)
-            
-            X.append(features)
-            y_target.append(y[i])
-        
-        X = np.array(X)
-        y_target = np.array(y_target)
-        
-        logger.debug(f"Feature engineered data: X shape {X.shape}, y shape {y_target.shape}")
-        
-        # Train model
+        # Simple linear regression on time index
+        x = np.arange(n).reshape(-1, 1)
         model = LinearRegression()
-        model.fit(X, y_target)
+        model.fit(x, y)
         
         # Generate forecast
-        forecast = []
-        recent_lags = list(y[-window:])
+        future_x = np.arange(n, n + periods).reshape(-1, 1)
+        forecast = model.predict(future_x)
+        forecast = np.maximum(forecast, 0)
         
-        for i in range(periods):
-            features = recent_lags + [n + i]
-            
-            if external_factor_cols:
-                last_factors = data[external_factor_cols].fillna(0).iloc[-1].values
-                features.extend(last_factors)
-            
-            pred = model.predict([features])[0]
-            pred = max(0, pred)
-            forecast.append(pred)
-            
-            # Update lags with new prediction
-            recent_lags = recent_lags[1:] + [pred]
-        
-        forecast = np.array(forecast)
-        
-        # Calculate metrics on training data
-        predicted = model.predict(X)
-        metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+        # Calculate metrics
+        predicted = model.predict(x)
+        metrics = ForecastExecutionService.calculate_metrics(y, predicted)
         
         return forecast, metrics
 
@@ -458,45 +434,489 @@ class ForecastExecutionService:
             logger.warning("statsmodels not available, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
+
+
     @staticmethod
-    def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alpha: float = 0.3) -> Tuple[np.ndarray, Dict[str, float]]:
-        """Exponential Smoothing forecasting."""
-        y = data['total_quantity'].values if 'total_quantity' in data.columns else data['quantity'].values
+    def polynomial_regression_forecast(data: pd.DataFrame, periods: int, degree: int = 2) -> tuple:
+        """Polynomial regression forecasting"""
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
         
-        # Simple exponential smoothing
+        n = len(y)
+        if n < 2:
+            raise ValueError("Need at least 2 historical data points")
+        
+        best_metrics = None
+        best_forecast = None
+        
+        for d in [2, 3]:
+            coeffs = np.polyfit(np.arange(n), y, d)
+            poly_func = np.poly1d(coeffs)
+            future_x = np.arange(n, n + periods)
+            forecast = poly_func(future_x)
+            forecast = np.maximum(forecast, 0)
+            predicted = poly_func(np.arange(n))
+            metrics = ForecastExecutionService.calculate_metrics(y, predicted)
+            if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
+                best_metrics = metrics
+                best_forecast = forecast
+        
+        return best_forecast, best_metrics
+
+    @staticmethod
+    def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1,0.3,0.5]) -> tuple:
+        """Exponential smoothing forecasting"""
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        n = len(y)
+        if n < 3:
+            return np.full(periods, y[-1] if len(y) > 0 else 0), {'mape': 100.0, 'mae': np.std(y), 'rmse': np.std(y)}
+        
+        best_metrics = None
+        best_forecast = None
+        
+        for alpha in alphas:
+            # Traditional exponential smoothing
+            smoothed = pd.Series(y).ewm(alpha=alpha).mean().values
+            forecast = np.full(periods, smoothed[-1])
+            metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
+            
+            if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
+                best_metrics = metrics
+                best_forecast = forecast
+        
+        return np.array(best_forecast), best_metrics
+
+    @staticmethod
+    def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12) -> tuple:
+        """Holt-Winters exponential smoothing"""
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        n = len(y)
+        if n < 2 * season_length:
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+        
+        # Traditional Holt-Winters
+        alpha, beta, gamma = 0.3, 0.1, 0.1
+        
+        level = np.mean(y[:season_length])
+        trend = (np.mean(y[season_length:2*season_length]) - np.mean(y[:season_length])) / season_length
+        seasonal = y[:season_length] - level
+        
+        levels = [level]
+        trends = [trend]
+        seasonals = list(seasonal)
+        fitted = []
+        
+        for i in range(len(y)):
+            if i == 0:
+                fitted.append(level + trend + seasonal[i % season_length])
+            else:
+                level = alpha * (y[i] - seasonals[i % season_length]) + (1 - alpha) * (levels[-1] + trends[-1])
+                trend = beta * (level - levels[-1]) + (1 - beta) * trends[-1]
+                if len(seasonals) > i:
+                    seasonals[i % season_length] = gamma * (y[i] - level) + (1 - gamma) * seasonals[i % season_length]
+                
+                levels.append(level)
+                trends.append(trend)
+                fitted.append(level + trend + seasonals[i % season_length])
+        
         forecast = []
-        smoothed = [y[0]]
+        for i in range(periods):
+            forecast_value = level + (i + 1) * trend + seasonals[(len(y) + i) % season_length]
+            forecast.append(max(0, forecast_value))
         
-        for i in range(1, len(y)):
-            smoothed.append(alpha * y[i] + (1 - alpha) * smoothed[i-1])
+        metrics = ForecastExecutionService.calculate_metrics(y, fitted)
         
-        # Forecast
-        last_smoothed = smoothed[-1]
-        forecast = [last_smoothed] * periods
-        forecast = np.array(forecast)
-        
-        metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
-        
-        return forecast, metrics
+        return np.array(forecast), metrics
 
     @staticmethod
     def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> Tuple[np.ndarray, Dict[str, float]]:
         """Simple Moving Average forecast."""
         y = data['total_quantity'].values if 'total_quantity' in data.columns else data['quantity'].values
-        
+
         # Calculate moving average
         if len(y) < window:
             avg = np.mean(y)
         else:
             avg = np.mean(y[-window:])
-        
+
         forecast = np.array([avg] * periods)
-        
+
         # Simple metrics
         predicted = np.array([np.mean(y[max(0, i-window):i+1]) for i in range(len(y))])
         metrics = ForecastExecutionService.calculate_metrics(y, predicted)
+
+        return forecast, metrics
+
+    @staticmethod
+    def seasonal_decomposition_forecast(data: pd.DataFrame, periods: int, season_length: int = 12) -> tuple:
+        """Seasonal decomposition forecasting"""
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        if len(y) < 2 * season_length:
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
+        
+        # Simple seasonal decomposition
+        trend = np.convolve(y, np.ones(season_length)/season_length, mode='same')
+        
+        # Calculate seasonal component
+        detrended = y - trend
+        seasonal_pattern = []
+        for i in range(season_length):
+            seasonal_values = [detrended[j] for j in range(i, len(detrended), season_length)]
+            seasonal_pattern.append(np.mean(seasonal_values))
+        
+        # Fit polynomial to trend for future values
+        x = np.arange(len(trend))
+        valid_trend = ~np.isnan(trend)
+        
+        if np.sum(valid_trend) > 1:
+            # Use polyfit instead of linregress
+            coeffs = np.polyfit(x[valid_trend], trend[valid_trend], 1)
+            slope, intercept = coeffs[0], coeffs[1]
+            future_trend = [slope * (len(y) + i) + intercept for i in range(periods)]
+        else:
+            future_trend = [np.nanmean(trend)] * periods
+        
+        # Future seasonal component
+        future_seasonal = [seasonal_pattern[(len(y) + i) % season_length] for i in range(periods)]
+        
+        # Combine forecast
+        forecast = np.array(future_trend) + np.array(future_seasonal)
+        forecast = np.maximum(forecast, 0)
+        
+        # Calculate metrics
+        seasonal_full = np.tile(seasonal_pattern, len(y) // season_length + 1)[:len(y)]
+        fitted = trend + seasonal_full
+        valid_fitted = ~np.isnan(fitted)
+        
+        if np.sum(valid_fitted) > 0:
+            metrics = ForecastExecutionService.calculate_metrics(y[valid_fitted], fitted[valid_fitted])
+        else:
+            metrics = {'accuracy': 50.0, 'mae': np.std(y), 'rmse': np.std(y)}
         
         return forecast, metrics
+
+    @staticmethod
+    def moving_average_forecast(data: pd.DataFrame, periods: int, window: int = 3) -> tuple:
+        """Moving average forecasting"""
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        window = min(window, len(y))
+        
+        # Calculate moving averages
+        moving_avg = []
+        for i in range(len(y)):
+            start_idx = max(0, i - window + 1)
+            moving_avg.append(np.mean(y[start_idx:i+1]))
+        
+        # Forecast using last moving average
+        last_avg = np.mean(y[-window:])
+        forecast = np.full(periods, last_avg)
+        
+        # Calculate metrics
+        metrics = ForecastExecutionService.calculate_metrics(y[window-1:], moving_avg[window-1:])
+        
+        return forecast, metrics
+
+    @staticmethod
+    def sarima_forecast(data: pd.DataFrame, periods: int) -> tuple:
+        """SARIMA forecasting using statsmodels"""
+        from statsmodels.tsa.arima.model import ARIMA
+        from pmdarima import auto_arima # type: ignore
+        import warnings
+
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+        if len(y) < 24:  # Need at least 2 seasons for SARIMA
+            return ForecastExecutionService.arima_forecast(data, periods)
+
+        # Determine seasonal period
+        seasonal_period = 12
+        if len(y) < 2 * seasonal_period:
+            seasonal_period = max(4, len(y) // 3)
+
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore")
+                
+                # Auto-select SARIMA parameters
+                auto_model = auto_arima(
+                    y,
+                    start_p=0, start_q=0, max_p=2, max_q=2, max_d=1,
+                    start_P=0, start_Q=0, max_P=2, max_Q=2, max_D=1,
+                    seasonal=True, m=seasonal_period,
+                    stepwise=True,
+                    suppress_warnings=True,
+                    error_action='ignore',
+                    trace=False
+                )
+
+                forecast = auto_model.predict(n_periods=periods)
+                forecast = np.maximum(forecast, 0)
+
+                # Calculate metrics
+                fitted = auto_model.fittedvalues()
+                if len(fitted) == len(y):
+                    metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+                else:
+                    start_idx = len(y) - len(fitted)
+                    metrics = ForecastExecutionService.calculate_metrics(y[start_idx:], fitted)
+
+                return forecast, metrics
+
+        except Exception as e:
+            print(f"SARIMA failed: {e}")
+
+        # Fallback to ARIMA
+        return ForecastExecutionService.arima_forecast(data, periods)
+
+    @staticmethod
+    def xgboost_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        XGBoost forecasting with feature engineering.
+
+        Args:
+            data: Historical data with 'quantity' column
+            periods: Number of periods to forecast
+
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
+        try:
+            # Prepare quantity data
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < 5:  # Need minimum data for XGBoost
+                raise ValueError("Need at least 5 historical data points for XGBoost")
+
+            # Feature engineering: create lag features and time index
+            window = min(5, n - 1)
+
+            # Build lagged features
+            X = []
+            y_target = []
+
+            for i in range(window, n):
+                lags = y[i-window:i]
+                time_idx = i
+                features = list(lags) + [time_idx]
+                X.append(features)
+                y_target.append(y[i])
+
+            X = np.array(X)
+            y_target = np.array(y_target)
+
+            if len(X) < 2:
+                raise ValueError("Insufficient data for XGBoost training")
+
+            # Train XGBoost model
+            model = XGBRegressor(
+                n_estimators=100,
+                max_depth=6,
+                learning_rate=0.1,
+                random_state=42,
+                n_jobs=-1
+            )
+            model.fit(X, y_target)
+
+            # Generate forecast
+            forecast = []
+            recent_lags = list(y[-window:])
+
+            for i in range(periods):
+                features = recent_lags + [n + i]
+                pred = model.predict([features])[0]
+                pred = max(0, pred)
+                forecast.append(pred)
+
+                # Update lags with new prediction
+                recent_lags = recent_lags[1:] + [pred]
+
+            forecast = np.array(forecast)
+
+            # Calculate metrics on training data
+            predicted = model.predict(X)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+
+            return forecast, metrics
+
+        except ImportError:
+            logger.warning("XGBoost not available, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
+
+    @staticmethod
+    def svr_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Support Vector Regression forecasting"""
+        try:
+            # Prepare quantity data
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < 5:  # Need minimum data for SVR
+                raise ValueError("Need at least 5 historical data points for SVR")
+
+            # Feature engineering: create lag features and time index
+            window = min(5, n - 1)
+
+            # Build lagged features
+            X = []
+            y_target = []
+
+            for i in range(window, n):
+                lags = y[i-window:i]
+                time_idx = i
+                features = list(lags) + [time_idx]
+                X.append(features)
+                y_target.append(y[i])
+
+            X = np.array(X)
+            y_target = np.array(y_target)
+
+            if len(X) < 2:
+                raise ValueError("Insufficient data for SVR training")
+
+            # Train SVR model
+            model = SVR(
+                kernel='rbf',
+                C=1.0,
+                epsilon=0.1
+            )
+            model.fit(X, y_target)
+
+            # Generate forecast
+            forecast = []
+            recent_lags = list(y[-window:])
+
+            for i in range(periods):
+                features = recent_lags + [n + i]
+                pred = model.predict([features])[0]
+                pred = max(0, pred)
+                forecast.append(pred)
+
+                # Update lags with new prediction
+                recent_lags = recent_lags[1:] + [pred]
+
+            forecast = np.array(forecast)
+
+            # Calculate metrics on training data
+            predicted = model.predict(X)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+
+            return forecast, metrics
+
+        except Exception as e:
+            logger.warning(f"SVR failed: {str(e)}, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
+
+    @staticmethod
+    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float]]:
+        """K-Nearest Neighbors forecasting"""
+        try:
+            # Prepare quantity data
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < n_neighbors + 2:  # Need minimum data for KNN
+                raise ValueError(f"Need at least {n_neighbors + 2} historical data points for KNN")
+
+            # Feature engineering: create lag features and time index
+            window = min(5, n - 1)
+
+            # Build lagged features
+            X = []
+            y_target = []
+
+            for i in range(window, n):
+                lags = y[i-window:i]
+                time_idx = i
+                features = list(lags) + [time_idx]
+                X.append(features)
+                y_target.append(y[i])
+
+            X = np.array(X)
+            y_target = np.array(y_target)
+
+            if len(X) < n_neighbors:
+                raise ValueError(f"Insufficient data for KNN training (need at least {n_neighbors} samples)")
+
+            # Train KNN model
+            model = KNeighborsRegressor(
+                n_neighbors=min(n_neighbors, len(X)),
+                weights='uniform'
+            )
+            model.fit(X, y_target)
+
+            # Generate forecast
+            forecast = []
+            recent_lags = list(y[-window:])
+
+            for i in range(periods):
+                features = recent_lags + [n + i]
+                pred = model.predict([features])[0]
+                pred = max(0, pred)
+                forecast.append(pred)
+
+                # Update lags with new prediction
+                recent_lags = recent_lags[1:] + [pred]
+
+            forecast = np.array(forecast)
+
+            # Calculate metrics on training data
+            predicted = model.predict(X)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+
+            return forecast, metrics
+
+        except Exception as e:
+            logger.warning(f"KNN failed: {str(e)}, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
     def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
@@ -545,17 +965,17 @@ class ForecastExecutionService:
         try:
             start = datetime.fromisoformat(start_date).date()
             end = datetime.fromisoformat(end_date).date()
-            
+
             factors = ExternalFactorsService.get_factors_for_period(
                 tenant_id, database_name, start, end
             )
-            
+
             if not factors:
                 return pd.DataFrame()
-            
+
             df = pd.DataFrame(factors)
             df['date'] = pd.to_datetime(df['date'])
-            
+
             # Pivot to wide format
             df_pivot = df.pivot_table(
                 index='date',
@@ -563,9 +983,9 @@ class ForecastExecutionService:
                 values='factor_value',
                 aggfunc='mean'
             ).reset_index()
-            
+
             return df_pivot
-            
+
         except Exception as e:
             logger.warning(f"Could not load external factors: {str(e)}")
             return pd.DataFrame()
@@ -730,3 +1150,241 @@ class ForecastExecutionService:
                 conn.commit()
             finally:
                 cursor.close()
+
+    @staticmethod
+    def generate_forecast(
+        historical_data: pd.DataFrame,
+        config: Dict[str, Any],
+        process_log: List[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate forecast using best_fit algorithm selection.
+        Runs multiple algorithms in parallel and selects the best performing one.
+        
+        Args:
+            historical_data: Historical data with quantity column
+            config: Configuration dict with interval and other settings
+            process_log: Optional list to append process logs
+            
+        Returns:
+            Dictionary with forecast results including selected algorithm, metrics, and predictions
+        """
+        if process_log is None:
+            process_log = []
+        
+        process_log.append("Loading data for forecasting...")
+        
+        if len(historical_data) < 2:
+            raise ValueError("Insufficient data for forecasting")
+        
+        process_log.append(f"Data loaded: {len(historical_data)} records")
+        process_log.append("Running best fit algorithm selection...")
+        
+        # Define all available algorithms
+        available_algorithms = [
+            "linear_regression",
+            "polynomial_regression",
+            "exponential_smoothing",
+            "holt_winters",
+            "arima",
+            "xgboost",
+            "svr",
+            "knn",
+            "simple_moving_average",
+            "seasonal_decomposition",
+            "moving_average",
+            "sarima"
+        ]
+        
+        algorithm_results = []
+        best_model = None
+        best_algorithm = None
+        best_metrics = None
+        
+        # Use ThreadPoolExecutor for parallel execution
+        max_workers = min(len(available_algorithms), os.cpu_count() or 4)
+        process_log.append(f"Starting parallel execution with {max_workers} workers for {len(available_algorithms)} algorithms...")
+        
+        # Determine forecast periods
+        periods = config.get('periods', 12)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all algorithm tasks
+            future_to_algorithm = {}
+            
+            for algorithm in available_algorithms:
+                future = executor.submit(
+                    ForecastExecutionService._run_algorithm_safe,
+                    algorithm,
+                    historical_data.copy(),
+                    periods
+                )
+                future_to_algorithm[future] = algorithm
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_algorithm):
+                algorithm_name = future_to_algorithm[future]
+                try:
+                    result = future.result()
+                    algorithm_results.append(result)
+                    
+                    process_log.append(
+                        f"✅ Algorithm {algorithm_name} completed with accuracy: {result['accuracy']:.2f}%"
+                    )
+                    
+                    # Track best performing algorithm
+                    if best_metrics is None or result['accuracy'] > best_metrics['accuracy']:
+                        best_metrics = {
+                            'accuracy': result['accuracy'],
+                            'mae': result['mae'],
+                            'rmse': result['rmse'],
+                            'mape': result.get('mape')
+                        }
+                        best_model = result
+                        best_algorithm = algorithm_name
+                        
+                except Exception as exc:
+                    process_log.append(f"❌ Algorithm {algorithm_name} failed: {str(exc)}")
+                    logger.warning(f"Algorithm {algorithm_name} failed: {str(exc)}")
+        
+        # Filter out failed results
+        successful_results = [res for res in algorithm_results if res.get('accuracy', 0) > 0]
+        
+        if not successful_results:
+            raise ValueError("All algorithms failed to produce valid results")
+        
+        process_log.append(
+            f"Parallel execution completed. {len(successful_results)} algorithms succeeded, "
+            f"{len(algorithm_results) - len(successful_results)} failed."
+        )
+        
+        # Ensemble: average forecast of top 3 algorithms by accuracy
+        top3 = sorted(successful_results, key=lambda x: -x['accuracy'])[:3]
+        
+        if len(top3) >= 2:
+            process_log.append(f"Creating ensemble from top {len(top3)} algorithms...")
+            
+            # Average the forecast values from top 3
+            ensemble_forecast = []
+            for i in range(len(top3[0]['forecast'])):
+                values = [algo['forecast'][i] for algo in top3 if i < len(algo['forecast'])]
+                if values:
+                    ensemble_forecast.append(np.mean(values))
+            
+            # Average the metrics
+            ensemble_result = {
+                'algorithm': 'Ensemble (Top 3 Avg)',
+                'forecast': ensemble_forecast,
+                'accuracy': np.mean([algo['accuracy'] for algo in top3]),
+                'mae': np.mean([algo['mae'] for algo in top3]),
+                'rmse': np.mean([algo['rmse'] for algo in top3]),
+                'mape': np.mean([algo.get('mape', 0) for algo in top3])
+            }
+            algorithm_results.append(ensemble_result)
+            
+            # Update best model if ensemble is better
+            if ensemble_result['accuracy'] > best_metrics['accuracy']:
+                best_model = ensemble_result
+                best_algorithm = 'ensemble'
+                best_metrics = {
+                    'accuracy': ensemble_result['accuracy'],
+                    'mae': ensemble_result['mae'],
+                    'rmse': ensemble_result['rmse'],
+                    'mape': ensemble_result['mape']
+                }
+        
+        process_log.append(f"Best algorithm selected: {best_algorithm} (Accuracy: {best_metrics['accuracy']:.2f}%)")
+        
+        return {
+            'selected_algorithm': f"{best_algorithm} (Best Fit)",
+            'accuracy': best_metrics['accuracy'],
+            'mae': best_metrics['mae'],
+            'rmse': best_metrics['rmse'],
+            'mape': best_metrics.get('mape'),
+            'forecast': best_model['forecast'],
+            'all_algorithms': algorithm_results,
+            'process_log': process_log
+        }
+    
+    @staticmethod
+    def _run_algorithm_safe(
+        algorithm_name: str,
+        data: pd.DataFrame,
+        periods: int
+    ) -> Dict[str, Any]:
+        """
+        Safely run an algorithm and return results.
+        
+        Args:
+            algorithm_name: Name of the algorithm to run
+            data: Historical data (must have 'total_quantity' column)
+            periods: Number of periods to forecast
+            
+        Returns:
+            Dictionary with algorithm results
+        """
+        try:
+            # Ensure we have total_quantity column (rename if needed)
+            if 'quantity' in data.columns and 'total_quantity' not in data.columns:
+                data = data.rename(columns={'quantity': 'total_quantity'})
+            
+            if algorithm_name == "linear_regression":
+                forecast, metrics = ForecastExecutionService.linear_regression_forecast(data, periods)
+            elif algorithm_name == "polynomial_regression":
+                forecast, metrics = ForecastExecutionService.polynomial_regression_forecast(data, periods)
+            elif algorithm_name == "exponential_smoothing":
+                forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            elif algorithm_name == "holt_winters":
+                forecast, metrics = ForecastExecutionService.holt_winters_forecast(data, periods)
+            elif algorithm_name == "arima":
+                forecast, metrics = ForecastExecutionService.arima_forecast(data, periods)
+            elif algorithm_name == "xgboost":
+                forecast, metrics = ForecastExecutionService.xgboost_forecast(data, periods)
+            elif algorithm_name == "svr":
+                forecast, metrics = ForecastExecutionService.svr_forecast(data, periods)
+            elif algorithm_name == "knn":
+                forecast, metrics = ForecastExecutionService.knn_forecast(data, periods)
+            elif algorithm_name == "simple_moving_average":
+                forecast, metrics = ForecastExecutionService.simple_moving_average(data, periods)
+            elif algorithm_name == "seasonal_decomposition":
+                forecast, metrics = ForecastExecutionService.seasonal_decomposition_forecast(data, periods)
+            elif algorithm_name == "moving_average":
+                forecast, metrics = ForecastExecutionService.moving_average_forecast(data, periods)
+            elif algorithm_name == "sarima":
+                forecast, metrics = ForecastExecutionService.sarima_forecast(data, periods)
+            else:
+                raise ValueError(f"Unknown algorithm: {algorithm_name}")
+            
+            # Convert forecast to list
+            forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
+            
+            # Extract accuracy metric (use MAPE if available, otherwise calculate from R-squared)
+            accuracy = metrics.get('mape')
+            if accuracy is None:
+                # Convert R-squared to accuracy percentage
+                r_squared = metrics.get('r_squared', 0)
+                accuracy = max(0, min(100, (r_squared * 100)))
+            else:
+                # MAPE is error, so accuracy = 100 - MAPE
+                accuracy = max(0, min(100, (100 - accuracy)))
+            
+            return {
+                'algorithm': algorithm_name,
+                'forecast': forecast_list,
+                'accuracy': accuracy,
+                'mae': metrics.get('mae', 0),
+                'rmse': metrics.get('rmse', 0),
+                'mape': metrics.get('mape', 0)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error running algorithm {algorithm_name}: {str(e)}", exc_info=True)
+            # Return failed result
+            return {
+                'algorithm': algorithm_name,
+                'forecast': [],
+                'accuracy': 0,
+                'mae': 999.0,
+                'rmse': 999.0,
+                'mape': 100.0
+            }

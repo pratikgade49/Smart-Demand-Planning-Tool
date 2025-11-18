@@ -5,6 +5,9 @@ Endpoints for forecast run management and execution.
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Dict, Any, Optional
+from datetime import datetime
+import uuid
+from psycopg2.extras import Json
 from app.schemas.forecasting import (
     ForecastRunCreate,
     ForecastVersionCreate,
@@ -18,7 +21,7 @@ from app.core.forecasting_service import ForecastingService
 from app.core.forecast_version_service import ForecastVersionService
 from app.core.external_factors_service import ExternalFactorsService
 from app.core.responses import ResponseHandler
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, ValidationException
 from app.api.dependencies import get_current_tenant
 import logging
 
@@ -416,6 +419,250 @@ async def execute_forecast_run(
     except Exception as e:
         logger.error(f"Unexpected error executing forecast: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/runs/{forecast_run_id}/execute-best-fit", response_model=Dict[str, Any])
+async def execute_forecast_best_fit(
+    forecast_run_id: str,
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Execute a forecast run using Advanced AI/ML auto model (Best Fit algorithm selection).
+    
+    This will:
+    1. Fetch historical data based on filters
+    2. Run all available algorithms in parallel
+    3. Select the best performing algorithm
+    4. Create ensemble from top 3 algorithms
+    5. Store forecast results
+    6. Update run status
+    
+    **When to use**: Select this when "Advanced AI/ML auto model" is chosen in the UI.
+    
+    **Note**: This is an asynchronous operation that may take time for large datasets.
+    Automatically selects the best algorithm without manual configuration.
+    """
+    try:
+        from app.core.database import get_db_manager
+        
+        db_manager = get_db_manager()
+        
+        # Get forecast run details
+        result = ForecastingService.get_forecast_run(
+            tenant_data["tenant_id"],
+            tenant_data["database_name"],
+            forecast_run_id
+        )
+        
+        # Validate run status
+        if result['run_status'] not in ['Pending', 'Failed']:
+            raise ValidationException(
+                f"Cannot execute forecast run with status: {result['run_status']}"
+            )
+        
+        # Update status to In-Progress
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    UPDATE forecast_runs
+                    SET run_status = 'In-Progress',
+                        started_at = %s,
+                        updated_at = %s,
+                        updated_by = %s
+                    WHERE forecast_run_id = %s
+                """, (datetime.utcnow(), datetime.utcnow(), tenant_data["email"], forecast_run_id))
+                conn.commit()
+            finally:
+                cursor.close()
+        
+        logger.info(f"Starting best-fit forecast execution for run: {forecast_run_id}")
+        
+        # Prepare historical data
+        filters = result.get('forecast_filters', {})
+        aggregation_level = filters.get('aggregation_level', 'product')
+        interval = filters.get('interval', 'MONTHLY')
+        
+        # Get historical data
+        historical_data = ForecastingService.prepare_aggregated_data(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            aggregation_level=aggregation_level,
+            interval=interval,
+            filters=filters
+        )
+        
+        if historical_data.empty:
+            raise ValidationException("No historical data available for forecasting")
+        
+        logger.info(f"Prepared {len(historical_data)} historical records for best-fit analysis")
+        
+        # Calculate number of forecast periods
+        forecast_start_date = datetime.fromisoformat(result['forecast_start']).date()
+        forecast_end_date = datetime.fromisoformat(result['forecast_end']).date()
+        
+        periods = ForecastExecutionService._calculate_periods(
+            forecast_start_date,
+            forecast_end_date,
+            interval
+        )
+        
+        # Execute best-fit algorithm selection
+        process_log = []
+        forecast_result = ForecastExecutionService.generate_forecast(
+            historical_data=historical_data,
+            config={
+                'interval': interval,
+                'periods': periods
+            },
+            process_log=process_log
+        )
+        
+        # Generate forecast dates
+        forecast_dates = ForecastExecutionService._generate_forecast_dates(
+            forecast_start_date,
+            periods,
+            interval
+        )
+        
+        # Store results with a special algorithm_id for best-fit
+        # Use algorithm_id = 999 for best-fit results
+        best_fit_algorithm_id = 999
+        
+        # Create a best-fit algorithm mapping record
+        best_fit_mapping_id = str(uuid.uuid4())
+        
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                # First, create the forecast_algorithms_mapping record for best-fit
+                cursor.execute("""
+                    INSERT INTO forecast_algorithms_mapping
+                    (mapping_id, tenant_id, forecast_run_id, algorithm_id, algorithm_name, execution_order,
+                     custom_parameters, execution_status, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    best_fit_mapping_id,
+                    tenant_data["tenant_id"],
+                    forecast_run_id,
+                    best_fit_algorithm_id,
+                    'Best Fit',
+                    1,
+                    Json({
+                        'algorithms_evaluated': len(forecast_result['all_algorithms']),
+                        'selected_algorithm': forecast_result['selected_algorithm']
+                    }),
+                    'Completed',
+                    tenant_data["email"]
+                ))
+                
+                conn.commit()
+                
+            finally:
+                cursor.close()
+        
+        # Now store the forecast results
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                for forecast_date, forecast_value in zip(forecast_dates, forecast_result['forecast']):
+                    result_id = str(uuid.uuid4())
+                    forecast_value_float = float(forecast_value)
+                    
+                    # Validate bounds
+                    max_forecast_value = 999999.9999
+                    if not (0 <= forecast_value_float <= max_forecast_value):
+                        forecast_value_float = min(max_forecast_value, max(0, forecast_value_float))
+                    
+                    forecast_value_float = round(forecast_value_float, 4)
+                    
+                    accuracy_metric = round(forecast_result['accuracy'], 2) if forecast_result['accuracy'] else None
+                    
+                    cursor.execute("""
+                        INSERT INTO forecast_results
+                        (result_id, tenant_id, forecast_run_id, version_id, mapping_id,
+                         algorithm_id, forecast_date, forecast_quantity, accuracy_metric,
+                         metric_type, metadata, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        result_id,
+                        tenant_data["tenant_id"],
+                        forecast_run_id,
+                        result.get('version_id'),
+                        best_fit_mapping_id,  # Use the mapping_id from forecast_algorithms_mapping
+                        best_fit_algorithm_id,
+                        forecast_date,
+                        forecast_value_float,
+                        accuracy_metric,
+                        'Accuracy',
+                        Json({
+                            'selected_algorithm': forecast_result['selected_algorithm'],
+                            'mae': forecast_result['mae'],
+                            'rmse': forecast_result['rmse'],
+                            'mape': forecast_result['mape'],
+                            'all_algorithms': len(forecast_result['all_algorithms'])
+                        }),
+                        tenant_data["email"]
+                    ))
+                
+                conn.commit()
+                
+            finally:
+                cursor.close()
+        
+        # Update forecast run completion
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    UPDATE forecast_runs
+                    SET run_status = 'Completed',
+                        run_progress = 100,
+                        total_records = %s,
+                        processed_records = %s,
+                        failed_records = 0,
+                        completed_at = %s,
+                        updated_at = %s,
+                        updated_by = %s
+                    WHERE forecast_run_id = %s
+                """, (
+                    len(forecast_dates),
+                    len(forecast_dates),
+                    datetime.utcnow(),
+                    datetime.utcnow(),
+                    tenant_data["email"],
+                    forecast_run_id
+                ))
+                conn.commit()
+            finally:
+                cursor.close()
+        
+        logger.info(f"Best-fit forecast run completed: {forecast_run_id}")
+        
+        return ResponseHandler.success(data={
+            'forecast_run_id': forecast_run_id,
+            'status': 'Completed',
+            'selected_algorithm': forecast_result['selected_algorithm'],
+            'accuracy': forecast_result['accuracy'],
+            'mae': forecast_result['mae'],
+            'rmse': forecast_result['rmse'],
+            'mape': forecast_result['mape'],
+            'total_records': len(forecast_dates),
+            'processed_records': len(forecast_dates),
+            'failed_records': 0,
+            'algorithms_evaluated': len(forecast_result['all_algorithms']),
+            'process_log': process_log
+        })
+        
+    except ValidationException as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except AppException as e:
+        logger.error(f"App error: {str(e)}")
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error executing best-fit forecast: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.get("/runs/{forecast_run_id}/results", response_model=Dict[str, Any])
@@ -912,246 +1159,6 @@ async def get_available_master_data_values(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
-# Add this to app/api/routes/forecasting_routes.py
-
-# Add this to app/api/routes/forecasting_routes.py
-
-@router.post("/diagnose-data", response_model=Dict[str, Any])
-async def diagnose_product_data(
-    product_code: str = Query(..., description="Product code to diagnose"),
-    tenant_data: Dict = Depends(get_current_tenant)
-):
-    """
-    Deep diagnostic of product data to identify issues.
-    
-    Checks:
-    - Raw sales_data records
-    - Timezone issues
-    - Duplicate detection
-    - Date range verification
-    - Transaction counting
-    """
-    try:
-        from app.core.database import get_db_manager
-        db_manager = get_db_manager()
-        
-        diagnostics = {}
-        
-        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
-            cursor = conn.cursor()
-            try:
-                # 1. Check master_data for this product
-                cursor.execute("""
-                    SELECT master_id, product, created_at
-                    FROM master_data
-                    WHERE tenant_id = %s AND product = %s
-                    LIMIT 10
-                """, (tenant_data["tenant_id"], product_code))
-                
-                master_records = cursor.fetchall()
-                diagnostics["master_data"] = {
-                    "found": len(master_records) > 0,
-                    "count": len(master_records),
-                    "records": [
-                        {
-                            "master_id": str(r[0]),
-                            "product": r[1],
-                            "created_at": r[2].isoformat() if r[2] else None
-                        } for r in master_records
-                    ]
-                }
-                
-                if not master_records:
-                    return ResponseHandler.success(data={
-                        "error": f"Product '{product_code}' not found in master_data",
-                        "diagnostics": diagnostics
-                    })
-                
-                master_ids = [r[0] for r in master_records]  # Keep as UUID objects
-                
-                # 2. Check raw sales_data records
-                cursor.execute("""
-                    SELECT 
-                        sales_id,
-                        master_id,
-                        date,
-                        quantity,
-                        created_at
-                    FROM sales_data
-                    WHERE tenant_id = %s 
-                    AND master_id = ANY(%s::uuid[])
-                    ORDER BY date
-                    LIMIT 100
-                """, (tenant_data["tenant_id"], master_ids))
-                
-                sales_records = cursor.fetchall()
-                diagnostics["raw_sales_data"] = {
-                    "total_records": len(sales_records),
-                    "sample_records": [
-                        {
-                            "sales_id": str(r[0]),
-                            "master_id": str(r[1]),
-                            "date": r[2].isoformat() if r[2] else None,
-                            "quantity": float(r[3]),
-                            "created_at": r[4].isoformat() if r[4] else None
-                        } for r in sales_records[:20]
-                    ]
-                }
-                
-                # 3. Check for duplicates
-                cursor.execute("""
-                    SELECT 
-                        date,
-                        COUNT(*) as record_count,
-                        COUNT(DISTINCT sales_id) as unique_sales_ids,
-                        SUM(quantity) as total_quantity
-                    FROM sales_data
-                    WHERE tenant_id = %s 
-                    AND master_id = ANY(%s::uuid[])
-                    GROUP BY date
-                    HAVING COUNT(*) > 1
-                    ORDER BY date
-                    LIMIT 20
-                """, (tenant_data["tenant_id"], master_ids))
-                
-                duplicate_dates = cursor.fetchall()
-                diagnostics["potential_duplicates"] = {
-                    "dates_with_multiple_records": len(duplicate_dates),
-                    "details": [
-                        {
-                            "date": r[0].isoformat() if r[0] else None,
-                            "record_count": r[1],
-                            "unique_sales_ids": r[2],
-                            "total_quantity": float(r[3])
-                        } for r in duplicate_dates
-                    ]
-                }
-                
-                # 4. Monthly aggregation (raw - no timezone conversion)
-                cursor.execute("""
-                    SELECT 
-                        date,
-                        COUNT(*) as transaction_count,
-                        COUNT(DISTINCT sales_id) as unique_transactions,
-                        SUM(quantity) as total_quantity,
-                        MIN(quantity) as min_quantity,
-                        MAX(quantity) as max_quantity
-                    FROM sales_data
-                    WHERE tenant_id = %s 
-                    AND master_id = ANY(%s::uuid[])
-                    GROUP BY date
-                    ORDER BY date
-                """, (tenant_data["tenant_id"], master_ids))
-                
-                daily_data = cursor.fetchall()
-                diagnostics["daily_aggregation"] = {
-                    "total_days": len(daily_data),
-                    "sample": [
-                        {
-                            "date": r[0].isoformat() if r[0] else None,
-                            "transaction_count": r[1],
-                            "unique_transactions": r[2],
-                            "total_quantity": float(r[3]),
-                            "min_quantity": float(r[4]),
-                            "max_quantity": float(r[5])
-                        } for r in daily_data[:30]
-                    ]
-                }
-                
-                # 5. Check timezone storage
-                cursor.execute("""
-                    SELECT 
-                        date,
-                        date::timestamp AT TIME ZONE 'UTC' as utc_timestamp,
-                        date::timestamp AT TIME ZONE 'Asia/Kolkata' as ist_timestamp
-                    FROM sales_data
-                    WHERE tenant_id = %s 
-                    AND master_id = ANY(%s::uuid[])
-                    ORDER BY date
-                    LIMIT 10
-                """, (tenant_data["tenant_id"], master_ids))
-                
-                timezone_check = cursor.fetchall()
-                diagnostics["timezone_check"] = {
-                    "note": "DATE type doesn't store timezone, check if dates are correct",
-                    "sample": [
-                        {
-                            "stored_date": r[0].isoformat() if r[0] else None,
-                            "as_utc": r[1].isoformat() if r[1] else None,
-                            "as_ist": r[2].isoformat() if r[2] else None
-                        } for r in timezone_check
-                    ]
-                }
-                
-                # 6. Check DATE_TRUNC behavior
-                cursor.execute("""
-                    SELECT 
-                        DATE_TRUNC('month', s.date) as truncated_month,
-                        s.date as original_date,
-                        COUNT(*) as count_per_date
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    GROUP BY DATE_TRUNC('month', s.date), s.date
-                    ORDER BY truncated_month, s.date
-                    LIMIT 100
-                """, (tenant_data["tenant_id"], product_code))
-                
-                trunc_results = cursor.fetchall()
-                diagnostics["date_trunc_behavior"] = {
-                    "note": "Shows how DATE_TRUNC groups your dates",
-                    "sample": [
-                        {
-                            "truncated_month": r[0].isoformat() if r[0] else None,
-                            "original_date": r[1].isoformat() if r[1] else None,
-                            "count": r[2]
-                        } for r in trunc_results[:30]
-                    ]
-                }
-                
-                # 7. Summary statistics
-                cursor.execute("""
-                    SELECT 
-                        COUNT(*) as total_records,
-                        COUNT(DISTINCT sales_id) as unique_sales_ids,
-                        COUNT(DISTINCT date) as unique_dates,
-                        MIN(date) as earliest_date,
-                        MAX(date) as latest_date,
-                        SUM(quantity) as total_quantity,
-                        AVG(quantity) as avg_quantity
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                """, (tenant_data["tenant_id"], product_code))
-                
-                summary = cursor.fetchone()
-                diagnostics["summary"] = {
-                    "total_records": summary[0],
-                    "unique_sales_ids": summary[1],
-                    "unique_dates": summary[2],
-                    "earliest_date": summary[3].isoformat() if summary[3] else None,
-                    "latest_date": summary[4].isoformat() if summary[4] else None,
-                    "total_quantity": float(summary[5]) if summary[5] else 0,
-                    "avg_quantity": float(summary[6]) if summary[6] else 0,
-                    "data_quality_flags": {
-                        "has_duplicates": summary[0] > summary[1],
-                        "suspicious_if_true": summary[0] != summary[1]
-                    }
-                }
-                
-                return ResponseHandler.success(data=diagnostics)
-                
-            finally:
-                cursor.close()
-                
-    except Exception as e:
-        logger.error(f"Diagnostic failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/verify-aggregation", response_model=Dict[str, Any])
 async def verify_aggregation_logic(
     product_code: str = Query(...),
@@ -1213,340 +1220,6 @@ async def verify_aggregation_logic(
             raw_df['period'] = raw_df['date'].dt.to_period('Q').dt.to_timestamp()
         elif interval == "YEARLY":
             raw_df['period'] = raw_df['date'].dt.to_period('Y').dt.to_timestamp()
-        else:
-            raw_df['period'] = raw_df['date']
-        
-        manual_agg = raw_df.groupby('period').agg({
-            'quantity': 'sum',
-            'sales_id': 'nunique'
-        }).reset_index()
-        manual_agg.columns = ['period', 'total_quantity', 'unique_transactions']
-        manual_agg['period'] = manual_agg['period'].astype(str)
-        
-        return ResponseHandler.success(data={
-            "product": product_code,
-            "interval": interval,
-            "raw_data_sample": raw_df.head(20).to_dict('records'),
-            "raw_data_total_records": len(raw_df),
-            "current_aggregation": {
-                "method": "SQL DATE_TRUNC",
-                "records": len(current_result),
-                "data": current_result.head(20).to_dict('records') if not current_result.empty else []
-            },
-            "manual_aggregation": {
-                "method": "Python Pandas",
-                "records": len(manual_agg),
-                "data": manual_agg.to_dict('records')
-            },
-            "comparison": {
-                "match": len(current_result) == len(manual_agg),
-                "current_total_qty": float(current_result['total_quantity'].sum()) if not current_result.empty else 0,
-                "manual_total_qty": float(manual_agg['total_quantity'].sum())
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Verification failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Add this simpler version to app/api/routes/forecasting_routes.py
-
-@router.get("/simple-diagnose", response_model=Dict[str, Any])
-async def simple_diagnose_product(
-    product_code: str = Query(..., description="Product code to diagnose"),
-    tenant_data: Dict = Depends(get_current_tenant)
-):
-    """
-    Simple diagnostic - just shows raw data for a product.
-    """
-    try:
-        from app.core.database import get_db_manager
-        db_manager = get_db_manager()
-        
-        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
-            cursor = conn.cursor()
-            try:
-                # 1. Get sample sales data directly
-                cursor.execute("""
-                    SELECT 
-                        s.sales_id,
-                        s.date,
-                        s.quantity,
-                        s.uom,
-                        s.unit_price,
-                        m.product,
-                        s.created_at
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    ORDER BY s.date
-                    LIMIT 100
-                """, (tenant_data["tenant_id"], product_code))
-                
-                sales_data = []
-                for row in cursor.fetchall():
-                    sales_data.append({
-                        "sales_id": str(row[0]),
-                        "date": row[1].isoformat() if row[1] else None,
-                        "quantity": float(row[2]) if row[2] else 0,
-                        "uom": row[3],
-                        "unit_price": float(row[4]) if row[4] else None,
-                        "product": row[5],
-                        "created_at": row[6].isoformat() if row[6] else None
-                    })
-                
-                # 2. Get summary stats
-                cursor.execute("""
-                    SELECT 
-                        COUNT(*) as total_records,
-                        COUNT(DISTINCT s.sales_id) as unique_sales,
-                        COUNT(DISTINCT s.date) as unique_dates,
-                        MIN(s.date) as earliest_date,
-                        MAX(s.date) as latest_date,
-                        SUM(s.quantity) as total_quantity
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                """, (tenant_data["tenant_id"], product_code))
-                
-                stats = cursor.fetchone()
-                
-                # 3. Check for date duplicates
-                cursor.execute("""
-                    SELECT 
-                        s.date,
-                        COUNT(*) as records_per_date
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    GROUP BY s.date
-                    ORDER BY records_per_date DESC, s.date
-                    LIMIT 20
-                """, (tenant_data["tenant_id"], product_code))
-                
-                date_counts = []
-                for row in cursor.fetchall():
-                    date_counts.append({
-                        "date": row[0].isoformat() if row[0] else None,
-                        "records_count": row[1]
-                    })
-                
-                # 4. Monthly aggregation
-                cursor.execute("""
-                    SELECT 
-                        DATE_TRUNC('month', s.date)::date as month,
-                        COUNT(*) as total_records,
-                        COUNT(DISTINCT s.sales_id) as unique_sales,
-                        SUM(s.quantity) as total_quantity
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    GROUP BY DATE_TRUNC('month', s.date)::date
-                    ORDER BY month
-                """, (tenant_data["tenant_id"], product_code))
-                
-                monthly_data = []
-                for row in cursor.fetchall():
-                    monthly_data.append({
-                        "month": row[0].isoformat() if row[0] else None,
-                        "total_records": row[1],
-                        "unique_sales": row[2],
-                        "total_quantity": float(row[3]) if row[3] else 0
-                    })
-                
-                return ResponseHandler.success(data={
-                    "product": product_code,
-                    "summary": {
-                        "total_records": stats[0],
-                        "unique_sales_ids": stats[1],
-                        "unique_dates": stats[2],
-                        "earliest_date": stats[3].isoformat() if stats[3] else None,
-                        "latest_date": stats[4].isoformat() if stats[4] else None,
-                        "total_quantity": float(stats[5]) if stats[5] else 0,
-                        "data_quality_flag": "⚠️ DUPLICATES!" if stats[0] > stats[1] else "✅ OK"
-                    },
-                    "sample_sales_data": sales_data[:20],
-                    "dates_with_multiple_records": date_counts,
-                    "monthly_aggregation": monthly_data,
-                    "analysis": {
-                        "has_duplicate_sales_ids": stats[0] > stats[1],
-                        "records_per_date_avg": round(stats[0] / stats[2], 2) if stats[2] > 0 else 0,
-                        "note": "If records_per_date_avg > 1, you have multiple transactions per date (normal for daily data)"
-                    }
-                })
-                
-            finally:
-                cursor.close()
-                
-    except Exception as e:
-        logger.error(f"Simple diagnostic failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/check-56-transactions", response_model=Dict[str, Any])
-async def check_56_transaction_mystery(
-    product_code: str = Query(..., description="Product code"),
-    tenant_data: Dict = Depends(get_current_tenant)
-):
-    """
-    Specifically investigate why every month shows 56 transactions.
-    """
-    try:
-        from app.core.database import get_db_manager
-        db_manager = get_db_manager()
-        
-        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
-            cursor = conn.cursor()
-            try:
-                # Check if there are exactly 56 unique dates
-                cursor.execute("""
-                    SELECT 
-                        COUNT(DISTINCT s.date) as unique_dates,
-                        MIN(s.date) as min_date,
-                        MAX(s.date) as max_date
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                """, (tenant_data["tenant_id"], product_code))
-                
-                date_info = cursor.fetchone()
-                
-                # Get monthly breakdown
-                cursor.execute("""
-                    SELECT 
-                        DATE_TRUNC('month', s.date)::date as month,
-                        COUNT(DISTINCT s.date) as unique_dates_in_month,
-                        COUNT(*) as total_records,
-                        ARRAY_AGG(DISTINCT s.date ORDER BY s.date) as all_dates
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    GROUP BY DATE_TRUNC('month', s.date)::date
-                    ORDER BY month
-                """, (tenant_data["tenant_id"], product_code))
-                
-                monthly_breakdown = []
-                for row in cursor.fetchall():
-                    monthly_breakdown.append({
-                        "month": row[0].isoformat() if row[0] else None,
-                        "unique_dates": row[1],
-                        "total_records": row[2],
-                        "sample_dates": [d.isoformat() for d in row[3][:5]] if row[3] else []
-                    })
-                
-                # Check if same sales_id appears multiple times
-                cursor.execute("""
-                    SELECT 
-                        s.sales_id,
-                        COUNT(*) as occurrence_count,
-                        ARRAY_AGG(s.date ORDER BY s.date) as dates
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    GROUP BY s.sales_id
-                    HAVING COUNT(*) > 1
-                    LIMIT 10
-                """, (tenant_data["tenant_id"], product_code))
-                
-                duplicate_sales_ids = []
-                for row in cursor.fetchall():
-                    duplicate_sales_ids.append({
-                        "sales_id": str(row[0]),
-                        "appears_times": row[1],
-                        "dates": [d.isoformat() for d in row[2]] if row[2] else []
-                    })
-                
-                return ResponseHandler.success(data={
-                    "product": product_code,
-                    "total_unique_dates": date_info[0],
-                    "date_range": {
-                        "start": date_info[1].isoformat() if date_info[1] else None,
-                        "end": date_info[2].isoformat() if date_info[2] else None
-                    },
-                    "monthly_breakdown": monthly_breakdown,
-                    "duplicate_sales_ids_found": len(duplicate_sales_ids),
-                    "duplicate_examples": duplicate_sales_ids,
-                    "mystery_analysis": {
-                        "is_56_related_to_dates": date_info[0] == 56,
-                        "explanation": "If unique_dates_in_month is always 56, you likely uploaded 56 dates worth of data for each month period"
-                    }
-                })
-                
-            finally:
-                cursor.close()
-                
-    except Exception as e:
-        logger.error(f"Check 56 failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/verify-aggregation", response_model=Dict[str, Any])
-async def verify_aggregation_logic(
-    product_code: str = Query(...),
-    interval: str = Query("MONTHLY", pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$"),
-    tenant_data: Dict = Depends(get_current_tenant)
-):
-    """
-    Verify that aggregation logic is working correctly.
-    Shows both raw query and Python pandas aggregation side-by-side.
-    """
-    try:
-        from app.core.database import get_db_manager
-        from app.core.forecasting_service import ForecastingService
-        import pandas as pd
-        
-        db_manager = get_db_manager()
-        
-        # Method 1: Current aggregation logic
-        current_result = ForecastingService.prepare_aggregated_data(
-            tenant_id=tenant_data["tenant_id"],
-            database_name=tenant_data["database_name"],
-            aggregation_level="product",
-            interval=interval,
-            filters={"product": product_code}
-        )
-        
-        # Method 2: Raw data without aggregation
-        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    SELECT 
-                        s.date,
-                        m.product,
-                        s.quantity,
-                        s.sales_id
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s 
-                    AND m.product = %s
-                    ORDER BY s.date
-                """, (tenant_data["tenant_id"], product_code))
-                
-                raw_data = cursor.fetchall()
-                
-            finally:
-                cursor.close()
-        
-        # Convert to DataFrame
-        raw_df = pd.DataFrame(raw_data, columns=['date', 'product', 'quantity', 'sales_id'])
-        raw_df['date'] = pd.to_datetime(raw_df['date'])
-        
-        # Manual aggregation using pandas
-        if interval == "MONTHLY":
-            raw_df['period'] = raw_df['date'].dt.to_period('M')
-        elif interval == "WEEKLY":
-            raw_df['period'] = raw_df['date'].dt.to_period('W')
-        elif interval == "QUARTERLY":
-            raw_df['period'] = raw_df['date'].dt.to_period('Q')
-        elif interval == "YEARLY":
-            raw_df['period'] = raw_df['date'].dt.to_period('Y')
         else:
             raw_df['period'] = raw_df['date']
         

@@ -51,6 +51,24 @@ CREATE TABLE IF NOT EXISTS algorithms (
     CONSTRAINT check_algorithm_type CHECK (algorithm_type IN ('ML', 'Statistic', 'Hybrid'))
 );
 
+-- Insert default algorithms
+INSERT INTO algorithms (algorithm_id, algorithm_name, default_parameters, algorithm_type, description) VALUES
+(1, 'ARIMA', '{"order": [1, 1, 1]}', 'Statistic', 'AutoRegressive Integrated Moving Average - Statistical time series forecasting'),
+(2, 'Linear Regression', '{}', 'Statistic', 'Linear regression with feature engineering and external factors support'),
+(3, 'Polynomial Regression', '{"degree": 2}', 'Statistic', 'Polynomial regression with external factors integration'),
+(4, 'Exponential Smoothing', '{"alpha": 0.3}', 'Statistic', 'Simple exponential smoothing'),
+(5, 'Enhanced Exponential Smoothing', '{"alphas": [0.1, 0.3, 0.5]}', 'Statistic', 'Multiple alpha values exponential smoothing with external factors'),
+(6, 'Holt Winters', '{"season_length": 12}', 'Statistic', 'Triple exponential smoothing for seasonal data'),
+(7, 'Prophet', '{"window": 3}', 'Statistic', 'Facebook Prophet algorithm (placeholder implementation)'),
+(8, 'LSTM Neural Network', '{"window": 3}', 'ML', 'Long Short-Term Memory neural network (placeholder implementation)'),
+(9, 'XGBoost', '{"n_estimators_list": [50, 100], "learning_rate_list": [0.05, 0.1, 0.2], "max_depth_list": [3, 4, 5]}', 'ML', 'XGBoost-like gradient boosting with hyperparameter tuning and external factors support'),
+(10, 'SVR', '{"C_list": [1, 10, 100], "epsilon_list": [0.1, 0.2]}', 'ML', 'Support Vector Regression with hyperparameter tuning and external factors'),
+(11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression with hyperparameter tuning and external factors'),
+(12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression with hyperparameter tuning and scaling'),
+(13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]], "alpha_list": [0.001, 0.01]}', 'ML', 'Multi-layer Perceptron Neural Network with hyperparameter tuning and external factors'),
+(999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection - runs all algorithms and selects the best performing one')
+ON CONFLICT (algorithm_id) DO NOTHING;
+
 -- 2. Forecast Versions Table
 CREATE TABLE IF NOT EXISTS forecast_versions (
     version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

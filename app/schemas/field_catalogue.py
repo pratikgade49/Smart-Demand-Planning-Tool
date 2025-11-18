@@ -25,6 +25,7 @@ class FieldCatalogueItemRequest(BaseModel):
     field_length: Optional[int] = Field(None, ge=1, le=1000, description="Field length for Char type")
     default_value: Optional[str] = Field(None, max_length=255, description="Default value")
     is_characteristic: bool = Field(..., description="Whether this is a characteristic field")
+    is_unique_key: bool = Field(False, description="Whether this field is part of the unique key")
     parent_field_name: Optional[str] = Field(None, description="Parent field name if this is a characteristic")
     
     @field_validator("field_name")

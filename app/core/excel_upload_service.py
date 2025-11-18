@@ -107,10 +107,12 @@ class ExcelUploadService:
         master_data_mapping = {}
         sales_data_mapping = {}
 
-        catalogue_fields_lower = {
-            field['field_name'].lower().strip(): field['field_name'] 
-            for field in field_catalogue.get('fields', [])
-        }
+        # Normalize catalogue field names: convert spaces to underscores and lowercase
+        catalogue_fields_lower = {}
+        for field in field_catalogue.get('fields', []):
+            # Normalize: lowercase, replace spaces with underscores
+            normalized_key = field['field_name'].lower().strip().replace(' ', '_')
+            catalogue_fields_lower[normalized_key] = field['field_name']
 
         logger.info(f"Excel columns: {list(df.columns)}")
         logger.info(f"Catalogue fields: {list(catalogue_fields_lower.values())}")
@@ -146,10 +148,11 @@ class ExcelUploadService:
         skipped_columns = []
         for excel_col in df.columns:
             if excel_col not in sales_columns_found:
-                excel_col_lower = excel_col.lower().strip()
+                # Normalize Excel column: lowercase, replace spaces with underscores
+                excel_col_normalized = excel_col.lower().strip().replace(' ', '_')
                 
-                if excel_col_lower in catalogue_fields_lower:
-                    catalogue_field_name = catalogue_fields_lower[excel_col_lower]
+                if excel_col_normalized in catalogue_fields_lower:
+                    catalogue_field_name = catalogue_fields_lower[excel_col_normalized]
                     master_data_mapping[catalogue_field_name] = excel_col
                     logger.debug(f"Mapped master field '{catalogue_field_name}' to Excel column '{excel_col}'")
                 else:
@@ -320,9 +323,9 @@ class ExcelUploadService:
             row_dict, master_data_mapping, field_catalogue
         )
 
-        # Find or create master data record
+        # Find or create master data record (using only unique key fields)
         master_id = ExcelUploadService.find_or_create_master_record(
-            cursor, tenant_id, master_data, user_email
+            cursor, tenant_id, master_data, user_email, field_catalogue
         )
 
         # Extract sales data
@@ -408,7 +411,7 @@ class ExcelUploadService:
                     raise ValidationException("Quantity cannot be empty")
                 quantity = float(qty_value)
                 if quantity < 0:
-                    raise ValidationException("Quantity must be greater than or equal to 0")
+                    raise ValidationException("Quantity cannot be negative")
                 sales_data['quantity'] = quantity
             except (ValueError, TypeError) as e:
                 raise ValidationException(f"Invalid quantity: {str(e)}")
@@ -443,66 +446,91 @@ class ExcelUploadService:
         cursor,
         tenant_id: str,
         master_data: Dict[str, Any],
-        user_email: str
+        user_email: str,
+        field_catalogue: Dict[str, Any]
     ) -> str:
-        """Find existing master record or create new one with logging."""
+        """Find existing master record or create new one based on unique key fields only."""
+        
+        # Identify unique key fields from catalogue
+        unique_key_fields = set()
+        fields_list = field_catalogue.get('fields', [])
+        
+        logger.debug(f"Field catalogue has {len(fields_list)} fields")
+        
+        for field in fields_list:
+            field_name = field.get('field_name')
+            is_unique = field.get('is_unique_key')
+            logger.debug(f"Field: {field_name}, is_unique_key: {is_unique}, field_data: {field}")
+            if is_unique:
+                unique_key_fields.add(field_name)
+        
+        # Build WHERE clause using ONLY unique key fields
         where_conditions = []
         values = []
-
-        for field, value in master_data.items():
+        unique_key_count = 0
+        
+        # FIXED: Iterate through unique_key_fields to ensure ALL are included
+        for field in unique_key_fields:
+            value = master_data.get(field)  # Get value from master_data or None
             if value is None or value == '':
                 where_conditions.append(f'"{field}" IS NULL')
             else:
                 where_conditions.append(f'"{field}" = %s')
                 values.append(value)
-
+            unique_key_count += 1
+        
+        # Add tenant_id condition
         where_conditions.append('tenant_id = %s')
         values.append(tenant_id)
-
-        if not where_conditions:
+        
+        # If no unique key fields configured, log warning and create new record
+        if unique_key_count == 0:
+            logger.warning("No unique key fields configured in field catalogue")
             master_id = str(uuid.uuid4())
-            cursor.execute("""
-                INSERT INTO master_data (master_id, tenant_id, created_at, created_by)
-                VALUES (%s, %s, %s, %s)
-                RETURNING master_id
-            """, (master_id, tenant_id, datetime.utcnow(), user_email))
-            logger.debug(f"Created minimal master record: {master_id}")
-            return cursor.fetchone()[0]
-
+            columns = ['master_id', 'tenant_id', 'created_at', 'created_by']
+            insert_values = [master_id, tenant_id, datetime.utcnow(), user_email]
+            
+            for field, value in master_data.items():
+                columns.append(f'"{field}"')
+                insert_values.append(value)
+            
+            columns_str = ', '.join(columns)
+            placeholders = ', '.join(['%s'] * len(insert_values))
+            insert_query = f"INSERT INTO master_data ({columns_str}) VALUES ({placeholders}) RETURNING master_id"
+            cursor.execute(insert_query, insert_values)
+            new_master_id = cursor.fetchone()[0]
+            logger.debug(f"Created master record (no unique keys configured): {new_master_id}")
+            return new_master_id
+        
+        # Search for existing master record using unique key fields only
         where_clause = ' AND '.join(where_conditions)
         query = f"SELECT master_id FROM master_data WHERE {where_clause}"
         
-        logger.debug(f"Searching for master record")
+        logger.debug(f"Searching for master record with unique keys: {list(unique_key_fields)}")
         cursor.execute(query, values)
         result = cursor.fetchone()
-
+        
         if result:
             logger.debug(f"Found existing master record: {result[0]}")
             return result[0]
-
-        # Create new master record
+        
+        # Create new master record with all master_data (including characteristics)
         master_id = str(uuid.uuid4())
         columns = ['master_id', 'tenant_id', 'created_at', 'created_by']
         insert_values = [master_id, tenant_id, datetime.utcnow(), user_email]
-
+        
         for field, value in master_data.items():
             columns.append(f'"{field}"')
             insert_values.append(value)
-
+        
         columns_str = ', '.join(columns)
         placeholders = ', '.join(['%s'] * len(insert_values))
-
-        insert_query = f"""
-            INSERT INTO master_data ({columns_str})
-            VALUES ({placeholders})
-            RETURNING master_id
-        """
+        insert_query = f"INSERT INTO master_data ({columns_str}) VALUES ({placeholders}) RETURNING master_id"
         
         cursor.execute(insert_query, insert_values)
         new_master_id = cursor.fetchone()[0]
-        logger.debug(f"Created new master record: {new_master_id}")
+        logger.debug(f"Created new master record: {new_master_id} with {len(master_data)} fields")
         return new_master_id
-
     @staticmethod
     def upload_excel_file(
         tenant_id: str,

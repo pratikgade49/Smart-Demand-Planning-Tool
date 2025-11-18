@@ -15,6 +15,7 @@ class FieldDefinition:
         field_length: Optional[int] = None,
         default_value: Optional[str] = None,
         is_characteristic: bool = False,
+        is_unique_key: bool = False,
         parent_field_name: Optional[str] = None
     ):
         self.field_name = field_name
@@ -22,6 +23,7 @@ class FieldDefinition:
         self.field_length = field_length
         self.default_value = default_value
         self.is_characteristic = is_characteristic
+        self.is_unique_key = is_unique_key
         self.parent_field_name = parent_field_name
     
     def to_dict(self) -> Dict[str, Any]:
@@ -32,6 +34,7 @@ class FieldDefinition:
             "field_length": self.field_length,
             "default_value": self.default_value,
             "is_characteristic": self.is_characteristic,
+            "is_unique_key": self.is_unique_key,
             "parent_field_name": self.parent_field_name
         }
 

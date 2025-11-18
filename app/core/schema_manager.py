@@ -142,38 +142,33 @@ class SchemaManager:
         """
         Create dynamic master data table based on field catalogue.
         All characteristic fields are NULLABLE to allow partial data.
-        
+        Creates a composite unique constraint on all catalogue fields + tenant_id.
         Args:
             tenant_id: Tenant identifier
             database_name: Tenant's database name
             fields: List of field definitions
-            
         Returns:
             True if table created successfully
-            
         Raises:
             DatabaseException: If table creation fails
         """
         db_manager = get_db_manager()
-        
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
                     # Drop existing master_data table
                     cursor.execute("DROP TABLE IF EXISTS master_data CASCADE")
-                    
                     # Build column definitions
                     columns = []
-                    
                     # Add master_id as primary key
                     columns.append("master_id UUID PRIMARY KEY DEFAULT gen_random_uuid()")
-                    
                     # Add all fields as NULLABLE
+                    field_names = []
                     for field in fields:
                         sql_type = field.get_sql_type()
                         columns.append(f'"{field.field_name}" {sql_type}')
-                    
+                        field_names.append(f'"{field.field_name}"')
                     # Add audit columns
                     columns.extend([
                         "tenant_id UUID NOT NULL",
@@ -182,7 +177,14 @@ class SchemaManager:
                         "updated_at TIMESTAMP",
                         "updated_by VARCHAR(255)"
                     ])
-                    
+                    # Add composite unique constraint on all fields + tenant_id
+                    # This constraint allows NULL values to be treated as distinct from each other
+                    # (PostgreSQL NULL handling: NULL != NULL for uniqueness)
+                    composite_fields = field_names + ['"tenant_id"']
+                    unique_constraint = f"""
+                        UNIQUE NULLS DISTINCT ({', '.join(composite_fields)})
+                    """
+                    columns.append(unique_constraint)
                     # Create table
                     create_table_sql = f"""
                         CREATE TABLE master_data (
@@ -190,7 +192,12 @@ class SchemaManager:
                         )
                     """
                     cursor.execute(create_table_sql)
-                    
+                    # Create index for better query performance
+                    index_columns = ', '.join(composite_fields)
+                    cursor.execute(f"""
+                        CREATE INDEX idx_master_data_composite 
+                        ON master_data ({index_columns})
+                    """)
                     # Recreate sales_data table with foreign key
                     cursor.execute("DROP TABLE IF EXISTS sales_data CASCADE")
                     cursor.execute("""
@@ -206,22 +213,18 @@ class SchemaManager:
                             created_by VARCHAR(255) NOT NULL
                         )
                     """)
-                    
                     # Recreate indexes
                     cursor.execute("CREATE INDEX idx_sales_data_date ON sales_data(date)")
                     cursor.execute("CREATE INDEX idx_sales_data_master_id ON sales_data(master_id)")
-                    
                     conn.commit()
-                    logger.info(f"Master data table created in {database_name} with {len(fields)} fields (all nullable)")
+                    logger.info(f"Master data table created in {database_name} with {len(fields)} fields and composite unique constraint (NULLS DISTINCT)")
                     return True
-                    
                 finally:
                     cursor.close()
-                    
         except Exception as e:
             logger.error(f"Failed to create master data table in {database_name}: {str(e)}")
             raise DatabaseException(f"Failed to create master data table: {str(e)}")
-    
+        
     @staticmethod
     def add_upload_history_table(tenant_id: str, database_name: str) -> bool:
         """
@@ -577,46 +580,30 @@ class SchemaManager:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Insert default algorithms
+                    # Insert default algorithms with specific IDs to match forecast_execution_service routing
                     algorithms_data = [
-                        (
-                            'ARIMA',
-                            '{"alpha": 0.05, "beta": 0.1, "order": [1, 1, 1]}',
-                            'Statistic',
-                            'AutoRegressive Integrated Moving Average - suitable for univariate time series forecasting'
-                        ),
-                        (
-                            'Linear Regression',
-                            '{"alpha": 0.01, "beta": 0.1, "fit_intercept": true}',
-                            'Statistic',
-                            'Linear Regression - suitable for trend-based forecasting with external factors'
-                        ),
-                        (
-                            'Exponential Smoothing',
-                            '{"alpha": 0.3, "beta": 0.1, "gamma": 0.1, "seasonal_periods": 12}',
-                            'Statistic',
-                            'Exponential Smoothing - suitable for data with trend and seasonality'
-                        ),
-                        (
-                            'Prophet',
-                            '{"seasonality_mode": "additive", "yearly_seasonality": true, "weekly_seasonality": true, "daily_seasonality": false}',
-                            'ML',
-                            'Facebook Prophet - robust to missing data and outliers with changepoint detection'
-                        ),
-                        (
-                            'LSTM Neural Network',
-                            '{"epochs": 100, "batch_size": 32, "units": 128, "dropout": 0.2}',
-                            'ML',
-                            'Long Short-Term Memory - deep learning model for complex sequential patterns'
-                        )
+                        (1, 'ARIMA', '{"order": [1, 1, 1]}', 'Statistic', 'AutoRegressive Integrated Moving Average - Statistical time series forecasting'),
+                        (2, 'Linear Regression', '{}', 'Statistic', 'Linear regression with feature engineering and external factors support'),
+                        (3, 'Polynomial Regression', '{"degree": 2}', 'Statistic', 'Polynomial regression with external factors integration'),
+                        (4, 'Exponential Smoothing', '{"alpha": 0.3}', 'Statistic', 'Simple exponential smoothing'),
+                        (5, 'Enhanced Exponential Smoothing', '{"alphas": [0.1, 0.3, 0.5]}', 'Statistic', 'Multiple alpha values exponential smoothing with external factors'),
+                        (6, 'Holt Winters', '{"season_length": 12}', 'Statistic', 'Triple exponential smoothing for seasonal data'),
+                        (7, 'Prophet', '{"window": 3}', 'Statistic', 'Facebook Prophet algorithm (placeholder implementation)'),
+                        (8, 'LSTM Neural Network', '{"window": 3}', 'ML', 'Long Short-Term Memory neural network (placeholder implementation)'),
+                        (9, 'XGBoost', '{"n_estimators_list": [50, 100], "learning_rate_list": [0.05, 0.1, 0.2], "max_depth_list": [3, 4, 5]}', 'ML', 'XGBoost-like gradient boosting with hyperparameter tuning and external factors support'),
+                        (10, 'SVR', '{"C_list": [1, 10, 100], "epsilon_list": [0.1, 0.2]}', 'ML', 'Support Vector Regression with hyperparameter tuning and external factors'),
+                        (11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression with hyperparameter tuning and external factors'),
+                        (12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression with hyperparameter tuning and scaling'),
+                        (13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]], "alpha_list": [0.001, 0.01]}', 'ML', 'Multi-layer Perceptron Neural Network with hyperparameter tuning and external factors'),
+                        (999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection - runs all algorithms and selects the best performing one')
                     ]
-                    
-                    for algo_name, default_params, algo_type, description in algorithms_data:
+
+                    for algo_id, algo_name, default_params, algo_type, description in algorithms_data:
                         cursor.execute("""
-                            INSERT INTO algorithms (algorithm_name, default_parameters, algorithm_type, description)
-                            VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (algorithm_name) DO NOTHING
-                        """, (algo_name, default_params, algo_type, description))
+                            INSERT INTO algorithms (algorithm_id, algorithm_name, default_parameters, algorithm_type, description)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (algorithm_id) DO NOTHING
+                        """, (algo_id, algo_name, default_params, algo_type, description))
                     
                     conn.commit()
                     logger.info(f"Default algorithms seeded for tenant: {tenant_id}")

@@ -58,6 +58,7 @@ class FieldCatalogueService:
                     field_length=f.field_length,
                     default_value=f.default_value,
                     is_characteristic=f.is_characteristic,
+                    is_unique_key=f.is_unique_key,
                     parent_field_name=f.parent_field_name
                 )
                 for f in request.fields
