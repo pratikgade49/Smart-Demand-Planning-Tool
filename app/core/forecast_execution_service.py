@@ -30,6 +30,108 @@ class ForecastExecutionService:
     """Service for executing forecast algorithms and storing results."""
 
     @staticmethod
+    def validate_algorithm_parameters(algorithm_id: int, custom_params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Centralized parameter validation for all forecasting algorithms.
+
+        Args:
+            algorithm_id: The algorithm identifier
+            custom_params: Dictionary of custom parameters
+
+        Returns:
+            Validated and sanitized parameters dictionary
+
+        Raises:
+            ValidationException: If parameters are invalid
+        """
+        validated_params = custom_params.copy()
+
+        try:
+            if algorithm_id == 1:  # ARIMA
+                # order: [p, d, q] - integers >= 0
+                if 'order' in validated_params:
+                    order = validated_params['order']
+                    if not isinstance(order, list) or len(order) != 3:
+                        raise ValidationException("ARIMA order must be a list of 3 integers")
+                    validated_params['order'] = [max(0, int(x)) for x in order]
+
+            elif algorithm_id == 3:  # Polynomial Regression
+                # degree: 1-5
+                if 'degree' in validated_params:
+                    degree = validated_params['degree']
+                    validated_params['degree'] = max(1, min(5, int(degree)))
+                    logger.info(f"Validated polynomial degree: {validated_params['degree']}")
+
+            elif algorithm_id == 4:  # Exponential Smoothing
+                # alphas: list of floats 0.0-1.0
+                if 'alphas' in validated_params:
+                    alphas = validated_params['alphas']
+                    if isinstance(alphas, list):
+                        validated_params['alphas'] = [max(0.0, min(1.0, float(a))) for a in alphas]
+                    else:
+                        validated_params['alphas'] = [max(0.0, min(1.0, float(alphas)))]
+                elif 'alpha' in validated_params:
+                    validated_params['alpha'] = max(0.0, min(1.0, float(validated_params['alpha'])))
+
+            elif algorithm_id == 5:  # Enhanced Exponential Smoothing
+                # alphas: list of floats 0.0-1.0
+                if 'alphas' in validated_params:
+                    alphas = validated_params['alphas']
+                    if isinstance(alphas, list):
+                        validated_params['alphas'] = [max(0.0, min(1.0, float(a))) for a in alphas]
+                    else:
+                        validated_params['alphas'] = [max(0.0, min(1.0, float(alphas)))]
+
+            elif algorithm_id == 6:  # Holt Winters
+                # alpha, beta, gamma: 0.0-1.0
+                # season_length: positive integer
+                if 'alpha' in validated_params:
+                    validated_params['alpha'] = max(0.0, min(1.0, float(validated_params['alpha'])))
+                if 'beta' in validated_params:
+                    validated_params['beta'] = max(0.0, min(1.0, float(validated_params['beta'])))
+                if 'gamma' in validated_params:
+                    validated_params['gamma'] = max(0.0, min(1.0, float(validated_params['gamma'])))
+                if 'season_length' in validated_params:
+                    validated_params['season_length'] = max(2, int(validated_params['season_length']))
+
+            elif algorithm_id == 9:  # XGBoost
+                # n_estimators: 10-1000
+                # max_depth: 1-20
+                # learning_rate: 0.01-1.0
+                if 'n_estimators' in validated_params:
+                    validated_params['n_estimators'] = max(10, min(1000, int(validated_params['n_estimators'])))
+                if 'max_depth' in validated_params:
+                    validated_params['max_depth'] = max(1, min(20, int(validated_params['max_depth'])))
+                if 'learning_rate' in validated_params:
+                    validated_params['learning_rate'] = max(0.01, min(1.0, float(validated_params['learning_rate'])))
+
+            elif algorithm_id == 10:  # SVR
+                # C: 0.1-100.0
+                # epsilon: 0.01-1.0
+                # kernel: valid kernel types
+                if 'C' in validated_params:
+                    validated_params['C'] = max(0.1, min(100.0, float(validated_params['C'])))
+                if 'epsilon' in validated_params:
+                    validated_params['epsilon'] = max(0.01, min(1.0, float(validated_params['epsilon'])))
+                if 'kernel' in validated_params:
+                    valid_kernels = ['linear', 'poly', 'rbf', 'sigmoid']
+                    if validated_params['kernel'] not in valid_kernels:
+                        validated_params['kernel'] = 'rbf'
+
+            elif algorithm_id == 11:  # KNN
+                # n_neighbors: positive integer
+                if 'n_neighbors' in validated_params:
+                    validated_params['n_neighbors'] = max(1, int(validated_params['n_neighbors']))
+
+            # Log validated parameters
+            logger.info(f"Validated parameters for algorithm {algorithm_id}: {validated_params}")
+
+            return validated_params
+
+        except (ValueError, TypeError) as e:
+            raise ValidationException(f"Invalid parameter format for algorithm {algorithm_id}: {str(e)}")
+
+    @staticmethod
     def execute_forecast_run(
         tenant_id: str,
         database_name: str,
@@ -38,31 +140,38 @@ class ForecastExecutionService:
     ) -> Dict[str, Any]:
         """
         Execute a forecast run with all mapped algorithms.
-        
+
         Args:
             tenant_id: Tenant identifier
             database_name: Tenant's database name
             forecast_run_id: Forecast run identifier
             user_email: User executing the forecast
-            
+
         Returns:
             Execution summary
         """
+        start_time = datetime.utcnow()
+        logger.info(f"Starting forecast execution for run: {forecast_run_id}, tenant: {tenant_id}, database: {database_name}, user: {user_email}")
+
         db_manager = get_db_manager()
-        
+
         try:
             # Get forecast run details
+            logger.debug(f"Retrieving forecast run details for run: {forecast_run_id}")
             forecast_run = ForecastingService.get_forecast_run(
                 tenant_id, database_name, forecast_run_id
             )
-            
+            logger.info(f"Retrieved forecast run details: version_id={forecast_run.get('version_id')}, start={forecast_run.get('forecast_start')}, end={forecast_run.get('forecast_end')}")
+
             # Validate run status
             if forecast_run['run_status'] not in ['Pending', 'Failed']:
+                logger.error(f"Invalid run status for forecast run {forecast_run_id}: {forecast_run['run_status']}")
                 raise ValidationException(
                     f"Cannot execute forecast run with status: {forecast_run['run_status']}"
                 )
-            
+
             # Update status to In-Progress
+            logger.debug(f"Updating forecast run status to 'In-Progress' for run: {forecast_run_id}")
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
@@ -75,10 +184,9 @@ class ForecastExecutionService:
                         WHERE forecast_run_id = %s
                     """, (datetime.utcnow(), datetime.utcnow(), user_email, forecast_run_id))
                     conn.commit()
+                    logger.info(f"Successfully updated forecast run {forecast_run_id} status to 'In-Progress'")
                 finally:
                     cursor.close()
-            
-            logger.info(f"Starting forecast execution for run: {forecast_run_id}")
             
             # Prepare historical data
             filters = forecast_run.get('forecast_filters', {})
@@ -237,12 +345,16 @@ class ForecastExecutionService:
         user_email: str
     ) -> List[Dict[str, Any]]:
         """Execute a single algorithm and store results."""
-        
+
         mapping_id = algorithm_mapping['mapping_id']
         algorithm_id = algorithm_mapping['algorithm_id']
         algorithm_name = algorithm_mapping['algorithm_name']
         custom_params = algorithm_mapping.get('custom_parameters') or {}  # Handle None
-        
+
+        start_time = datetime.utcnow()
+        logger.info(f"Starting algorithm execution: {algorithm_name} (ID: {algorithm_id}, Mapping: {mapping_id}) for forecast run: {forecast_run_id}")
+        logger.debug(f"Algorithm parameters: {custom_params}")
+
         # Update algorithm status to Running
         ForecastExecutionService._update_algorithm_status(
             database_name, mapping_id, 'Running'
@@ -291,7 +403,7 @@ class ForecastExecutionService:
                 forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
                     data=historical_data,
                     periods=periods,
-                    alphas=[custom_params.get('alpha', 0.3)]
+                    alphas=custom_params.get('alphas', [custom_params.get('alpha', 0.3)])
                 )
             elif algorithm_id == 5:  # Enhanced Exponential Smoothing
                 forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
@@ -303,7 +415,10 @@ class ForecastExecutionService:
                 forecast, metrics = ForecastExecutionService.holt_winters_forecast(
                     data=historical_data,
                     periods=periods,
-                    season_length=custom_params.get('season_length', 12)
+                    season_length=custom_params.get('season_length', 12),
+                    alpha=custom_params.get('alpha', 0.3),
+                    beta=custom_params.get('beta', 0.1),
+                    gamma=custom_params.get('gamma', 0.1)
                 )
             elif algorithm_id == 7:  # Prophet
                 # Placeholder for Prophet implementation
@@ -322,12 +437,18 @@ class ForecastExecutionService:
             elif algorithm_id == 9:  # XGBoost
                 forecast, metrics = ForecastExecutionService.xgboost_forecast(
                     data=historical_data,
-                    periods=periods
+                    periods=periods,
+                    n_estimators=custom_params.get('n_estimators', 100),
+                    max_depth=custom_params.get('max_depth', 6),
+                    learning_rate=custom_params.get('learning_rate', 0.1)
                 )
             elif algorithm_id == 10:  # SVR
                 forecast, metrics = ForecastExecutionService.svr_forecast(
                     data=historical_data,
-                    periods=periods
+                    periods=periods,
+                    C=custom_params.get('C', 1.0),
+                    epsilon=custom_params.get('epsilon', 0.1),
+                    kernel=custom_params.get('kernel', 'rbf')
                 )
             elif algorithm_id == 11:  # KNN
                 forecast, metrics = ForecastExecutionService.knn_forecast(
@@ -445,59 +566,76 @@ class ForecastExecutionService:
             y = data['quantity'].values
         else:
             raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
+
         n = len(y)
         if n < 2:
             raise ValueError("Need at least 2 historical data points")
-        
-        best_metrics = None
-        best_forecast = None
-        
-        for d in [2, 3]:
-            coeffs = np.polyfit(np.arange(n), y, d)
-            poly_func = np.poly1d(coeffs)
-            future_x = np.arange(n, n + periods)
-            forecast = poly_func(future_x)
-            forecast = np.maximum(forecast, 0)
-            predicted = poly_func(np.arange(n))
-            metrics = ForecastExecutionService.calculate_metrics(y, predicted)
-            if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
-                best_metrics = metrics
-                best_forecast = forecast
-        
-        return best_forecast, best_metrics
+
+        # Validate degree parameter
+        if degree < 1 or degree > 5:
+            logger.warning(f"Invalid degree {degree}, using default degree 2")
+            degree = 2
+
+        # Ensure degree doesn't exceed available data points
+        degree = min(degree, n - 1)
+
+        logger.info(f"Using polynomial degree: {degree}")
+
+        coeffs = np.polyfit(np.arange(n), y, degree)
+        poly_func = np.poly1d(coeffs)
+        future_x = np.arange(n, n + periods)
+        forecast = poly_func(future_x)
+        forecast = np.maximum(forecast, 0)
+        predicted = poly_func(np.arange(n))
+        metrics = ForecastExecutionService.calculate_metrics(y, predicted)
+
+        return forecast, metrics
 
     @staticmethod
-    def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1,0.3,0.5]) -> tuple:
+    def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1, 0.3, 0.5]) -> tuple:
         """Exponential smoothing forecasting"""
-        if 'total_quantity' in data.columns:
-            y = data['total_quantity'].values
-        elif 'quantity' in data.columns:
-            y = data['quantity'].values
-        else:
-            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
-        n = len(y)
-        if n < 3:
-            return np.full(periods, y[-1] if len(y) > 0 else 0), {'mape': 100.0, 'mae': np.std(y), 'rmse': np.std(y)}
-        
-        best_metrics = None
-        best_forecast = None
-        
-        for alpha in alphas:
-            # Traditional exponential smoothing
-            smoothed = pd.Series(y).ewm(alpha=alpha).mean().values
-            forecast = np.full(periods, smoothed[-1])
-            metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
-            
-            if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
-                best_metrics = metrics
-                best_forecast = forecast
-        
-        return np.array(best_forecast), best_metrics
+        try:
+            # Validate parameters
+            validated_alphas = []
+            for alpha in alphas:
+                alpha = max(0.0, min(1.0, float(alpha)))
+                validated_alphas.append(alpha)
+            alphas = validated_alphas if validated_alphas else [0.3]
+
+            logger.info(f"Using exponential smoothing alphas: {alphas}")
+
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < 3:
+                return np.full(periods, y[-1] if len(y) > 0 else 0), {'mape': 100.0, 'mae': np.std(y), 'rmse': np.std(y)}
+
+            best_metrics = None
+            best_forecast = None
+
+            for alpha in alphas:
+                # Traditional exponential smoothing
+                smoothed = pd.Series(y).ewm(alpha=alpha).mean().values
+                forecast = np.full(periods, smoothed[-1])
+                metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
+
+                if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
+                    best_metrics = metrics
+                    best_forecast = forecast
+
+            return np.array(best_forecast), best_metrics
+
+        except Exception as e:
+            logger.warning(f"Exponential smoothing failed: {str(e)}, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12) -> tuple:
+    def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12, alpha: float = 0.3, beta: float = 0.1, gamma: float = 0.1) -> tuple:
         """Holt-Winters exponential smoothing"""
         if 'total_quantity' in data.columns:
             y = data['total_quantity'].values
@@ -505,13 +643,20 @@ class ForecastExecutionService:
             y = data['quantity'].values
         else:
             raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
+
         n = len(y)
         if n < 2 * season_length:
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
-        
+
+        # Validate parameters
+        alpha = max(0.0, min(1.0, alpha))
+        beta = max(0.0, min(1.0, beta))
+        gamma = max(0.0, min(1.0, gamma))
+
+        logger.info(f"Using Holt-Winters parameters: alpha={alpha}, beta={beta}, gamma={gamma}, season_length={season_length}")
+
         # Traditional Holt-Winters
-        alpha, beta, gamma = 0.3, 0.1, 0.1
+        alpha, beta, gamma = alpha, beta, gamma
         
         level = np.mean(y[:season_length])
         trend = (np.mean(y[season_length:2*season_length]) - np.mean(y[:season_length])) / season_length
@@ -702,18 +847,28 @@ class ForecastExecutionService:
         return ForecastExecutionService.arima_forecast(data, periods)
 
     @staticmethod
-    def xgboost_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         XGBoost forecasting with feature engineering.
 
         Args:
             data: Historical data with 'quantity' column
             periods: Number of periods to forecast
+            n_estimators: Number of boosting rounds
+            max_depth: Maximum tree depth
+            learning_rate: Boosting learning rate
 
         Returns:
             Tuple of (forecast_array, metrics_dict)
         """
         try:
+            # Validate parameters
+            n_estimators = max(10, min(1000, n_estimators))
+            max_depth = max(1, min(20, max_depth))
+            learning_rate = max(0.01, min(1.0, learning_rate))
+
+            logger.info(f"Using XGBoost parameters: n_estimators={n_estimators}, max_depth={max_depth}, learning_rate={learning_rate}")
+
             # Prepare quantity data
             if 'total_quantity' in data.columns:
                 y = data['total_quantity'].values
@@ -748,9 +903,9 @@ class ForecastExecutionService:
 
             # Train XGBoost model
             model = XGBRegressor(
-                n_estimators=100,
-                max_depth=6,
-                learning_rate=0.1,
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
                 random_state=42,
                 n_jobs=-1
             )
@@ -782,9 +937,18 @@ class ForecastExecutionService:
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def svr_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float]]:
         """Support Vector Regression forecasting"""
         try:
+            # Validate parameters
+            C = max(0.1, min(100.0, C))
+            epsilon = max(0.01, min(1.0, epsilon))
+            valid_kernels = ['linear', 'poly', 'rbf', 'sigmoid']
+            if kernel not in valid_kernels:
+                kernel = 'rbf'
+
+            logger.info(f"Using SVR parameters: C={C}, epsilon={epsilon}, kernel={kernel}")
+
             # Prepare quantity data
             if 'total_quantity' in data.columns:
                 y = data['total_quantity'].values
@@ -819,9 +983,9 @@ class ForecastExecutionService:
 
             # Train SVR model
             model = SVR(
-                kernel='rbf',
-                C=1.0,
-                epsilon=0.1
+                kernel=kernel,
+                C=C,
+                epsilon=epsilon
             )
             model.fit(X, y_target)
 
