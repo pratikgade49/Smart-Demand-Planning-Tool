@@ -22,6 +22,7 @@ from app.core.forecast_version_service import ForecastVersionService
 from app.core.external_factors_service import ExternalFactorsService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException, ValidationException
+from app.core.algorithm_parameters import AlgorithmParametersService
 from app.api.dependencies import get_current_tenant
 import logging
 
@@ -47,12 +48,14 @@ async def create_forecast_version(
     - **is_active**: Whether this version is active
     """
     try:
+        logger.info(f"Creating forecast version '{request.version_name}' of type '{request.version_type}' for tenant {tenant_data['tenant_id']}")
         result = ForecastVersionService.create_version(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             request=request,
             user_email=tenant_data["email"]
         )
+        logger.info(f"Successfully created forecast version with ID: {result['version_id']}")
         return ResponseHandler.success(data=result, status_code=201)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -85,6 +88,7 @@ async def list_forecast_versions(
             page_size=page_size
         )
         
+        logger.info(f"Retrieved {total_count} forecast versions for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.list_response(
             data=versions,
             page=page,
@@ -110,6 +114,7 @@ async def get_forecast_version(
             database_name=tenant_data["database_name"],
             version_id=version_id
         )
+        logger.info(f"Retrieved forecast version {version_id} for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -131,6 +136,7 @@ async def update_forecast_version(
     - Only one version of each type can be active at a time
     """
     try:
+        logger.info(f"Updating forecast version {version_id} for tenant {tenant_data['tenant_id']}")
         result = ForecastVersionService.update_version(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
@@ -138,6 +144,7 @@ async def update_forecast_version(
             request=request,
             user_email=tenant_data["email"]
         )
+        logger.info(f"Successfully updated forecast version {version_id}")
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -166,12 +173,14 @@ async def create_external_factor(
     - Any other external variable that may impact demand
     """
     try:
+        logger.info(f"Creating external factor '{request.factor_name}' for tenant {tenant_data['tenant_id']}")
         result = ExternalFactorsService.create_factor(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             request=request,
             user_email=tenant_data["email"]
         )
+        logger.info(f"Successfully created external factor with ID: {result['factor_id']}")
         return ResponseHandler.success(data=result, status_code=201)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -207,6 +216,7 @@ async def list_external_factors(
             page_size=page_size
         )
         
+        logger.info(f"Retrieved {total_count} external factors for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.list_response(
             data=factors,
             page=page,
@@ -244,6 +254,7 @@ async def get_aggregation_levels(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"]
         )
+        logger.info(f"Retrieved aggregation levels for tenant {tenant_data['tenant_id']}: {len(result.get('available_fields', []))} fields")
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -283,12 +294,16 @@ async def create_forecast_run(
     - YEARLY
     """
     try:
+        agg_level = request.forecast_filters.get('aggregation_level', 'product') if request.forecast_filters else 'product'
+        interval = request.forecast_filters.get('interval', 'MONTHLY') if request.forecast_filters else 'MONTHLY'
+        logger.info(f"Creating forecast run for tenant {tenant_data['tenant_id']} with aggregation level '{agg_level}' and interval '{interval}'")
         result = ForecastingService.create_forecast_run(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             request=request,
             user_email=tenant_data["email"]
         )
+        logger.info(f"Successfully created forecast run with ID: {result['forecast_run_id']}")
         return ResponseHandler.success(data=result, status_code=201)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -321,6 +336,7 @@ async def list_forecast_runs(
             page_size=page_size
         )
         
+        logger.info(f"Retrieved {total_count} forecast runs for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.list_response(
             data=runs,
             page=page,
@@ -346,6 +362,7 @@ async def get_forecast_run(
             database_name=tenant_data["database_name"],
             forecast_run_id=forecast_run_id
         )
+        logger.info(f"Retrieved forecast run {forecast_run_id} for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -370,7 +387,7 @@ async def get_forecast_run_status(
             database_name=tenant_data["database_name"],
             forecast_run_id=forecast_run_id
         )
-        
+
         # Return only status-related fields
         status_data = {
             "forecast_run_id": result["forecast_run_id"],
@@ -382,7 +399,8 @@ async def get_forecast_run_status(
             "error_message": result["error_message"],
             "updated_at": result["updated_at"]
         }
-        
+
+        logger.info(f"Retrieved status for forecast run {forecast_run_id}: {result['run_status']}")
         return ResponseHandler.success(data=status_data)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -407,12 +425,14 @@ async def execute_forecast_run(
     **Note**: This is an asynchronous operation that may take time for large datasets.
     """
     try:
+        logger.info(f"Starting forecast execution for run {forecast_run_id} by user {tenant_data['email']}")
         result = ForecastExecutionService.execute_forecast_run(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             forecast_run_id=forecast_run_id,
             user_email=tenant_data["email"]
         )
+        logger.info(f"Successfully executed forecast run {forecast_run_id}: {result.get('status', 'Unknown')}")
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -477,12 +497,14 @@ async def execute_forecast_best_fit(
                 cursor.close()
         
         logger.info(f"Starting best-fit forecast execution for run: {forecast_run_id}")
-        
+
         # Prepare historical data
         filters = result.get('forecast_filters', {})
         aggregation_level = filters.get('aggregation_level', 'product')
         interval = filters.get('interval', 'MONTHLY')
-        
+
+        logger.info(f"Preparing historical data for best-fit analysis: aggregation_level={aggregation_level}, interval={interval}")
+
         # Get historical data
         historical_data = ForecastingService.prepare_aggregated_data(
             tenant_id=tenant_data["tenant_id"],
@@ -491,10 +513,10 @@ async def execute_forecast_best_fit(
             interval=interval,
             filters=filters
         )
-        
+
         if historical_data.empty:
             raise ValidationException("No historical data available for forecasting")
-        
+
         logger.info(f"Prepared {len(historical_data)} historical records for best-fit analysis")
         
         # Calculate number of forecast periods
@@ -524,14 +546,18 @@ async def execute_forecast_best_fit(
             periods,
             interval
         )
-        
+
+        logger.info(f"Generated {len(forecast_dates)} forecast periods from {forecast_start_date} to {forecast_end_date}")
+
         # Store results with a special algorithm_id for best-fit
         # Use algorithm_id = 999 for best-fit results
         best_fit_algorithm_id = 999
-        
+
         # Create a best-fit algorithm mapping record
         best_fit_mapping_id = str(uuid.uuid4())
-        
+
+        logger.info(f"Storing best-fit results for algorithm: {forecast_result['selected_algorithm']}")
+
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
@@ -555,12 +581,12 @@ async def execute_forecast_best_fit(
                     'Completed',
                     tenant_data["email"]
                 ))
-                
+
                 conn.commit()
-                
+
             finally:
                 cursor.close()
-        
+
         # Now store the forecast results
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
@@ -568,16 +594,16 @@ async def execute_forecast_best_fit(
                 for forecast_date, forecast_value in zip(forecast_dates, forecast_result['forecast']):
                     result_id = str(uuid.uuid4())
                     forecast_value_float = float(forecast_value)
-                    
+
                     # Validate bounds
                     max_forecast_value = 999999.9999
                     if not (0 <= forecast_value_float <= max_forecast_value):
                         forecast_value_float = min(max_forecast_value, max(0, forecast_value_float))
-                    
+
                     forecast_value_float = round(forecast_value_float, 4)
-                    
+
                     accuracy_metric = round(forecast_result['accuracy'], 2) if forecast_result['accuracy'] else None
-                    
+
                     cursor.execute("""
                         INSERT INTO forecast_results
                         (result_id, tenant_id, forecast_run_id, version_id, mapping_id,
@@ -604,12 +630,12 @@ async def execute_forecast_best_fit(
                         }),
                         tenant_data["email"]
                     ))
-                
+
                 conn.commit()
-                
+
             finally:
                 cursor.close()
-        
+
         # Update forecast run completion
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
@@ -636,8 +662,8 @@ async def execute_forecast_best_fit(
                 conn.commit()
             finally:
                 cursor.close()
-        
-        logger.info(f"Best-fit forecast run completed: {forecast_run_id}")
+
+        logger.info(f"Best-fit forecast run completed: {forecast_run_id} with {len(forecast_dates)} records")
         
         return ResponseHandler.success(data={
             'forecast_run_id': forecast_run_id,
@@ -734,6 +760,7 @@ async def get_forecast_results(
                         "created_by": row[11]
                     })
                 
+                logger.info(f"Retrieved {total_count} forecast results for run {forecast_run_id}")
                 return ResponseHandler.list_response(
                     data=results,
                     page=page,
@@ -813,6 +840,7 @@ async def compare_forecast_results(
                         "avg_accuracy_metric": round(float(row[6]), 2) if row[6] else None
                     })
                 
+                logger.info(f"Generated algorithm comparison for forecast run {forecast_run_id}: {len(comparison)} algorithms")
                 return ResponseHandler.success(data={
                     "forecast_run_id": forecast_run_id,
                     "algorithm_comparison": comparison
@@ -905,6 +933,7 @@ async def export_forecast_results(
                         "record_count": len(results)
                     })
                 else:
+                    logger.info(f"Exported {len(results)} forecast results in JSON format for run {forecast_run_id}")
                     return ResponseHandler.success(data={
                         "format": "json",
                         "results": results,
@@ -969,6 +998,7 @@ async def list_algorithms(
                         "updated_at": row[6].isoformat() if row[6] else None
                     })
                 
+                logger.info(f"Retrieved {len(algorithms)} algorithms for tenant {tenant_data['tenant_id']}")
                 return ResponseHandler.success(data=algorithms)
                 
             finally:
@@ -1052,6 +1082,7 @@ async def validate_forecast_filters(
                 "Check if the filter values exist in your master data."
             )
         
+        logger.info(f"Validated forecast filters for tenant {tenant_data['tenant_id']}: {len(validation_result.get('sample_data', []))} sample records")
         return ResponseHandler.success(data=validation_result)
         
     except Exception as e:
@@ -1108,6 +1139,7 @@ async def get_available_master_data_values(
                     
                     values = [row[0] for row in cursor.fetchall()]
                     
+                    logger.info(f"Retrieved {len(values)} unique values for field '{field_name}' in tenant {tenant_data['tenant_id']}")
                     return ResponseHandler.success(data={
                         "field_name": field_name,
                         "total_unique_values": len(values),
@@ -1143,6 +1175,7 @@ async def get_available_master_data_values(
                         "sample_values": values
                     }
                 
+                logger.info(f"Retrieved master data values for tenant {tenant_data['tenant_id']}: {len(available_fields)} fields")
                 return ResponseHandler.success(data={
                     "available_fields": available_fields,
                     "field_values": field_values,
@@ -1230,6 +1263,7 @@ async def verify_aggregation_logic(
         manual_agg.columns = ['period', 'total_quantity', 'unique_transactions']
         manual_agg['period'] = manual_agg['period'].astype(str)
         
+        logger.info(f"Verified aggregation logic for product {product_code} with interval {interval}: current={len(current_result)}, manual={len(manual_agg)}")
         return ResponseHandler.success(data={
             "product": product_code,
             "interval": interval,

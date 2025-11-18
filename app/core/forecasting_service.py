@@ -104,13 +104,29 @@ class ForecastingService:
                                 "fields": [field1["field_name"], field2["field_name"]],
                                 "description": f"Forecast by {field1['field_name']} and {field2['field_name']}"
                             })
-                    
-                    # Limit to reasonable number of 2-field combinations (first 10)
+
+                    # Generate common 3-field combinations
+                    three_field_combos = []
+                    for i, field1 in enumerate(base_fields):
+                        for j, field2 in enumerate(base_fields[i+1:], i+1):
+                            for field3 in base_fields[j+1:]:
+                                combo_name = f"{field1['field_name']}-{field2['field_name']}-{field3['field_name']}"
+                                three_field_combos.append({
+                                    "level_name": combo_name,
+                                    "fields": [field1["field_name"], field2["field_name"], field3["field_name"]],
+                                    "description": f"Forecast by {field1['field_name']}, {field2['field_name']}, and {field3['field_name']}"
+                                })
+
+                    # Limit combinations to reasonable numbers
                     two_field_combos = two_field_combos[:10]
-                    
+                    three_field_combos = three_field_combos[:5]  # Fewer 3-field combos due to higher complexity
+
+                    # Combine multi-dimension levels
+                    multi_dimension_levels = two_field_combos + three_field_combos
+
                     return {
                         "single_dimension": single_levels,
-                        "multi_dimension": two_field_combos,
+                        "multi_dimension": multi_dimension_levels,
                         "all_fields": [f["field_name"] for f in base_fields]
                     }
                     
