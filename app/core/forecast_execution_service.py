@@ -351,9 +351,16 @@ class ForecastExecutionService:
         algorithm_name = algorithm_mapping['algorithm_name']
         custom_params = algorithm_mapping.get('custom_parameters') or {}  # Handle None
 
+        # Validate custom parameters
+        try:
+            custom_params = ForecastExecutionService.validate_algorithm_parameters(algorithm_id, custom_params)
+        except ValidationException as e:
+            logger.error(f"Parameter validation failed for algorithm {algorithm_name}: {str(e)}")
+            raise
+
         start_time = datetime.utcnow()
         logger.info(f"Starting algorithm execution: {algorithm_name} (ID: {algorithm_id}, Mapping: {mapping_id}) for forecast run: {forecast_run_id}")
-        logger.debug(f"Algorithm parameters: {custom_params}")
+        logger.debug(f"Validated algorithm parameters: {custom_params}")
 
         # Update algorithm status to Running
         ForecastExecutionService._update_algorithm_status(
