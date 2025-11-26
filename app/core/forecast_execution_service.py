@@ -10,13 +10,20 @@ from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import logging
+import threading
 from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
 from xgboost import XGBRegressor
+try:
+    from prophet import Prophet
+except ImportError:
+    Prophet = None
 from psycopg2.extras import Json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import psutil
+import time
 
 from app.core.database import get_db_manager
 from app.core.exceptions import DatabaseException, ValidationException, NotFoundException
@@ -132,6 +139,23 @@ class ForecastExecutionService:
             raise ValidationException(f"Invalid parameter format for algorithm {algorithm_id}: {str(e)}")
 
     @staticmethod
+    def _get_system_resources() -> Dict[str, float]:
+        """Get current system resource usage."""
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            memory_mb = memory.used / (1024 * 1024)
+            memory_percent = memory.percent
+            return {
+                'cpu_percent': cpu_percent,
+                'memory_mb': round(memory_mb, 2),
+                'memory_percent': memory_percent
+            }
+        except Exception as e:
+            logger.warning(f"Could not get system resources: {str(e)}")
+            return {'cpu_percent': 0.0, 'memory_mb': 0.0, 'memory_percent': 0.0}
+
+    @staticmethod
     def execute_forecast_run(
         tenant_id: str,
         database_name: str,
@@ -151,7 +175,9 @@ class ForecastExecutionService:
             Execution summary
         """
         start_time = datetime.utcnow()
+        initial_resources = ForecastExecutionService._get_system_resources()
         logger.info(f"Starting forecast execution for run: {forecast_run_id}, tenant: {tenant_id}, database: {database_name}, user: {user_email}")
+        logger.info(f"Initial system resources - CPU: {initial_resources['cpu_percent']}%, Memory: {initial_resources['memory_mb']}MB ({initial_resources['memory_percent']}%)")
 
         db_manager = get_db_manager()
 
@@ -215,21 +241,26 @@ class ForecastExecutionService:
                 forecast_run['forecast_end']
             )
             
-            # Execute each algorithm
+            # Execute each algorithm in parallel
             algorithms = forecast_run.get('algorithms', [])
             total_records = 0
             processed_records = 0
             failed_records = 0
-            
-            for algo in sorted(algorithms, key=lambda x: x['execution_order']):
-                try:
-                    logger.info(f"Executing algorithm: {algo['algorithm_name']}")
-                    
+
+            # Use ThreadPoolExecutor for parallel algorithm execution
+            max_workers = min(len(algorithms), os.cpu_count() or 4)
+            logger.info(f"Starting parallel execution of {len(algorithms)} algorithms with {max_workers} workers")
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all algorithm tasks
+                future_to_algorithm = {}
+
+                for algo in algorithms:
                     # Add version_id to algorithm mapping
                     algo['version_id'] = forecast_run['version_id']
-                    
-                    # Execute algorithm
-                    results = ForecastExecutionService._execute_algorithm(
+
+                    future = executor.submit(
+                        ForecastExecutionService._execute_algorithm_parallel,
                         tenant_id=tenant_id,
                         database_name=database_name,
                         forecast_run_id=forecast_run_id,
@@ -241,24 +272,29 @@ class ForecastExecutionService:
                         interval=interval,
                         user_email=user_email
                     )
-                    
-                    total_records += len(results)
-                    processed_records += len(results)
-                    
-                    logger.info(f"Algorithm {algo['algorithm_name']} completed: {len(results)} results")
-                    
-                except Exception as e:
-                    failed_records += 1
-                    error_msg = f"Algorithm {algo['algorithm_name']} failed: {str(e)}"
-                    logger.error(error_msg, exc_info=True)
-                    
-                    # Update algorithm mapping status
-                    ForecastExecutionService._update_algorithm_status(
-                        database_name,
-                        algo['mapping_id'],
-                        'Failed',
-                        error_message=str(e)
-                    )
+                    future_to_algorithm[future] = algo
+
+                # Collect results as they complete
+                for future in as_completed(future_to_algorithm):
+                    algo = future_to_algorithm[future]
+                    try:
+                        results = future.result()
+                        total_records += len(results)
+                        processed_records += len(results)
+                        logger.info(f"Algorithm {algo['algorithm_name']} completed: {len(results)} results")
+
+                    except Exception as e:
+                        failed_records += 1
+                        error_msg = f"Algorithm {algo['algorithm_name']} failed: {str(e)}"
+                        logger.error(error_msg, exc_info=True)
+
+                        # Update algorithm mapping status
+                        ForecastExecutionService._update_algorithm_status(
+                            database_name,
+                            algo['mapping_id'],
+                            'Failed',
+                            error_message=str(e)
+                        )
             
             # Update forecast run completion
             if failed_records == 0:
@@ -330,6 +366,36 @@ class ForecastExecutionService:
             
             logger.error(f"Forecast execution failed: {str(e)}")
             raise DatabaseException(f"Forecast execution failed: {str(e)}")
+
+    @staticmethod
+    def _execute_algorithm_parallel(
+        tenant_id: str,
+        database_name: str,
+        forecast_run_id: str,
+        algorithm_mapping: Dict[str, Any],
+        historical_data: pd.DataFrame,
+        external_factors: pd.DataFrame,
+        forecast_start: str,
+        forecast_end: str,
+        interval: str,
+        user_email: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute a single algorithm and store results (parallel version).
+        This is a wrapper around _execute_algorithm for parallel execution.
+        """
+        return ForecastExecutionService._execute_algorithm(
+            tenant_id=tenant_id,
+            database_name=database_name,
+            forecast_run_id=forecast_run_id,
+            algorithm_mapping=algorithm_mapping,
+            historical_data=historical_data,
+            external_factors=external_factors,
+            forecast_start=forecast_start,
+            forecast_end=forecast_end,
+            interval=interval,
+            user_email=user_email
+        )
 
     @staticmethod
     def _execute_algorithm(
@@ -428,18 +494,19 @@ class ForecastExecutionService:
                     gamma=custom_params.get('gamma', 0.1)
                 )
             elif algorithm_id == 7:  # Prophet
-                # Placeholder for Prophet implementation
-                forecast, metrics = ForecastExecutionService.simple_moving_average(
+                forecast, metrics = ForecastExecutionService.prophet_forecast(
                     data=historical_data,
                     periods=periods,
-                    window=custom_params.get('window', 3)
+                    seasonality_mode=custom_params.get('seasonality_mode', 'additive'),
+                    changepoint_prior_scale=custom_params.get('changepoint_prior_scale', 0.05)
                 )
             elif algorithm_id == 8:  # LSTM Neural Network
-                # Placeholder for LSTM implementation
-                forecast, metrics = ForecastExecutionService.simple_moving_average(
+                forecast, metrics = ForecastExecutionService.lstm_forecast(
                     data=historical_data,
                     periods=periods,
-                    window=custom_params.get('window', 3)
+                    sequence_length=custom_params.get('sequence_length', 12),
+                    epochs=custom_params.get('epochs', 50),
+                    batch_size=custom_params.get('batch_size', 32)
                 )
             elif algorithm_id == 9:  # XGBoost
                 forecast, metrics = ForecastExecutionService.xgboost_forecast(
@@ -463,6 +530,21 @@ class ForecastExecutionService:
                     periods=periods,
                     n_neighbors=custom_params.get('n_neighbors', 5)
                 )
+            elif algorithm_id == 12:  # Gaussian Process
+                forecast, metrics = ForecastExecutionService.gaussian_process_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    kernel=custom_params.get('kernel', 'RBF'),
+                    alpha=custom_params.get('alpha', 1e-6)
+                )
+            elif algorithm_id == 13:  # Neural Network (MLP)
+                forecast, metrics = ForecastExecutionService.mlp_neural_network_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    hidden_layers=custom_params.get('hidden_layers', [64, 32]),
+                    epochs=custom_params.get('epochs', 100),
+                    batch_size=custom_params.get('batch_size', 32)
+                )
             else:
                 # Default to simple moving average
                 forecast, metrics = ForecastExecutionService.simple_moving_average(
@@ -478,6 +560,16 @@ class ForecastExecutionService:
                 interval
             )
             
+            # Validate forecast quality
+            is_constant = ForecastExecutionService.detect_constant_forecast(forecast)
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, algorithm_name)
+
+            if is_constant:
+                logger.warning(f"Algorithm {algorithm_name} produced constant forecast - all values are {forecast[0]:.2f}")
+
+            # Log without Unicode characters to avoid Windows console encoding issues
+            logger.info(f"Forecast validation: {variance_msg.replace(chr(10003), '[PASS]').replace(chr(9888), '[WARN]')}")
+
             # Store results
             results = ForecastExecutionService._store_forecast_results(
                 tenant_id=tenant_id,
@@ -600,7 +692,7 @@ class ForecastExecutionService:
 
     @staticmethod
     def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1, 0.3, 0.5]) -> tuple:
-        """Exponential smoothing forecasting"""
+        """Exponential smoothing forecasting with proper future value projection"""
         try:
             # Validate parameters
             validated_alphas = []
@@ -626,16 +718,38 @@ class ForecastExecutionService:
             best_forecast = None
 
             for alpha in alphas:
-                # Traditional exponential smoothing
-                smoothed = pd.Series(y).ewm(alpha=alpha).mean().values
-                forecast = np.full(periods, smoothed[-1])
+                # Calculate smoothed values for historical data
+                smoothed = np.zeros(n)
+                smoothed[0] = y[0]
+
+                for i in range(1, n):
+                    smoothed[i] = alpha * y[i] + (1 - alpha) * smoothed[i-1]
+
+                # Use linear regression on smoothed values to determine trend
+                x = np.arange(n).reshape(-1, 1)
+                trend_model = LinearRegression()
+                trend_model.fit(x, smoothed)
+                trend_slope = trend_model.coef_[0]
+                trend_intercept = trend_model.intercept_
+
+                # Project future values using the trend from smoothed data
+                forecast = []
+                for i in range(periods):
+                    future_x = n + i
+                    forecast_value = trend_slope * future_x + trend_intercept
+                    forecast_value = max(0, forecast_value)  # Ensure non-negative
+                    forecast.append(forecast_value)
+
+                forecast = np.array(forecast)
+
+                # Calculate metrics on historical data
                 metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
 
                 if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
                     best_metrics = metrics
                     best_forecast = forecast
 
-            return np.array(best_forecast), best_metrics
+            return best_forecast, best_metrics
 
         except Exception as e:
             logger.warning(f"Exponential smoothing failed: {str(e)}, falling back to Linear Regression")
@@ -714,6 +828,445 @@ class ForecastExecutionService:
         metrics = ForecastExecutionService.calculate_metrics(y, predicted)
 
         return forecast, metrics
+
+    @staticmethod
+    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Prophet forecasting using Facebook's Prophet library."""
+        try:
+            if Prophet is None:
+                logger.warning("Prophet library not installed, falling back to Exponential Smoothing")
+                return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+
+            # Prepare data for Prophet
+            if 'total_quantity' in data.columns:
+                y_values = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y_values = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            # Get dates from data if available, otherwise create sequential dates
+            if 'period' in data.columns:
+                dates = pd.to_datetime(data['period'])
+            else:
+                # Create dates starting from today
+                dates = pd.date_range(end=datetime.now(), periods=len(y_values), freq='MS')
+
+            # Create Prophet dataframe
+            prophet_data = pd.DataFrame({
+                'ds': dates,
+                'y': y_values
+            })
+
+            n = len(prophet_data)
+            if n < 3:
+                raise ValueError("Need at least 3 historical data points for Prophet")
+
+            # Initialize and fit Prophet model
+            model = Prophet(
+                seasonality_mode=seasonality_mode,
+                changepoint_prior_scale=changepoint_prior_scale,
+                interval_width=0.95,
+                yearly_seasonality='auto',
+                weekly_seasonality='auto',
+                daily_seasonality=False
+            )
+            
+            # Suppress Prophet's verbose output
+            with pd.option_context('mode.chained_assignment', None):
+                model.fit(prophet_data)
+
+            # Create future dataframe
+            future = model.make_future_dataframe(periods=periods, freq='MS')
+            forecast_df = model.predict(future)
+
+            # Extract forecast values
+            forecast = forecast_df['yhat'].values[-periods:]
+            forecast = np.maximum(forecast, 0)  # Ensure non-negative
+
+            # Calculate metrics on historical data
+            fitted_values = forecast_df['yhat'].values[:n]
+            metrics = ForecastExecutionService.calculate_metrics(y_values, fitted_values)
+
+            logger.info(f"Prophet forecast completed with {periods} periods")
+            return forecast, metrics
+
+        except ImportError:
+            logger.warning("Prophet library not available, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+        except Exception as e:
+            logger.warning(f"Prophet forecasting failed: {str(e)}, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+
+    @staticmethod
+    def lstm_forecast(data: pd.DataFrame, periods: int, sequence_length: int = 12, epochs: int = 50, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float]]:
+        """LSTM Neural Network forecasting."""
+        try:
+            from tensorflow import keras
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import LSTM, Dense
+            from tensorflow.keras.optimizers import Adam
+            import warnings
+            warnings.filterwarnings('ignore')
+
+            # Prepare quantity data
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < sequence_length + 1:
+                raise ValueError(f"Need at least {sequence_length + 1} historical data points for LSTM")
+
+            # Normalize data
+            from sklearn.preprocessing import MinMaxScaler
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()
+
+            # Create sequences
+            X_train = []
+            y_train = []
+
+            for i in range(sequence_length, n):
+                X_train.append(y_scaled[i-sequence_length:i])
+                y_train.append(y_scaled[i])
+
+            X_train = np.array(X_train).reshape(-1, sequence_length, 1)
+            y_train = np.array(y_train)
+
+            if len(X_train) < 2:
+                raise ValueError("Insufficient data for LSTM training")
+
+            # Build LSTM model
+            model = Sequential([
+                LSTM(50, activation='relu', input_shape=(sequence_length, 1), return_sequences=True),
+                LSTM(50, activation='relu'),
+                Dense(25, activation='relu'),
+                Dense(1)
+            ])
+
+            model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+
+            # Train model with suppressed output
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore')
+                model.fit(
+                    X_train, y_train,
+                    epochs=min(epochs, 100),  # Cap epochs to prevent long training
+                    batch_size=min(batch_size, len(X_train)),
+                    verbose=0,
+                    validation_split=0.1
+                )
+
+            # Generate forecast
+            forecast = []
+            current_sequence = y_scaled[-sequence_length:].copy()
+
+            for _ in range(periods):
+                next_pred = model.predict(
+                    current_sequence.reshape(1, sequence_length, 1),
+                    verbose=0
+                )[0, 0]
+                forecast.append(next_pred)
+                current_sequence = np.append(current_sequence[1:], next_pred)
+
+            # Inverse transform forecast
+            forecast = np.array(forecast).reshape(-1, 1)
+            forecast = scaler.inverse_transform(forecast).flatten()
+            forecast = np.maximum(forecast, 0)  # Ensure non-negative
+
+            # Calculate metrics on training data
+            y_train_pred = model.predict(X_train, verbose=0).flatten()
+            y_train_actual = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
+            metrics = ForecastExecutionService.calculate_metrics(y_train_actual, y_train_pred)
+
+            logger.info(f"LSTM forecast completed with {periods} periods")
+            return forecast, metrics
+
+        except ImportError:
+            logger.warning("TensorFlow/Keras not available, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+        except Exception as e:
+            logger.warning(f"LSTM forecasting failed: {str(e)}, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+
+    @staticmethod
+    def gaussian_process_forecast(data: pd.DataFrame, periods: int, kernel: str = 'RBF', alpha: float = 1e-6) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        Gaussian Process Regression forecasting with uncertainty quantification.
+        
+        Args:
+            data: Historical data with 'quantity' or 'total_quantity' column
+            periods: Number of forecast periods
+            kernel: Kernel type ('RBF', 'Matern', 'RationalQuadratic')
+            alpha: Regularization strength
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
+        try:
+            from sklearn.gaussian_process import GaussianProcessRegressor
+            from sklearn.gaussian_process.kernels import RBF, Matern, RationalQuadratic, ConstantKernel as C
+            from sklearn.preprocessing import StandardScaler
+            
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+            
+            y = y.reshape(-1, 1)
+            
+            # Create lagged features for time series
+            max_lags = min(12, len(y) // 2)
+            X_train = []
+            y_train = []
+            
+            for i in range(max_lags, len(y)):
+                X_train.append(y[i-max_lags:i].flatten())
+                y_train.append(y[i][0])
+            
+            if len(X_train) < 5:
+                logger.warning("Insufficient data for Gaussian Process, using exponential smoothing fallback")
+                return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            
+            X_train = np.array(X_train)
+            y_train = np.array(y_train)
+            
+            # Scale features
+            scaler_X = StandardScaler()
+            X_train_scaled = scaler_X.fit_transform(X_train)
+            
+            # Scale targets
+            scaler_y = StandardScaler()
+            y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+            
+            # Select kernel
+            if kernel.upper() == 'MATERN':
+                kernel_obj = C(1.0, (1e-3, 1e3)) * Matern(length_scale=1.0, nu=1.5)
+            elif kernel.upper() == 'RATIONALQUADRATIC':
+                kernel_obj = C(1.0, (1e-3, 1e3)) * RationalQuadratic(length_scale=1.0, alpha=0.1)
+            else:  # RBF
+                kernel_obj = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2))
+            
+            # Train Gaussian Process
+            gp = GaussianProcessRegressor(
+                kernel=kernel_obj,
+                alpha=alpha,
+                normalize_y=False,
+                n_restarts_optimizer=5,
+                random_state=42
+            )
+            gp.fit(X_train_scaled, y_train_scaled)
+            
+            # Generate forecast
+            forecast = []
+            recent_lags = X_train[-1].copy()
+            
+            for _ in range(periods):
+                recent_scaled = scaler_X.transform(recent_lags.reshape(1, -1))[0]
+                pred_scaled, std = gp.predict(recent_scaled.reshape(1, -1), return_std=True)
+                pred = scaler_y.inverse_transform([[pred_scaled[0]]])[0][0]
+                forecast.append(pred)
+                
+                # Update lags
+                recent_lags = np.append(recent_lags[1:], pred)
+            
+            forecast = np.array(forecast)
+            
+            # Calculate metrics on test data
+            if len(X_train) > 0:
+                y_pred_scaled = gp.predict(X_train_scaled)
+                y_pred = scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+                metrics = ForecastExecutionService.calculate_metrics(y_train, y_pred)
+            else:
+                metrics = {'mae': 0, 'rmse': 0, 'mape': 0, 'r_squared': 0}
+            
+            # Validate forecast
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "Gaussian Process")
+            logger.info(variance_msg)
+            
+            logger.info(f"Gaussian Process forecast completed with {periods} periods")
+            return forecast, metrics
+            
+        except ImportError:
+            logger.warning("Scikit-learn not available, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+        except Exception as e:
+            logger.warning(f"Gaussian Process forecasting failed: {str(e)}, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+
+    @staticmethod
+    def mlp_neural_network_forecast(data: pd.DataFrame, periods: int, hidden_layers: List[int] = None, epochs: int = 100, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        Multi-layer Perceptron (MLP) Neural Network forecasting.
+        
+        Args:
+            data: Historical data with 'quantity' or 'total_quantity' column
+            periods: Number of forecast periods
+            hidden_layers: List of hidden layer sizes, e.g., [64, 32]
+            epochs: Number of training epochs
+            batch_size: Batch size for training
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
+        if hidden_layers is None:
+            hidden_layers = [64, 32]
+            
+        try:
+            from tensorflow import keras
+            from tensorflow.keras import layers
+            from sklearn.preprocessing import MinMaxScaler
+            
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+            
+            if len(y) < 20:
+                logger.warning("Insufficient data for MLP, using exponential smoothing fallback")
+                return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            
+            # Create lagged features
+            sequence_length = min(12, len(y) // 3)
+            X_train = []
+            y_train = []
+            
+            for i in range(sequence_length, len(y)):
+                X_train.append(y[i-sequence_length:i])
+                y_train.append(y[i])
+            
+            if len(X_train) < 5:
+                logger.warning("Insufficient sequences for MLP, using exponential smoothing fallback")
+                return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            
+            X_train = np.array(X_train)
+            y_train = np.array(y_train)
+            
+            # Scale data
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            X_scaled = scaler.fit_transform(X_train)
+            y_scaler = MinMaxScaler(feature_range=(0, 1))
+            y_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+            
+            # Build MLP model
+            model = keras.Sequential()
+            model.add(layers.Dense(hidden_layers[0], activation='relu', input_shape=(sequence_length,)))
+            
+            for hidden_size in hidden_layers[1:]:
+                model.add(layers.Dense(hidden_size, activation='relu'))
+                model.add(layers.Dropout(0.2))
+            
+            model.add(layers.Dense(1))
+            
+            model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+            
+            # Train model (suppress verbose output for clean logging)
+            model.fit(
+                X_scaled, y_scaled,
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_split=0.1,
+                verbose=0
+            )
+            
+            # Generate forecast
+            forecast = []
+            recent_data = X_train[-1].copy()
+            
+            for _ in range(periods):
+                recent_scaled = scaler.transform(recent_data.reshape(1, -1))[0]
+                pred_scaled = model.predict(recent_scaled.reshape(1, -1), verbose=0)[0][0]
+                pred = y_scaler.inverse_transform([[pred_scaled]])[0][0]
+                forecast.append(pred)
+                
+                # Update sequence
+                recent_data = np.append(recent_data[1:], pred)
+            
+            forecast = np.array(forecast)
+            
+            # Calculate metrics on training data
+            y_train_pred_scaled = model.predict(X_scaled, verbose=0).flatten()
+            y_train_pred = y_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+            metrics = ForecastExecutionService.calculate_metrics(y_train, y_train_pred)
+            
+            # Validate forecast
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "Neural Network")
+            logger.info(variance_msg)
+            
+            logger.info(f"MLP Neural Network forecast completed with {periods} periods")
+            return forecast, metrics
+            
+        except ImportError:
+            logger.warning("TensorFlow not available, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+        except Exception as e:
+            logger.warning(f"MLP Neural Network forecasting failed: {str(e)}, falling back to Exponential Smoothing")
+            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+
+    @staticmethod
+    def validate_forecast_variance(forecast: np.ndarray, algorithm_name: str, min_variance_threshold: float = 0.001) -> Tuple[bool, str]:
+        """
+        Validate that forecast has reasonable variance and is not constant.
+        
+        Args:
+            forecast: Forecast array
+            algorithm_name: Name of the algorithm for logging
+            min_variance_threshold: Minimum variance threshold
+            
+        Returns:
+            Tuple of (is_valid, warning_message)
+        """
+        if len(forecast) < 2:
+            return False, "Forecast must have at least 2 values"
+
+        forecast = np.asarray(forecast, dtype=np.float64)
+        variance = np.var(forecast)
+        std_dev = np.std(forecast)
+        mean_val = np.mean(forecast)
+
+        # Check if all values are the same (constant forecast)
+        if variance < min_variance_threshold:
+            message = f"[WARN] {algorithm_name}: Forecast is constant or nearly constant (variance={variance:.6f}). All values are {forecast[0]:.2f}"
+            logger.warning(message.replace("[WARN]", ""))
+            return False, message
+
+        # Check for unrealistic variance (values differ drastically)
+        if mean_val > 0:
+            cv = std_dev / mean_val  # Coefficient of variation
+            if cv > 2.0:
+                message = f"[WARN] {algorithm_name}: Forecast has extremely high variance (CV={cv:.2f}). Std Dev={std_dev:.2f}, Mean={mean_val:.2f}"
+                logger.warning(message.replace("[WARN]", ""))
+                return True, message  # Still valid but warn
+
+        return True, f"[PASS] {algorithm_name}: Forecast variance is reasonable (variance={variance:.6f}, std_dev={std_dev:.2f})"
+
+    @staticmethod
+    def detect_constant_forecast(forecast: np.ndarray, tolerance: float = 0.01) -> bool:
+        """
+        Detect if forecast values are constant (poor quality forecast).
+        
+        Args:
+            forecast: Forecast array
+            tolerance: Tolerance for considering values "equal"
+            
+        Returns:
+            True if forecast is constant, False otherwise
+        """
+        forecast = np.asarray(forecast, dtype=np.float64)
+        if len(forecast) < 2:
+            return False
+
+        # Check if all values are within tolerance of the first value
+        first_val = forecast[0]
+        return np.all(np.abs(forecast - first_val) <= tolerance)
 
     @staticmethod
     def seasonal_decomposition_forecast(data: pd.DataFrame, periods: int, season_length: int = 12) -> tuple:
@@ -856,7 +1409,7 @@ class ForecastExecutionService:
     @staticmethod
     def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
         """
-        XGBoost forecasting with feature engineering.
+        XGBoost forecasting with time series cross-validation to prevent data leakage.
 
         Args:
             data: Historical data with 'quantity' column
@@ -885,8 +1438,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < 5:  # Need minimum data for XGBoost
-                raise ValueError("Need at least 5 historical data points for XGBoost")
+            if n < 10:  # Need more data for proper cross-validation
+                raise ValueError("Need at least 10 historical data points for XGBoost with cross-validation")
 
             # Feature engineering: create lag features and time index
             window = min(5, n - 1)
@@ -905,18 +1458,28 @@ class ForecastExecutionService:
             X = np.array(X)
             y_target = np.array(y_target)
 
-            if len(X) < 2:
+            if len(X) < 5:
                 raise ValueError("Insufficient data for XGBoost training")
 
-            # Train XGBoost model
+            # Time series cross-validation: use expanding window
+            train_size = max(5, len(X) - periods)
+            X_train = X[:train_size]
+            y_train = y_target[:train_size]
+            X_test = X[train_size:]
+            y_test = y_target[train_size:]
+
+            logger.info(f"XGBoost time series split: train_size={len(X_train)}, test_size={len(X_test)}")
+
+            # Train XGBoost model on training data only
             model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
                 random_state=42,
-                n_jobs=-1
+                n_jobs=-1,
+                verbosity=0
             )
-            model.fit(X, y_target)
+            model.fit(X_train, y_train, verbose=False)
 
             # Generate forecast
             forecast = []
@@ -933,9 +1496,18 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on training data
-            predicted = model.predict(X)
-            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+            # Calculate metrics on test data (to reflect real performance)
+            if len(X_test) > 0:
+                predicted_test = model.predict(X_test)
+                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+            else:
+                # Fallback to training metrics if no test data
+                predicted = model.predict(X_train)
+                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+
+            # Validate forecast variance
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "XGBoost")
+            logger.info(variance_msg)
 
             return forecast, metrics
 
@@ -945,7 +1517,7 @@ class ForecastExecutionService:
 
     @staticmethod
     def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float]]:
-        """Support Vector Regression forecasting"""
+        """Support Vector Regression forecasting with time series cross-validation."""
         try:
             # Validate parameters
             C = max(0.1, min(100.0, C))
@@ -965,8 +1537,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < 5:  # Need minimum data for SVR
-                raise ValueError("Need at least 5 historical data points for SVR")
+            if n < 10:  # Need more data for proper cross-validation
+                raise ValueError("Need at least 10 historical data points for SVR with cross-validation")
 
             # Feature engineering: create lag features and time index
             window = min(5, n - 1)
@@ -985,16 +1557,30 @@ class ForecastExecutionService:
             X = np.array(X)
             y_target = np.array(y_target)
 
-            if len(X) < 2:
+            if len(X) < 5:
                 raise ValueError("Insufficient data for SVR training")
 
-            # Train SVR model
+            # Time series cross-validation: use expanding window
+            train_size = max(5, len(X) - periods)
+            X_train = X[:train_size]
+            y_train = y_target[:train_size]
+            X_test = X[train_size:]
+            y_test = y_target[train_size:]
+
+            logger.info(f"SVR time series split: train_size={len(X_train)}, test_size={len(X_test)}")
+
+            # Scale features for SVR (required for better performance)
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            
+            # Train SVR model on training data only
             model = SVR(
                 kernel=kernel,
                 C=C,
                 epsilon=epsilon
             )
-            model.fit(X, y_target)
+            model.fit(X_train_scaled, y_train)
 
             # Generate forecast
             forecast = []
@@ -1002,7 +1588,8 @@ class ForecastExecutionService:
 
             for i in range(periods):
                 features = recent_lags + [n + i]
-                pred = model.predict([features])[0]
+                features_scaled = scaler.transform([features])[0]
+                pred = model.predict([features_scaled])[0]
                 pred = max(0, pred)
                 forecast.append(pred)
 
@@ -1011,9 +1598,20 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on training data
-            predicted = model.predict(X)
-            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+            # Calculate metrics on test data
+            if len(X_test) > 0:
+                X_test_scaled = scaler.transform(X_test)
+                predicted_test = model.predict(X_test_scaled)
+                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+            else:
+                # Fallback to training metrics if no test data
+                predicted = model.predict(X_train_scaled)
+                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+
+            # Validate forecast variance
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "SVR")
+            # Log without Unicode to avoid Windows encoding issues
+            logger.info(variance_msg.replace("[PASS]", "OK").replace("[WARN]", "WARN"))
 
             return forecast, metrics
 
@@ -1023,7 +1621,7 @@ class ForecastExecutionService:
 
     @staticmethod
     def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float]]:
-        """K-Nearest Neighbors forecasting"""
+        """K-Nearest Neighbors forecasting with time series cross-validation."""
         try:
             # Prepare quantity data
             if 'total_quantity' in data.columns:
@@ -1034,8 +1632,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < n_neighbors + 2:  # Need minimum data for KNN
-                raise ValueError(f"Need at least {n_neighbors + 2} historical data points for KNN")
+            if n < n_neighbors + 5:  # Need more data for proper cross-validation
+                raise ValueError(f"Need at least {n_neighbors + 5} historical data points for KNN with cross-validation")
 
             # Feature engineering: create lag features and time index
             window = min(5, n - 1)
@@ -1057,12 +1655,26 @@ class ForecastExecutionService:
             if len(X) < n_neighbors:
                 raise ValueError(f"Insufficient data for KNN training (need at least {n_neighbors} samples)")
 
-            # Train KNN model
+            # Time series cross-validation: use expanding window
+            train_size = max(n_neighbors, len(X) - periods)
+            X_train = X[:train_size]
+            y_train = y_target[:train_size]
+            X_test = X[train_size:]
+            y_test = y_target[train_size:]
+
+            logger.info(f"KNN time series split: train_size={len(X_train)}, test_size={len(X_test)}")
+
+            # Scale features for KNN (important for distance metrics)
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+
+            # Train KNN model on training data only
             model = KNeighborsRegressor(
-                n_neighbors=min(n_neighbors, len(X)),
+                n_neighbors=min(n_neighbors, len(X_train)),
                 weights='uniform'
             )
-            model.fit(X, y_target)
+            model.fit(X_train_scaled, y_train)
 
             # Generate forecast
             forecast = []
@@ -1070,7 +1682,8 @@ class ForecastExecutionService:
 
             for i in range(periods):
                 features = recent_lags + [n + i]
-                pred = model.predict([features])[0]
+                features_scaled = scaler.transform([features])[0]
+                pred = model.predict([features_scaled])[0]
                 pred = max(0, pred)
                 forecast.append(pred)
 
@@ -1079,9 +1692,20 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on training data
-            predicted = model.predict(X)
-            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+            # Calculate metrics on test data
+            if len(X_test) > 0:
+                X_test_scaled = scaler.transform(X_test)
+                predicted_test = model.predict(X_test_scaled)
+                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+            else:
+                # Fallback to training metrics if no test data
+                predicted = model.predict(X_train_scaled)
+                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+
+            # Validate forecast variance
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "KNN")
+            # Log without Unicode to avoid Windows encoding issues
+            logger.info(variance_msg.replace("[PASS]", "OK").replace("[WARN]", "WARN"))
 
             return forecast, metrics
 
@@ -1529,6 +2153,15 @@ class ForecastExecutionService:
             # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
             
+            # Validate forecast quality
+            is_constant = ForecastExecutionService.detect_constant_forecast(forecast)
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, algorithm_name)
+
+            if is_constant:
+                logger.warning(f"⚠️ Algorithm {algorithm_name} produced constant forecast - all values are {forecast[0]:.2f}")
+            else:
+                logger.info(f"✓ Algorithm {algorithm_name}: {variance_msg}")
+            
             # Extract accuracy metric (use MAPE if available, otherwise calculate from R-squared)
             accuracy = metrics.get('mape')
             if accuracy is None:
@@ -1545,7 +2178,9 @@ class ForecastExecutionService:
                 'accuracy': accuracy,
                 'mae': metrics.get('mae', 0),
                 'rmse': metrics.get('rmse', 0),
-                'mape': metrics.get('mape', 0)
+                'mape': metrics.get('mape', 0),
+                'is_constant_forecast': is_constant,
+                'variance_valid': is_valid
             }
             
         except Exception as e:

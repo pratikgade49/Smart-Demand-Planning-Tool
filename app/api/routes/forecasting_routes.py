@@ -415,13 +415,13 @@ async def execute_forecast_run(
 ):
     """
     Execute a forecast run.
-    
+
     This will:
     1. Fetch historical data based on filters
     2. Execute all mapped algorithms in order
     3. Store forecast results
     4. Update run status
-    
+
     **Note**: This is an asynchronous operation that may take time for large datasets.
     """
     try:
@@ -433,6 +433,58 @@ async def execute_forecast_run(
             user_email=tenant_data["email"]
         )
         logger.info(f"Successfully executed forecast run {forecast_run_id}: {result.get('status', 'Unknown')}")
+
+        # Fetch forecast results if execution was successful
+        forecast_results = []
+        if result.get('status') == 'Completed':
+            try:
+                from app.core.database import get_db_manager
+                db_manager = get_db_manager()
+
+                with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            SELECT a.algorithm_id, a.algorithm_name, fr.forecast_date, fr.forecast_quantity
+                            FROM forecast_results fr
+                            JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
+                            WHERE fr.tenant_id = %s AND fr.forecast_run_id = %s
+                            ORDER BY a.algorithm_id, fr.forecast_date
+                        """, (tenant_data["tenant_id"], forecast_run_id))
+
+                        # Group results by algorithm
+                        algorithm_results = {}
+                        for row in cursor.fetchall():
+                            algorithm_id = row[0]
+                            algorithm_name = row[1]
+                            forecast_date = row[2]
+                            forecast_quantity = row[3]
+
+                            if algorithm_id not in algorithm_results:
+                                algorithm_results[algorithm_id] = {
+                                    "algorithm_id": algorithm_id,
+                                    "algorithm_name": algorithm_name,
+                                    "results": []
+                                }
+
+                            algorithm_results[algorithm_id]["results"].append({
+                                "date": forecast_date.isoformat() if forecast_date else None,
+                                "quantity": float(forecast_quantity) if forecast_quantity else 0
+                            })
+
+                        forecast_results = list(algorithm_results.values())
+                        logger.info(f"Fetched forecast results for {len(forecast_results)} algorithms in run {forecast_run_id}")
+
+                    finally:
+                        cursor.close()
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch forecast results for run {forecast_run_id}: {str(e)}")
+                # Continue without forecast results if fetch fails
+
+        # Add forecast results to the response data
+        result['forecast_results'] = forecast_results
+
         return ResponseHandler.success(data=result)
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
