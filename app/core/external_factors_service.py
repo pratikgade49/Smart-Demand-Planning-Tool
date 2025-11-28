@@ -1,270 +1,504 @@
 """
-External Factors Management Service.
-Handles external factor data that can influence forecasts.
+Enhanced External Factors Service with FRED Integration.
+Works with existing tenant-specific external_factors tables.
 """
 
 import uuid
 from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
 import logging
+import pandas as pd
+from psycopg2.extras import Json
 
 from app.core.database import get_db_manager
-from app.core.exceptions import DatabaseException, NotFoundException
-from app.schemas.forecasting import ExternalFactorCreate, ExternalFactorUpdate
+from app.core.exceptions import DatabaseException, NotFoundException, ValidationException
 
 logger = logging.getLogger(__name__)
 
 
 class ExternalFactorsService:
-    """Service for external factors operations."""
+    """Enhanced service for external factors with FRED integration."""
 
     @staticmethod
-    def create_factor(
+    def bulk_import_from_fred(
         tenant_id: str,
         database_name: str,
-        request: ExternalFactorCreate,
-        user_email: str
+        series_configs: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        user_email: str,
+        fred_api_key: str
     ) -> Dict[str, Any]:
-        """Create a new external factor record."""
-        factor_id = str(uuid.uuid4())
+        """
+        Bulk import external factors from FRED API into tenant's external_factors table.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            series_configs: List of FRED series configurations
+            start_date: Start date for data
+            end_date: End date for data
+            user_email: User performing import
+            fred_api_key: FRED API key
+            
+        Returns:
+            Import summary with success/failure counts
+        """
+        from app.core.fred_api_service import FREDAPIService
+        
+        fred_service = FREDAPIService(fred_api_key)
         db_manager = get_db_manager()
-
+        
+        total_imported = 0
+        total_updated = 0
+        failed_series = []
+        
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    cursor.execute("""
-                        INSERT INTO external_factors
-                        (factor_id, tenant_id, date, factor_name, factor_value,
-                         unit, source, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        factor_id,
-                        tenant_id,
-                        request.date,
-                        request.factor_name,
-                        request.factor_value,
-                        request.unit,
-                        request.source,
-                        user_email
-                    ))
-
-                    conn.commit()
-                    logger.info(f"External factor created: {factor_id}")
-
-                    return ExternalFactorsService.get_factor(
-                        tenant_id, database_name, factor_id
-                    )
-
-                finally:
-                    cursor.close()
-
-        except Exception as e:
-            logger.error(f"Failed to create external factor: {str(e)}")
-            raise DatabaseException(f"Failed to create external factor: {str(e)}")
-
-    @staticmethod
-    def get_factor(
-        tenant_id: str,
-        database_name: str,
-        factor_id: str
-    ) -> Dict[str, Any]:
-        """Get external factor by ID."""
-        db_manager = get_db_manager()
-
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("""
-                        SELECT factor_id, tenant_id, date, factor_name, factor_value,
-                               unit, source, created_at, updated_at, created_by, updated_by
-                        FROM external_factors
-                        WHERE factor_id = %s AND tenant_id = %s AND deleted_at IS NULL
-                    """, (factor_id, tenant_id))
-
-                    result = cursor.fetchone()
-                    if not result:
-                        raise NotFoundException("External Factor", factor_id)
-
-                    return {
-                        "factor_id": str(result[0]),
-                        "tenant_id": str(result[1]),
-                        "date": result[2].isoformat() if result[2] else None,
-                        "factor_name": result[3],
-                        "factor_value": float(result[4]),
-                        "unit": result[5],
-                        "source": result[6],
-                        "created_at": result[7].isoformat() if result[7] else None,
-                        "updated_at": result[8].isoformat() if result[8] else None,
-                        "created_by": result[9],
-                        "updated_by": result[10]
-                    }
-
-                finally:
-                    cursor.close()
-
-        except NotFoundException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to get external factor: {str(e)}")
-            raise DatabaseException(f"Failed to get external factor: {str(e)}")
-
-    @staticmethod
-    def update_factor(
-        tenant_id: str,
-        database_name: str,
-        factor_id: str,
-        request: ExternalFactorUpdate,
-        user_email: str
-    ) -> Dict[str, Any]:
-        """Update external factor."""
-        db_manager = get_db_manager()
-
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    # Check factor exists
-                    cursor.execute("""
-                        SELECT factor_id FROM external_factors
-                        WHERE factor_id = %s AND tenant_id = %s AND deleted_at IS NULL
-                    """, (factor_id, tenant_id))
+                    for config in series_configs:
+                        series_id = config.get("series_id")
+                        factor_name = config.get("factor_name", series_id)
+                        
+                        try:
+                            logger.info(f"Importing FRED series {series_id} as '{factor_name}'")
+                            
+                            # Fetch data from FRED
+                            df = fred_service.get_series_data(
+                                series_id=series_id,
+                                start_date=start_date,
+                                end_date=end_date
+                            )
+                            
+                            if df.empty:
+                                logger.warning(f"No data returned for series {series_id}")
+                                failed_series.append({
+                                    "series_id": series_id,
+                                    "error": "No data available for date range"
+                                })
+                                continue
+                            
+                            # Get series info for metadata
+                            series_info = fred_service.get_series_info(series_id)
+                            
+                            # Bulk insert with conflict handling
+                            inserted = 0
+                            updated = 0
+                            
+                            for _, row in df.iterrows():
+                                factor_id = str(uuid.uuid4())
+                                record_date = row['date'].date()
+                                
+                                # Try insert, update on conflict
+                                cursor.execute("""
+                                    INSERT INTO external_factors
+                                    (factor_id, tenant_id, date, factor_name, factor_value,
+                                     unit, source, created_by, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (tenant_id, factor_name, date) 
+                                    DO UPDATE SET 
+                                        factor_value = EXCLUDED.factor_value,
+                                        unit = EXCLUDED.unit,
+                                        source = EXCLUDED.source,
+                                        updated_at = %s,
+                                        updated_by = %s
+                                    RETURNING (xmax = 0) AS inserted
+                                """, (
+                                    factor_id,
+                                    tenant_id,
+                                    record_date,
+                                    factor_name,
+                                    float(row['value']),
+                                    series_info.get('units', 'N/A'),
+                                    f"FRED: {series_id}",
+                                    user_email,
+                                    datetime.utcnow(),
+                                    datetime.utcnow(),
+                                    user_email
+                                ))
+                                
+                                # Check if inserted or updated
+                                result = cursor.fetchone()
+                                if result and result[0]:
+                                    inserted += 1
+                                else:
+                                    updated += 1
+                            
+                            total_imported += inserted
+                            total_updated += updated
+                            
+                            logger.info(
+                                f"Imported {factor_name}: {inserted} new, {updated} updated records"
+                            )
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to import {series_id}: {str(e)}")
+                            failed_series.append({
+                                "series_id": series_id,
+                                "factor_name": factor_name,
+                                "error": str(e)
+                            })
                     
-                    if not cursor.fetchone():
-                        raise NotFoundException("External Factor", factor_id)
-
-                    # Build update query
-                    update_fields = []
-                    params = []
-
-                    if request.factor_value is not None:
-                        update_fields.append("factor_value = %s")
-                        params.append(request.factor_value)
-
-                    if request.unit is not None:
-                        update_fields.append("unit = %s")
-                        params.append(request.unit)
-
-                    if request.source is not None:
-                        update_fields.append("source = %s")
-                        params.append(request.source)
-
-                    if not update_fields:
-                        return ExternalFactorsService.get_factor(
-                            tenant_id, database_name, factor_id
-                        )
-
-                    update_fields.extend(["updated_at = %s", "updated_by = %s"])
-                    params.extend([datetime.utcnow(), user_email, factor_id, tenant_id])
-
-                    query = f"""
-                        UPDATE external_factors
-                        SET {', '.join(update_fields)}
-                        WHERE factor_id = %s AND tenant_id = %s
-                    """
-
-                    cursor.execute(query, params)
                     conn.commit()
-                    logger.info(f"External factor updated: {factor_id}")
-
-                    return ExternalFactorsService.get_factor(
-                        tenant_id, database_name, factor_id
-                    )
-
+                    logger.info(f"Bulk import completed: {total_imported} inserted, {total_updated} updated")
+                    
                 finally:
                     cursor.close()
-
-        except NotFoundException:
-            raise
+            
+            return {
+                "total_inserted": total_imported,
+                "total_updated": total_updated,
+                "total_records": total_imported + total_updated,
+                "successful_series": len(series_configs) - len(failed_series),
+                "failed_series": failed_series,
+                "import_date_range": {
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat()
+                }
+            }
+            
         except Exception as e:
-            logger.error(f"Failed to update external factor: {str(e)}")
-            raise DatabaseException(f"Failed to update external factor: {str(e)}")
+            logger.error(f"Bulk import from FRED failed: {str(e)}")
+            raise DatabaseException(f"Failed to import from FRED: {str(e)}")
 
     @staticmethod
-    def list_factors(
+    def forecast_future_factors(
         tenant_id: str,
         database_name: str,
-        factor_name: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        page: int = 1,
-        page_size: int = 50
-    ) -> Tuple[List[Dict[str, Any]], int]:
-        """List external factors with optional filters."""
+        factor_names: List[str],
+        forecast_start: date,
+        forecast_end: date,
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Forecast future values for selected external factors.
+        Uses historical data to extrapolate future values.
+        """
+        from app.core.forecast_execution_service import ForecastExecutionService
+        
         db_manager = get_db_manager()
-
+        total_forecasted = 0
+        successful_factors = []
+        failed_factors = []
+        
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Build WHERE clause
-                    where_clauses = ["tenant_id = %s", "deleted_at IS NULL"]
-                    params = [tenant_id]
+                    for factor_name in factor_names:
+                        try:
+                            # Get historical data
+                            cursor.execute("""
+                                SELECT date, factor_value, unit, source
+                                FROM external_factors
+                                WHERE tenant_id = %s 
+                                AND factor_name = %s 
+                                AND deleted_at IS NULL
+                                ORDER BY date
+                            """, (tenant_id, factor_name))
+                            
+                            rows = cursor.fetchall()
+                            
+                            if len(rows) < 3:
+                                logger.warning(f"Insufficient historical data for {factor_name}")
+                                failed_factors.append({
+                                    "factor_name": factor_name,
+                                    "error": "Insufficient historical data (need at least 3 data points)"
+                                })
+                                continue
+                            
+                            # Convert to DataFrame
+                            df = pd.DataFrame(rows, columns=['date', 'value', 'unit', 'source'])
+                            df['date'] = pd.to_datetime(df['date'])
+                            
+                            interval_type = ExternalFactorsService._detect_factor_interval(df['date'])
+                            forecast_dates = ExternalFactorsService._generate_forecast_dates(
+                                forecast_start,
+                                forecast_end,
+                                interval_type
+                            )
+                            periods = len(forecast_dates)
+                            
+                            if periods <= 0:
+                                failed_factors.append({
+                                    "factor_name": factor_name,
+                                    "error": "Invalid forecast date range"
+                                })
+                                continue
+                            
+                            forecast_values, _ = ForecastExecutionService.linear_regression_forecast(
+                                data=pd.DataFrame({'total_quantity': df['value'].values}),
+                                periods=periods
+                            )
+                            
+                            # Insert forecasted values
+                            unit = rows[0][2] if rows else 'N/A'
+                            source = f"Forecasted from historical data"
+                            
+                            inserted = 0
+                            for forecast_date, forecast_value in zip(forecast_dates, forecast_values):
+                                factor_id = str(uuid.uuid4())
+                                
+                                cursor.execute("""
+                                    INSERT INTO external_factors
+                                    (factor_id, tenant_id, date, factor_name, factor_value,
+                                     unit, source, created_by, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (tenant_id, factor_name, date) 
+                                    DO UPDATE SET 
+                                        factor_value = EXCLUDED.factor_value,
+                                        source = EXCLUDED.source,
+                                        updated_at = %s,
+                                        updated_by = %s
+                                """, (
+                                    factor_id,
+                                    tenant_id,
+                                    forecast_date,
+                                    factor_name,
+                                    float(forecast_value),
+                                    unit,
+                                    source,
+                                    user_email,
+                                    datetime.utcnow(),
+                                    datetime.utcnow(),
+                                    user_email
+                                ))
+                                inserted += 1
+                            
+                            total_forecasted += inserted
+                            successful_factors.append(factor_name)
+                            
+                            logger.info(f"Forecasted {inserted} values for {factor_name}")
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to forecast {factor_name}: {str(e)}")
+                            failed_factors.append({
+                                "factor_name": factor_name,
+                                "error": str(e)
+                            })
+                    
+                    conn.commit()
+                    
+                finally:
+                    cursor.close()
+            
+            return {
+                "total_forecasted": total_forecasted,
+                "successful_factors": successful_factors,
+                "failed_factors": failed_factors,
+                "forecast_date_range": {
+                    "start": forecast_start.isoformat(),
+                    "end": forecast_end.isoformat()
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Factor forecasting failed: {str(e)}")
+            raise DatabaseException(f"Failed to forecast factors: {str(e)}")
 
-                    if factor_name:
-                        where_clauses.append("factor_name = %s")
-                        params.append(factor_name)
+    @staticmethod
+    def _detect_factor_interval(dates: pd.Series) -> str:
+        if dates is None or len(dates) < 2:
+            return "DAILY"
+        ordered_dates = dates.sort_values().reset_index(drop=True)
+        inferred = None
+        try:
+            inferred = pd.infer_freq(pd.DatetimeIndex(ordered_dates))
+        except (ValueError, TypeError):
+            inferred = None
+        if inferred:
+            freq_key = inferred.upper()
+            freq_mappings = [
+                ("QS", "QUARTERLY"),
+                ("Q", "QUARTERLY"),
+                ("MS", "MONTHLY"),
+                ("M", "MONTHLY"),
+                ("W", "WEEKLY"),
+                ("D", "DAILY"),
+                ("AS", "YEARLY"),
+                ("A", "YEARLY")
+            ]
+            for prefix, interval in freq_mappings:
+                if freq_key.startswith(prefix):
+                    return interval
+        diffs = ordered_dates.diff().dropna().dt.days.abs()
+        if diffs.empty:
+            return "DAILY"
+        median_diff = diffs.median()
+        if median_diff >= 300:
+            return "YEARLY"
+        if median_diff >= 80:
+            return "QUARTERLY"
+        if median_diff >= 25:
+            return "MONTHLY"
+        if median_diff >= 6:
+            return "WEEKLY"
+        return "DAILY"
 
-                    if date_from:
-                        where_clauses.append("date >= %s")
-                        params.append(date_from)
+    @staticmethod
+    def _generate_forecast_dates(
+        start_date_value: date,
+        end_date_value: date,
+        interval_type: str
+    ) -> List[date]:
+        if not start_date_value or not end_date_value or start_date_value > end_date_value:
+            return []
+        interval = (interval_type or "DAILY").upper()
+        dates: List[date] = []
+        current = start_date_value
+        while current <= end_date_value:
+            dates.append(current)
+            if interval == "WEEKLY":
+                current += timedelta(weeks=1)
+            elif interval == "MONTHLY":
+                current += relativedelta(months=1)
+            elif interval == "QUARTERLY":
+                current += relativedelta(months=3)
+            elif interval == "YEARLY":
+                current += relativedelta(years=1)
+            else:
+                current += timedelta(days=1)
+        return dates
 
-                    if date_to:
-                        where_clauses.append("date <= %s")
-                        params.append(date_to)
-
-                    where_sql = " AND ".join(where_clauses)
-
-                    # Get total count
-                    cursor.execute(
-                        f"SELECT COUNT(*) FROM external_factors WHERE {where_sql}",
-                        params
+    @staticmethod
+    def get_factors_for_forecast_run(
+        tenant_id: str,
+        database_name: str,
+        selected_factors: Optional[List[str]],
+        start_date: date,
+        end_date: date
+    ) -> pd.DataFrame:
+        """
+        Get external factors for forecast run with optional selection.
+        Returns pivoted DataFrame ready for merging with historical data.
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Build query based on selection
+                    if selected_factors and len(selected_factors) > 0:
+                        placeholders = ', '.join(['%s'] * len(selected_factors))
+                        query = f"""
+                            SELECT date, factor_name, factor_value
+                            FROM external_factors
+                            WHERE tenant_id = %s 
+                            AND deleted_at IS NULL
+                            AND date >= %s
+                            AND date <= %s
+                            AND factor_name IN ({placeholders})
+                            ORDER BY date, factor_name
+                        """
+                        params = [tenant_id, start_date, end_date] + selected_factors
+                    else:
+                        # No factors selected - return empty DataFrame
+                        logger.info("No external factors selected for this forecast run")
+                        return pd.DataFrame()
+                    
+                    cursor.execute(query, params)
+                    
+                    rows = cursor.fetchall()
+                    
+                    if not rows:
+                        logger.warning(f"No external factor data found for selected factors in date range")
+                        return pd.DataFrame()
+                    
+                    # Convert to DataFrame and pivot
+                    df = pd.DataFrame(rows, columns=['date', 'factor_name', 'factor_value'])
+                    df['date'] = pd.to_datetime(df['date'])
+                    
+                    # Pivot so each factor becomes a column
+                    df_pivot = df.pivot_table(
+                        index='date',
+                        columns='factor_name',
+                        values='factor_value',
+                        aggfunc='mean'
+                    ).reset_index()
+                    
+                    logger.info(
+                        f"Retrieved {len(df_pivot)} date records with "
+                        f"{len(df_pivot.columns) - 1} factors: {list(df_pivot.columns[1:])}"
                     )
-                    total_count = cursor.fetchone()[0]
+                    
+                    return df_pivot
+                    
+                finally:
+                    cursor.close()
+                    
+        except Exception as e:
+            logger.error(f"Failed to get factors for forecast: {str(e)}")
+            raise DatabaseException(f"Failed to retrieve factors: {str(e)}")
 
-                    # Get paginated results
-                    offset = (page - 1) * page_size
-                    cursor.execute(f"""
-                        SELECT factor_id, date, factor_name, factor_value, unit,
-                               source, created_at, created_by
+    @staticmethod
+    def get_available_factors_summary(
+        tenant_id: str,
+        database_name: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get summary of all available external factors for tenant.
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        SELECT 
+                            factor_name,
+                            MIN(date) as earliest_date,
+                            MAX(date) as latest_date,
+                            COUNT(*) as data_points,
+                            MAX(unit) as unit,
+                            MAX(source) as source,
+                            AVG(factor_value) as avg_value,
+                            MIN(factor_value) as min_value,
+                            MAX(factor_value) as max_value
                         FROM external_factors
-                        WHERE {where_sql}
-                        ORDER BY date DESC, factor_name
-                        LIMIT %s OFFSET %s
-                    """, params + [page_size, offset])
-
+                        WHERE tenant_id = %s AND deleted_at IS NULL
+                        GROUP BY factor_name
+                        ORDER BY factor_name
+                    """, (tenant_id,))
+                    
                     factors = []
                     for row in cursor.fetchall():
                         factors.append({
-                            "factor_id": str(row[0]),
-                            "date": row[1].isoformat() if row[1] else None,
-                            "factor_name": row[2],
-                            "factor_value": float(row[3]),
+                            "factor_name": row[0],
+                            "earliest_date": row[1].isoformat() if row[1] else None,
+                            "latest_date": row[2].isoformat() if row[2] else None,
+                            "data_points": row[3],
                             "unit": row[4],
                             "source": row[5],
-                            "created_at": row[6].isoformat() if row[6] else None,
-                            "created_by": row[7]
+                            "avg_value": round(float(row[6]), 4) if row[6] else None,
+                            "min_value": round(float(row[7]), 4) if row[7] else None,
+                            "max_value": round(float(row[8]), 4) if row[8] else None
                         })
-
-                    return factors, total_count
-
+                    
+                    return factors
+                    
                 finally:
                     cursor.close()
-
+                    
         except Exception as e:
-            logger.error(f"Failed to list external factors: {str(e)}")
-            raise DatabaseException(f"Failed to list external factors: {str(e)}")
+            logger.error(f"Failed to get factors summary: {str(e)}")
+            raise DatabaseException(f"Failed to get factors summary: {str(e)}")
 
     @staticmethod
-    def delete_factor(
+    def delete_factor_by_name(
         tenant_id: str,
         database_name: str,
-        factor_id: str
-    ) -> bool:
-        """Soft delete an external factor."""
+        factor_name: str
+    ) -> int:
+        """
+        Soft delete all records for a specific factor.
+        Returns number of records deleted.
+        """
         db_manager = get_db_manager()
-
+        
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
@@ -272,81 +506,20 @@ class ExternalFactorsService:
                     cursor.execute("""
                         UPDATE external_factors
                         SET deleted_at = %s
-                        WHERE factor_id = %s AND tenant_id = %s AND deleted_at IS NULL
-                    """, (datetime.utcnow(), factor_id, tenant_id))
-
-                    if cursor.rowcount == 0:
-                        raise NotFoundException("External Factor", factor_id)
-
+                        WHERE tenant_id = %s 
+                        AND factor_name = %s 
+                        AND deleted_at IS NULL
+                    """, (datetime.utcnow(), tenant_id, factor_name))
+                    
+                    deleted_count = cursor.rowcount
                     conn.commit()
-                    logger.info(f"External factor deleted: {factor_id}")
-                    return True
-
+                    
+                    logger.info(f"Soft deleted {deleted_count} records for factor '{factor_name}'")
+                    return deleted_count
+                    
                 finally:
                     cursor.close()
-
-        except NotFoundException:
-            raise
+                    
         except Exception as e:
-            logger.error(f"Failed to delete external factor: {str(e)}")
-            raise DatabaseException(f"Failed to delete external factor: {str(e)}")
-
-    @staticmethod
-    def get_factors_for_period(
-        tenant_id: str,
-        database_name: str,
-        start_date: date,
-        end_date: date,
-        factor_names: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get all external factors for a specific time period.
-        Useful for forecast execution.
-        """
-        db_manager = get_db_manager()
-
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    where_clauses = [
-                        "tenant_id = %s",
-                        "deleted_at IS NULL",
-                        "date >= %s",
-                        "date <= %s"
-                    ]
-                    params = [tenant_id, start_date, end_date]
-
-                    if factor_names:
-                        placeholders = ', '.join(['%s'] * len(factor_names))
-                        where_clauses.append(f"factor_name IN ({placeholders})")
-                        params.extend(factor_names)
-
-                    where_sql = " AND ".join(where_clauses)
-
-                    cursor.execute(f"""
-                        SELECT factor_id, date, factor_name, factor_value, unit, source
-                        FROM external_factors
-                        WHERE {where_sql}
-                        ORDER BY date, factor_name
-                    """, params)
-
-                    factors = []
-                    for row in cursor.fetchall():
-                        factors.append({
-                            "factor_id": str(row[0]),
-                            "date": row[1].isoformat() if row[1] else None,
-                            "factor_name": row[2],
-                            "factor_value": float(row[3]),
-                            "unit": row[4],
-                            "source": row[5]
-                        })
-
-                    return factors
-
-                finally:
-                    cursor.close()
-
-        except Exception as e:
-            logger.error(f"Failed to get factors for period: {str(e)}")
-            raise DatabaseException(f"Failed to get factors for period: {str(e)}")
+            logger.error(f"Failed to delete factor: {str(e)}")
+            raise DatabaseException(f"Failed to delete factor: {str(e)}")

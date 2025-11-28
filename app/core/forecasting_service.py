@@ -456,7 +456,7 @@ class ForecastingService:
                             unique_vals = df[col].unique()
                             logger.info(f"Unique {col} values: {unique_vals[:10]}")  # First 10
                 else:
-                    logger.warning("⚠️ NO DATA RETURNED - Check if filters are too restrictive!")
+                    logger.warning("WARNING: NO DATA RETURNED - Check if filters are too restrictive!")
                 
                 logger.info(f"=== END DEBUG ===\n")
                 

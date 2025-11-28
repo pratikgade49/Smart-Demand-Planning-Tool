@@ -14,6 +14,7 @@ import threading
 from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 try:
     from prophet import Prophet
@@ -79,6 +80,9 @@ class ForecastExecutionService:
                         validated_params['alphas'] = [max(0.0, min(1.0, float(alphas)))]
                 elif 'alpha' in validated_params:
                     validated_params['alpha'] = max(0.0, min(1.0, float(validated_params['alpha'])))
+                else:
+                    # Default to more alpha values for better optimization
+                    validated_params['alphas'] = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
 
             elif algorithm_id == 5:  # Enhanced Exponential Smoothing
                 # alphas: list of floats 0.0-1.0
@@ -88,6 +92,9 @@ class ForecastExecutionService:
                         validated_params['alphas'] = [max(0.0, min(1.0, float(a))) for a in alphas]
                     else:
                         validated_params['alphas'] = [max(0.0, min(1.0, float(alphas)))]
+                else:
+                    # Replace existing alpha values with more comprehensive set
+                    validated_params['alphas'] = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]
 
             elif algorithm_id == 6:  # Holt Winters
                 # alpha, beta, gamma: 0.0-1.0
@@ -218,6 +225,7 @@ class ForecastExecutionService:
             filters = forecast_run.get('forecast_filters', {})
             aggregation_level = filters.get('aggregation_level', 'product')
             interval = filters.get('interval', 'MONTHLY')
+            selected_factors = filters.get('selected_external_factors')
             
             # Get historical data
             historical_data = ForecastingService.prepare_aggregated_data(
@@ -238,7 +246,8 @@ class ForecastExecutionService:
                 tenant_id,
                 database_name,
                 forecast_run['forecast_start'],
-                forecast_run['forecast_end']
+                forecast_run['forecast_end'],
+                selected_factors=selected_factors
             )
             
             # Execute each algorithm in parallel
@@ -692,7 +701,7 @@ class ForecastExecutionService:
 
     @staticmethod
     def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1, 0.3, 0.5]) -> tuple:
-        """Exponential smoothing forecasting with proper future value projection"""
+        """Enhanced exponential smoothing with windowed regression approach"""
         try:
             # Validate parameters
             validated_alphas = []
@@ -703,6 +712,7 @@ class ForecastExecutionService:
 
             logger.info(f"Using exponential smoothing alphas: {alphas}")
 
+            # Get quantity values
             if 'total_quantity' in data.columns:
                 y = data['total_quantity'].values
             elif 'quantity' in data.columns:
@@ -711,41 +721,86 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
+            
+            # Handle small datasets
             if n < 3:
-                return np.full(periods, y[-1] if len(y) > 0 else 0), {'mape': 100.0, 'mae': np.std(y), 'rmse': np.std(y)}
+                return np.full(periods, y[-1] if len(y) > 0 else 0), {
+                    'mape': 100.0, 
+                    'mae': np.std(y) if len(y) > 1 else 0, 
+                    'rmse': np.std(y) if len(y) > 1 else 0
+                }
 
             best_metrics = None
             best_forecast = None
 
             for alpha in alphas:
-                # Calculate smoothed values for historical data
-                smoothed = np.zeros(n)
-                smoothed[0] = y[0]
+                logger.info(f"Running Exponential Smoothing with alpha={alpha}")
+                
+                # Use windowed regression approach (matching old implementation)
+                window = min(5, n - 1)
+                X, y_target = [], []
 
-                for i in range(1, n):
-                    smoothed[i] = alpha * y[i] + (1 - alpha) * smoothed[i-1]
+                for i in range(window, n):
+                    # Calculate exponentially weighted historical values
+                    weights = np.array([alpha * (1 - alpha) ** j for j in range(window)])
+                    weights = weights / weights.sum()
+                    weighted_history = np.sum(weights * y[i-window:i])
 
-                # Use linear regression on smoothed values to determine trend
-                x = np.arange(n).reshape(-1, 1)
-                trend_model = LinearRegression()
-                trend_model.fit(x, smoothed)
-                trend_slope = trend_model.coef_[0]
-                trend_intercept = trend_model.intercept_
+                    # Features: smoothed value + time trend
+                    features = [weighted_history, i]
+                    X.append(features)
+                    y_target.append(y[i])
 
-                # Project future values using the trend from smoothed data
-                forecast = []
-                for i in range(periods):
-                    future_x = n + i
-                    forecast_value = trend_slope * future_x + trend_intercept
-                    forecast_value = max(0, forecast_value)  # Ensure non-negative
-                    forecast.append(forecast_value)
+                if len(X) > 1:
+                    X = np.array(X)
+                    y_target = np.array(y_target)
 
-                forecast = np.array(forecast)
+                    # Fit linear regression model with smoothed features
+                    model = LinearRegression()
+                    model.fit(X, y_target)
 
-                # Calculate metrics on historical data
-                metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
+                    # Generate forecast with rolling predictions
+                    forecast = []
+                    last_values = y[-window:].copy()
 
-                if best_metrics is None or metrics['rmse'] < best_metrics['rmse']:
+                    for i in range(periods):
+                        # Calculate exponentially weighted history
+                        weights = np.array([alpha * (1 - alpha) ** j for j in range(len(last_values))])
+                        weights = weights / weights.sum()
+                        weighted_history = np.sum(weights * last_values)
+
+                        # Create features for prediction
+                        features = [weighted_history, n + i]
+                        
+                        # Predict next value
+                        pred = model.predict([features])[0]
+                        pred = max(0, pred)  # Ensure non-negative
+                        forecast.append(pred)
+
+                        # Update rolling window with new prediction
+                        last_values = np.append(last_values[1:], pred)
+
+                    forecast = np.array(forecast)
+
+                    # Calculate metrics on the windowed subset (matching old implementation)
+                    predicted = model.predict(X)
+                    metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+
+                else:
+                    # Fallback to simple exponential smoothing for very small datasets
+                    smoothed = np.zeros(n)
+                    smoothed[0] = y[0]
+                    
+                    for i in range(1, n):
+                        smoothed[i] = alpha * y[i] + (1 - alpha) * smoothed[i-1]
+                    
+                    forecast = np.full(periods, smoothed[-1])
+                    metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
+
+                logger.info(f"Alpha={alpha}, RMSE={metrics.get('rmse', 0):.2f}, MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}")
+
+                # Select best model based on RMSE
+                if best_metrics is None or metrics.get('rmse', float('inf')) < best_metrics.get('rmse', float('inf')):
                     best_metrics = metrics
                     best_forecast = forecast
 
@@ -754,6 +809,7 @@ class ForecastExecutionService:
         except Exception as e:
             logger.warning(f"Exponential smoothing failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
+
 
     @staticmethod
     def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12, alpha: float = 0.3, beta: float = 0.1, gamma: float = 0.1) -> tuple:
@@ -903,9 +959,9 @@ class ForecastExecutionService:
         """LSTM Neural Network forecasting."""
         try:
             from tensorflow import keras
-            from tensorflow.keras.models import Sequential
-            from tensorflow.keras.layers import LSTM, Dense
-            from tensorflow.keras.optimizers import Adam
+            from tensorflow.keras.models import Sequential # type: ignore
+            from tensorflow.keras.layers import LSTM, Dense # type: ignore
+            from tensorflow.keras.optimizers import Adam # type: ignore
             import warnings
             warnings.filterwarnings('ignore')
 
@@ -1120,7 +1176,7 @@ class ForecastExecutionService:
             
         try:
             from tensorflow import keras
-            from tensorflow.keras import layers
+            from tensorflow.keras import layers # type: ignore
             from sklearn.preprocessing import MinMaxScaler
             
             if 'total_quantity' in data.columns:
@@ -1715,38 +1771,18 @@ class ForecastExecutionService:
 
     @staticmethod
     def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
-        """Calculate forecast accuracy metrics."""
-        # Ensure arrays are numpy arrays
-        actual = np.asarray(actual, dtype=np.float64)
-        predicted = np.asarray(predicted, dtype=np.float64)
-        
-        # Create mask for valid values
-        mask = ~np.isnan(actual) & ~np.isnan(predicted)
-        actual = actual[mask]
-        predicted = predicted[mask]
-        
-        if len(actual) == 0:
-            return {'mape': None, 'mae': None, 'rmse': None, 'r_squared': None}
-        
-        # MAPE
-        mape = np.mean(np.abs((actual - predicted) / np.maximum(actual, 1))) * 100
-        
-        # MAE
-        mae = np.mean(np.abs(actual - predicted))
-        
-        # RMSE
-        rmse = np.sqrt(np.mean((actual - predicted) ** 2))
-        
-        # R-squared
-        ss_res = np.sum((actual - predicted) ** 2)
-        ss_tot = np.sum((actual - np.mean(actual)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        
+        """Calculate accuracy metrics"""
+        mae = mean_absolute_error(actual, predicted)
+        rmse = np.sqrt(mean_squared_error(actual, predicted))
+
+        # Calculate accuracy as percentage
+        mape = np.mean(np.abs((actual - predicted) / np.where(actual != 0, actual, 1))) * 100
+        accuracy = max(0, 100 - mape)
+
         return {
-            'mape': round(float(mape), 2),
-            'mae': round(float(mae), 2),
-            'rmse': round(float(rmse), 2),
-            'r_squared': round(float(r_squared), 4)
+            'accuracy': min(accuracy, 99.9),
+            'mae': mae,
+            'rmse': rmse
         }
 
     @staticmethod
@@ -1754,30 +1790,36 @@ class ForecastExecutionService:
         tenant_id: str,
         database_name: str,
         start_date: str,
-        end_date: str
+        end_date: str,
+        selected_factors: Optional[List[str]] = None  # NEW PARAMETER
     ) -> pd.DataFrame:
-        """Prepare external factors data."""
+        """
+        Prepare external factors data with optional factor selection.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            start_date: Start date
+            end_date: End date  
+            selected_factors: List of factor names to include (None/empty = no factors)
+            
+        Returns:
+            DataFrame with factors pivoted by name
+        """
         try:
+            from datetime import datetime
+            
             start = datetime.fromisoformat(start_date).date()
             end = datetime.fromisoformat(end_date).date()
 
-            factors = ExternalFactorsService.get_factors_for_period(
-                tenant_id, database_name, start, end
+            # Use enhanced service to get factors
+            df_pivot = ExternalFactorsService.get_factors_for_forecast_run(
+                tenant_id=tenant_id,
+                database_name=database_name,
+                selected_factors=selected_factors,
+                start_date=start,
+                end_date=end
             )
-
-            if not factors:
-                return pd.DataFrame()
-
-            df = pd.DataFrame(factors)
-            df['date'] = pd.to_datetime(df['date'])
-
-            # Pivot to wide format
-            df_pivot = df.pivot_table(
-                index='date',
-                columns='factor_name',
-                values='factor_value',
-                aggfunc='mean'
-            ).reset_index()
 
             return df_pivot
 
@@ -1870,9 +1912,9 @@ class ForecastExecutionService:
                     
                     # Extract metric value safely
                     accuracy_metric = None
-                    if metrics and 'mape' in metrics and metrics['mape'] is not None:
-                        accuracy_metric = float(metrics['mape'])
-                        # MAPE is DECIMAL(5,2) - max value 999.99
+                    if metrics and 'accuracy' in metrics and metrics['accuracy'] is not None:
+                        accuracy_metric = float(metrics['accuracy'])
+                        # Accuracy is DECIMAL(5,2) - max value 999.99
                         if accuracy_metric > 999.99:
                             accuracy_metric = 999.99
                         accuracy_metric = round(accuracy_metric, 2)
@@ -2102,6 +2144,21 @@ class ForecastExecutionService:
         }
     
     @staticmethod
+    def _split_train_test_dataframe(
+        data: pd.DataFrame,
+        train_ratio: float = 0.8
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        if data is None or data.empty:
+            return data, pd.DataFrame()
+        n = len(data)
+        if n < 4:
+            return data, pd.DataFrame()
+        split_index = max(2, int(n * train_ratio))
+        if split_index >= n:
+            split_index = n - 1
+        return data.iloc[:split_index].copy(), data.iloc[split_index:].copy()
+    
+    @staticmethod
     def _run_algorithm_safe(
         algorithm_name: str,
         data: pd.DataFrame,
@@ -2119,36 +2176,62 @@ class ForecastExecutionService:
             Dictionary with algorithm results
         """
         try:
+            # Debug: Log data information
+            logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
+            logger.info(f"Algorithm {algorithm_name}: Data shape: {data.shape}")
+            logger.info(f"Algorithm {algorithm_name}: Data columns: {list(data.columns)}")
+            logger.info(f"Algorithm {algorithm_name}: Data dtypes: {data.dtypes.to_dict()}")
+            logger.info(f"Algorithm {algorithm_name}: First 5 rows:\n{data.head()}")
+            logger.info(f"Algorithm {algorithm_name}: Last 5 rows:\n{data.tail()}")
+            logger.info(f"Algorithm {algorithm_name}: Data summary:\n{data.describe()}")
+
+            # Check for null values
+            null_counts = data.isnull().sum()
+            if null_counts.sum() > 0:
+                logger.info(f"Algorithm {algorithm_name}: Null value counts:\n{null_counts}")
+
             # Ensure we have total_quantity column (rename if needed)
             if 'quantity' in data.columns and 'total_quantity' not in data.columns:
                 data = data.rename(columns={'quantity': 'total_quantity'})
             
-            if algorithm_name == "linear_regression":
-                forecast, metrics = ForecastExecutionService.linear_regression_forecast(data, periods)
-            elif algorithm_name == "polynomial_regression":
-                forecast, metrics = ForecastExecutionService.polynomial_regression_forecast(data, periods)
-            elif algorithm_name == "exponential_smoothing":
-                forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
-            elif algorithm_name == "holt_winters":
-                forecast, metrics = ForecastExecutionService.holt_winters_forecast(data, periods)
-            elif algorithm_name == "arima":
-                forecast, metrics = ForecastExecutionService.arima_forecast(data, periods)
-            elif algorithm_name == "xgboost":
-                forecast, metrics = ForecastExecutionService.xgboost_forecast(data, periods)
-            elif algorithm_name == "svr":
-                forecast, metrics = ForecastExecutionService.svr_forecast(data, periods)
-            elif algorithm_name == "knn":
-                forecast, metrics = ForecastExecutionService.knn_forecast(data, periods)
-            elif algorithm_name == "simple_moving_average":
-                forecast, metrics = ForecastExecutionService.simple_moving_average(data, periods)
-            elif algorithm_name == "seasonal_decomposition":
-                forecast, metrics = ForecastExecutionService.seasonal_decomposition_forecast(data, periods)
-            elif algorithm_name == "moving_average":
-                forecast, metrics = ForecastExecutionService.moving_average_forecast(data, periods)
-            elif algorithm_name == "sarima":
-                forecast, metrics = ForecastExecutionService.sarima_forecast(data, periods)
-            else:
+            algorithm_map = {
+                "linear_regression": ForecastExecutionService.linear_regression_forecast,
+                "polynomial_regression": ForecastExecutionService.polynomial_regression_forecast,
+                "exponential_smoothing": ForecastExecutionService.exponential_smoothing_forecast,
+                "holt_winters": ForecastExecutionService.holt_winters_forecast,
+                "arima": ForecastExecutionService.arima_forecast,
+                "xgboost": ForecastExecutionService.xgboost_forecast,
+                "svr": ForecastExecutionService.svr_forecast,
+                "knn": ForecastExecutionService.knn_forecast,
+                "simple_moving_average": ForecastExecutionService.simple_moving_average,
+                "seasonal_decomposition": ForecastExecutionService.seasonal_decomposition_forecast,
+                "moving_average": ForecastExecutionService.moving_average_forecast,
+                "sarima": ForecastExecutionService.sarima_forecast
+            }
+            algorithm_func = algorithm_map.get(algorithm_name)
+            if algorithm_func is None:
                 raise ValueError(f"Unknown algorithm: {algorithm_name}")
+            
+            def execute(input_data: pd.DataFrame, horizon: int) -> Tuple[np.ndarray, Dict[str, float]]:
+                target_data = input_data if input_data is not None else data
+                if target_data is None or target_data.empty:
+                    target_data = data
+                return algorithm_func(target_data, max(1, horizon))
+            
+            train_df, test_df = ForecastExecutionService._split_train_test_dataframe(data)
+            eval_data = train_df if train_df is not None and not train_df.empty else data
+            eval_periods = len(test_df)
+            metrics: Dict[str, float]
+            if eval_periods > 0:
+                eval_forecast, _ = execute(eval_data, eval_periods)
+                actual_eval = test_df['total_quantity'].values
+                predicted_eval = np.asarray(eval_forecast)[:len(actual_eval)]
+                metrics = ForecastExecutionService.calculate_metrics(actual_eval, predicted_eval)
+            else:
+                fallback_horizon = min(max(1, periods), max(1, len(eval_data)))
+                _, metrics = execute(eval_data, fallback_horizon)
+            
+            forecast, _ = execute(data, periods)
             
             # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
@@ -2158,19 +2241,12 @@ class ForecastExecutionService:
             is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, algorithm_name)
 
             if is_constant:
-                logger.warning(f"⚠️ Algorithm {algorithm_name} produced constant forecast - all values are {forecast[0]:.2f}")
+                logger.warning(f"WARNING: Algorithm {algorithm_name} produced constant forecast - all values are {forecast[0]:.2f}")
             else:
-                logger.info(f"✓ Algorithm {algorithm_name}: {variance_msg}")
+                logger.info(f"Algorithm {algorithm_name}: {variance_msg}")
             
-            # Extract accuracy metric (use MAPE if available, otherwise calculate from R-squared)
-            accuracy = metrics.get('mape')
-            if accuracy is None:
-                # Convert R-squared to accuracy percentage
-                r_squared = metrics.get('r_squared', 0)
-                accuracy = max(0, min(100, (r_squared * 100)))
-            else:
-                # MAPE is error, so accuracy = 100 - MAPE
-                accuracy = max(0, min(100, (100 - accuracy)))
+            # Extract accuracy metric (already calculated in calculate_metrics)
+            accuracy = metrics.get('accuracy', 0)
             
             return {
                 'algorithm': algorithm_name,

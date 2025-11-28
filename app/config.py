@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "supersecretkey"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
+
+    FRED_API_KEY: str = "82a8e6191d71f41b22cf33bf73f7a0c2"
     
     # Environment
     ENVIRONMENT: str = "development"

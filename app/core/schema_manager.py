@@ -373,7 +373,7 @@ class SchemaManager:
         except Exception as e:
             logger.error(f"Failed to drop tenant database: {str(e)}")
             raise DatabaseException(f"Failed to drop tenant database: {str(e)}")
-        
+
     @staticmethod
     def initialize_forecasting_tables(tenant_id: str, database_name: str) -> bool:
         """
@@ -397,6 +397,7 @@ class SchemaManager:
                 try:
                     # Read and execute forecasting schema
                     forecasting_schema = """
+                    -- Algorithms table (already exists)
                     CREATE TABLE IF NOT EXISTS algorithms (
                         algorithm_id SERIAL PRIMARY KEY,
                         algorithm_name VARCHAR(255) NOT NULL UNIQUE,
@@ -408,6 +409,7 @@ class SchemaManager:
                         CONSTRAINT check_algorithm_type CHECK (algorithm_type IN ('ML', 'Statistic', 'Hybrid'))
                     );
 
+                    -- Forecast Versions table
                     CREATE TABLE IF NOT EXISTS forecast_versions (
                         version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,
@@ -426,6 +428,9 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_versions_active ON forecast_versions(tenant_id, is_active);
                     CREATE INDEX IF NOT EXISTS idx_forecast_versions_type ON forecast_versions(tenant_id, version_type);
 
+                    -- ============================================================================
+                    -- UPDATED: External Factors table with UNIQUE CONSTRAINT
+                    -- ============================================================================
                     CREATE TABLE IF NOT EXISTS external_factors (
                         factor_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,
@@ -438,14 +443,19 @@ class SchemaManager:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
                         updated_by VARCHAR(255),
-                        deleted_at TIMESTAMP
+                        deleted_at TIMESTAMP,
+                        -- NEW: Unique constraint to prevent duplicates
+                        CONSTRAINT unique_factor_per_date UNIQUE (tenant_id, factor_name, date)
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_external_factors_tenant ON external_factors(tenant_id);
                     CREATE INDEX IF NOT EXISTS idx_external_factors_date ON external_factors(tenant_id, date);
                     CREATE INDEX IF NOT EXISTS idx_external_factors_name ON external_factors(tenant_id, factor_name);
                     CREATE INDEX IF NOT EXISTS idx_external_factors_composite ON external_factors(tenant_id, factor_name, date);
+                    -- NEW: Index for active (non-deleted) factors
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_active ON external_factors(tenant_id, factor_name, date) WHERE deleted_at IS NULL;
 
+                    -- Forecast Runs table
                     CREATE TABLE IF NOT EXISTS forecast_runs (
                         forecast_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,
@@ -477,6 +487,7 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_runs_created ON forecast_runs(tenant_id, created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_forecast_runs_composite ON forecast_runs(tenant_id, run_status, created_at DESC);
 
+                    -- Forecast Algorithms Mapping table
                     CREATE TABLE IF NOT EXISTS forecast_algorithms_mapping (
                         mapping_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,
@@ -501,6 +512,7 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_algo ON forecast_algorithms_mapping(algorithm_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_status ON forecast_algorithms_mapping(forecast_run_id, execution_status);
 
+                    -- Forecast Results table
                     CREATE TABLE IF NOT EXISTS forecast_results (
                         result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,
@@ -528,6 +540,7 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(tenant_id, forecast_run_id, forecast_date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_version ON forecast_results(version_id);
 
+                    -- Forecast Audit Log table
                     CREATE TABLE IF NOT EXISTS forecast_audit_log (
                         audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         tenant_id UUID NOT NULL,

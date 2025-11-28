@@ -23,6 +23,7 @@ from app.core.logging_config import (
 
 # Import routers
 from app.api.routes import auth_routes, field_catalogue_routes, upload_routes, forecasting_routes
+from app.api.routes import external_factors_routes
 
 
 # Setup logging before anything else
@@ -250,6 +251,8 @@ app.include_router(upload_routes.router, prefix="/api/v1")
 logger.debug("Registered upload routes")
 app.include_router(forecasting_routes.router, prefix="/api/v1")  # NEW LINE
 logger.debug("Registered forecasting routes")  # NEW LINE
+app.include_router(external_factors_routes.router, prefix="/api/v1")
+logger.debug("Registered external factors routes")
 logger.info("All API routes registered successfully")
 
 
