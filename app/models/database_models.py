@@ -16,7 +16,8 @@ class FieldDefinition:
         default_value: Optional[str] = None,
         is_characteristic: bool = False,
         is_unique_key: bool = False,
-        parent_field_name: Optional[str] = None
+        parent_field_name: Optional[str] = None,
+        is_target_variable: bool = False
     ):
         self.field_name = field_name
         self.data_type = data_type
@@ -25,6 +26,7 @@ class FieldDefinition:
         self.is_characteristic = is_characteristic
         self.is_unique_key = is_unique_key
         self.parent_field_name = parent_field_name
+        self.is_target_variable = is_target_variable
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -35,7 +37,8 @@ class FieldDefinition:
             "default_value": self.default_value,
             "is_characteristic": self.is_characteristic,
             "is_unique_key": self.is_unique_key,
-            "parent_field_name": self.parent_field_name
+            "parent_field_name": self.parent_field_name,
+            "is_target_variable": self.is_target_variable
         }
 
     def get_sql_type(self) -> str:

@@ -14,6 +14,7 @@ import threading
 from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 try:
@@ -136,6 +137,23 @@ class ForecastExecutionService:
                 # n_neighbors: positive integer
                 if 'n_neighbors' in validated_params:
                     validated_params['n_neighbors'] = max(1, int(validated_params['n_neighbors']))
+
+            elif algorithm_id == 14:  # Random Forest
+                # n_estimators: 10-500
+                # max_depth: 1-50 or None
+                # min_samples_split: 2-20
+                # min_samples_leaf: 1-10
+                if 'n_estimators' in validated_params:
+                    validated_params['n_estimators'] = max(10, min(500, int(validated_params['n_estimators'])))
+                if 'max_depth' in validated_params:
+                    if validated_params['max_depth'] is None:
+                        validated_params['max_depth'] = None
+                    else:
+                        validated_params['max_depth'] = max(1, min(50, int(validated_params['max_depth'])))
+                if 'min_samples_split' in validated_params:
+                    validated_params['min_samples_split'] = max(2, min(20, int(validated_params['min_samples_split'])))
+                if 'min_samples_leaf' in validated_params:
+                    validated_params['min_samples_leaf'] = max(1, min(10, int(validated_params['min_samples_leaf'])))
 
             # Log validated parameters
             logger.info(f"Validated parameters for algorithm {algorithm_id}: {validated_params}")
@@ -553,6 +571,15 @@ class ForecastExecutionService:
                     hidden_layers=custom_params.get('hidden_layers', [64, 32]),
                     epochs=custom_params.get('epochs', 100),
                     batch_size=custom_params.get('batch_size', 32)
+                )
+            elif algorithm_id == 14:  # Random Forest
+                forecast, metrics = ForecastExecutionService.random_forest_forecast(
+                    data=historical_data,
+                    periods=periods,
+                    n_estimators=custom_params.get('n_estimators', 100),
+                    max_depth=custom_params.get('max_depth', None),
+                    min_samples_split=custom_params.get('min_samples_split', 2),
+                    min_samples_leaf=custom_params.get('min_samples_leaf', 1)
                 )
             else:
                 # Default to simple moving average
@@ -1770,6 +1797,94 @@ class ForecastExecutionService:
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
+    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Random Forest regression forecasting with hyperparameter tuning."""
+        try:
+            n_estimators = max(10, min(500, n_estimators))
+            if max_depth is not None:
+                max_depth = max(1, min(50, max_depth))
+            min_samples_split = max(2, min(20, min_samples_split))
+            min_samples_leaf = max(1, min(10, min_samples_leaf))
+
+            logger.info(f"Using Random Forest parameters: n_estimators={n_estimators}, max_depth={max_depth}, min_samples_split={min_samples_split}, min_samples_leaf={min_samples_leaf}")
+
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+
+            n = len(y)
+            if n < 10:
+                raise ValueError("Need at least 10 historical data points for Random Forest with cross-validation")
+
+            window = min(5, n - 1)
+
+            X = []
+            y_target = []
+
+            for i in range(window, n):
+                lags = y[i-window:i]
+                time_idx = i
+                features = list(lags) + [time_idx]
+                X.append(features)
+                y_target.append(y[i])
+
+            X = np.array(X)
+            y_target = np.array(y_target)
+
+            if len(X) < 5:
+                raise ValueError("Insufficient data for Random Forest training")
+
+            train_size = max(5, len(X) - periods)
+            X_train = X[:train_size]
+            y_train = y_target[:train_size]
+            X_test = X[train_size:]
+            y_test = y_target[train_size:]
+
+            logger.info(f"Random Forest time series split: train_size={len(X_train)}, test_size={len(X_test)}")
+
+            model = RandomForestRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                random_state=42,
+                n_jobs=-1
+            )
+            model.fit(X_train, y_train)
+
+            forecast = []
+            recent_lags = list(y[-window:])
+
+            for i in range(periods):
+                features = recent_lags + [n + i]
+                pred = model.predict([features])[0]
+                pred = max(0, pred)
+                forecast.append(pred)
+
+                recent_lags = recent_lags[1:] + [pred]
+
+            forecast = np.array(forecast)
+
+            if len(X_test) > 0:
+                predicted_test = model.predict(X_test)
+                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+            else:
+                predicted = model.predict(X_train)
+                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+
+            is_valid, variance_msg = ForecastExecutionService.validate_forecast_variance(forecast, "Random Forest")
+            logger.info(variance_msg.replace("[PASS]", "OK").replace("[WARN]", "WARN"))
+
+            return forecast, metrics
+
+        except Exception as e:
+            logger.warning(f"Random Forest failed: {str(e)}, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
+
+    @staticmethod
     def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
         """Calculate accuracy metrics"""
         mae = mean_absolute_error(actual, predicted)
@@ -2024,9 +2139,13 @@ class ForecastExecutionService:
             "exponential_smoothing",
             "holt_winters",
             "arima",
+            "prophet",
+            "lstm",
             "xgboost",
             "svr",
             "knn",
+            "gaussian_process",
+            "mlp_neural_network",
             "simple_moving_average",
             "seasonal_decomposition",
             "moving_average",
@@ -2200,9 +2319,13 @@ class ForecastExecutionService:
                 "exponential_smoothing": ForecastExecutionService.exponential_smoothing_forecast,
                 "holt_winters": ForecastExecutionService.holt_winters_forecast,
                 "arima": ForecastExecutionService.arima_forecast,
+                "prophet": ForecastExecutionService.prophet_forecast,
+                "lstm": ForecastExecutionService.lstm_forecast,
                 "xgboost": ForecastExecutionService.xgboost_forecast,
                 "svr": ForecastExecutionService.svr_forecast,
                 "knn": ForecastExecutionService.knn_forecast,
+                "gaussian_process": ForecastExecutionService.gaussian_process_forecast,
+                "mlp_neural_network": ForecastExecutionService.mlp_neural_network_forecast,
                 "simple_moving_average": ForecastExecutionService.simple_moving_average,
                 "seasonal_decomposition": ForecastExecutionService.seasonal_decomposition_forecast,
                 "moving_average": ForecastExecutionService.moving_average_forecast,
