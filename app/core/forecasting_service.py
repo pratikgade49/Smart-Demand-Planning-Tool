@@ -375,51 +375,45 @@ class ForecastingService:
     ) -> pd.DataFrame:
         """
         Prepare aggregated historical data for forecasting.
+        FIXED: Now uses dynamic target and date field names.
         """
         db_manager = get_db_manager()
 
         try:
+            # ✅ FIXED: Get dynamic field names from metadata
+            target_field_name, date_field_name = ForecastingService._get_field_names(
+                tenant_id, database_name
+            )
+            
+            logger.info(f"Using dynamic fields - Target: '{target_field_name}', Date: '{date_field_name}'")
+            
             # Get aggregation columns
             agg_columns = ForecastingService._get_aggregation_columns(
                 tenant_id, database_name, aggregation_level
             )
             
-            # DEBUG: Log what filters are being applied
-            logger.info(f"=== DATA SELECTION DEBUG ===")
-            logger.info(f"Aggregation Level: {aggregation_level}")
-            logger.info(f"Aggregation Columns: {agg_columns}")
-            logger.info(f"Interval: {interval}")
-            logger.info(f"Raw Filters: {filters}")
-            
             # Build filter clause
             filter_clause = ""
             filter_params = []
-            actual_filters_applied = {}
-            
             if filters:
                 filter_conditions = []
                 for col, val in filters.items():
-                    if col not in ["aggregation_level", "interval"]:
+                    if col not in ["aggregation_level", "interval", "selected_external_factors"]:
                         filter_conditions.append(f'm."{col}" = %s')
                         filter_params.append(val)
-                        actual_filters_applied[col] = val  # Track what's actually applied
                 
                 if filter_conditions:
                     filter_clause = "AND " + " AND ".join(filter_conditions)
-            
-            # DEBUG: Log actual SQL filters
-            logger.info(f"Filters Applied to SQL: {actual_filters_applied}")
-            logger.info(f"Filter Params: {filter_params}")
-            logger.info(f"Filter SQL Clause: {filter_clause}")
 
             with db_manager.get_tenant_connection(database_name) as conn:
-                date_trunc = ForecastingService._get_date_trunc_expr(interval)
+                # ✅ FIXED: Build SQL using dynamic field names
+                date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field_name)
                 
                 query = f"""
                     SELECT 
                         {date_trunc} as period,
                         {', '.join([f'm."{col}"' for col in agg_columns])},
-                        SUM(s.quantity) as total_quantity,
+                        SUM(s."{target_field_name}") as total_quantity,
                         COUNT(DISTINCT s.sales_id) as transaction_count,
                         AVG(s.unit_price) as avg_price
                     FROM sales_data s
@@ -431,39 +425,17 @@ class ForecastingService:
                 
                 params = [tenant_id] + filter_params
                 
-                # DEBUG: Log final query
-                logger.info(f"=== FINAL SQL QUERY ===")
-                logger.info(f"Query: {query}")
-                logger.info(f"Params: {params}")
-                
                 # Execute query
                 import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
                     df = pd.read_sql_query(query, conn, params=params)
                 
-                # DEBUG: Log results
-                logger.info(f"=== QUERY RESULTS ===")
-                logger.info(f"Rows Returned: {len(df)}")
-                if not df.empty:
-                    logger.info(f"Date Range: {df['period'].min()} to {df['period'].max()}")
-                    logger.info(f"Total Quantity Sum: {df['total_quantity'].sum()}")
-                    logger.info(f"Sample Data (first 5 rows):\n{df.head()}")
-                    
-                    # Show unique values for aggregation columns
-                    for col in agg_columns:
-                        if col in df.columns:
-                            unique_vals = df[col].unique()
-                            logger.info(f"Unique {col} values: {unique_vals[:10]}")  # First 10
-                else:
-                    logger.warning("WARNING: NO DATA RETURNED - Check if filters are too restrictive!")
-                
-                logger.info(f"=== END DEBUG ===\n")
-                
+                logger.info(f"Prepared {len(df)} aggregated records using target='{target_field_name}', date='{date_field_name}'")
                 return df
 
         except Exception as e:
-            logger.error(f"Failed to prepare aggregated data: {str(e)}")
+            logger.error(f"Failed to prepare aggregated data: {str(e)}", exc_info=True)
             raise DatabaseException(f"Failed to prepare data: {str(e)}")
 
     @staticmethod
@@ -550,21 +522,19 @@ class ForecastingService:
     ) -> pd.DataFrame:
         """
         Prepare aggregated historical data for forecasting.
-        
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Tenant's database name
-            aggregation_level: Level to aggregate (product, location, etc.)
-            interval: Time interval (WEEKLY, MONTHLY, QUARTERLY, YEARLY)
-            filters: Optional filters for master data
-            
-        Returns:
-            DataFrame with aggregated data
+        FIXED: Now uses dynamic target and date field names.
         """
         db_manager = get_db_manager()
 
         try:
-            # Build aggregation columns based on level
+            # Get dynamic field names from metadata
+            target_field_name, date_field_name = ForecastingService._get_field_names(
+                tenant_id, database_name
+            )
+            
+            logger.info(f"Using dynamic fields - Target: {target_field_name}, Date: {date_field_name}")
+            
+            # Get aggregation columns
             agg_columns = ForecastingService._get_aggregation_columns(
                 tenant_id, database_name, aggregation_level
             )
@@ -583,14 +553,14 @@ class ForecastingService:
                     filter_clause = "AND " + " AND ".join(filter_conditions)
 
             with db_manager.get_tenant_connection(database_name) as conn:
-                # Build SQL based on interval
-                date_trunc = ForecastingService._get_date_trunc_expr(interval)
+                # Build SQL based on interval - using DYNAMIC field names
+                date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field_name)
                 
                 query = f"""
                     SELECT 
                         {date_trunc} as period,
                         {', '.join([f'm."{col}"' for col in agg_columns])},
-                        SUM(s.quantity) as total_quantity,
+                        SUM(s."{target_field_name}") as total_quantity,
                         COUNT(DISTINCT s.sales_id) as transaction_count,
                         AVG(s.unit_price) as avg_price
                     FROM sales_data s
@@ -602,15 +572,10 @@ class ForecastingService:
                 
                 params = [tenant_id] + filter_params
                 
-                # Use SQLAlchemy engine to suppress pandas warning
-                try:
-                    engine = create_engine(f"postgresql+psycopg2://", creator=lambda: conn, echo=False)
-                    df = pd.read_sql_query(query, engine, params=params)
-                except Exception as e:
-                    # Fallback: suppress warning and use raw connection
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", category=UserWarning)
-                        df = pd.read_sql_query(query, conn, params=params)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    df = pd.read_sql_query(query, conn, params=params)
                 
                 logger.info(f"Prepared {len(df)} aggregated records for forecasting")
                 return df
@@ -684,22 +649,21 @@ class ForecastingService:
             raise ValidationException(f"Invalid aggregation level: {str(e)}")
 
     @staticmethod
-    def _get_date_trunc_expr(interval: str) -> str:
+    def _get_date_trunc_expr(interval: str, date_field_name: str = "date") -> str:
         """
         Get SQL date truncation expression for interval.
-        
-        FIXED: Uses DATE type directly to avoid timezone issues.
+        FIXED: Now accepts dynamic date field name.
         """
-        # Since s.date is already a DATE type (no time component),
-        # we need to convert to timestamp only for truncation, then back to date
+        # ✅ FIXED: Use dynamic date field name
         interval_map = {
-            "WEEKLY": "DATE_TRUNC('week', s.date::timestamp)::date",
-            "MONTHLY": "DATE_TRUNC('month', s.date::timestamp)::date",
-            "QUARTERLY": "DATE_TRUNC('quarter', s.date::timestamp)::date",
-            "YEARLY": "DATE_TRUNC('year', s.date::timestamp)::date"
+            "WEEKLY": f"DATE_TRUNC('week', s.\"{date_field_name}\"::timestamp)::date",
+            "MONTHLY": f"DATE_TRUNC('month', s.\"{date_field_name}\"::timestamp)::date",
+            "QUARTERLY": f"DATE_TRUNC('quarter', s.\"{date_field_name}\"::timestamp)::date",
+            "YEARLY": f"DATE_TRUNC('year', s.\"{date_field_name}\"::timestamp)::date"
         }
         
-        return interval_map.get(interval, "DATE_TRUNC('month', s.date::timestamp)::date")
+        return interval_map.get(interval, f"DATE_TRUNC('month', s.\"{date_field_name}\"::timestamp)::date")
+
     @staticmethod
     def _validate_version_exists(
         tenant_id: str,
@@ -773,10 +737,15 @@ class ForecastingService:
                 
                 result = cursor.fetchone()
                 if not result:
-                    # Fallback to default names for backward compatibility
-                    logger.warning(f"No metadata found for tenant {tenant_id}, using defaults")
-                    return ('quantity', 'date')
+                    # ✅ IMPROVED: Better error message
+                    logger.error(f"No field catalogue metadata found for tenant {tenant_id}")
+                    raise ValidationException(
+                        "Field catalogue not finalized. Please finalize your field catalogue first."
+                    )
                 
-                return result[0], result[1]
+                target_field, date_field = result[0], result[1]
+                logger.debug(f"Retrieved field names - Target: '{target_field}', Date: '{date_field}'")
+                return target_field, date_field
+                
             finally:
                 cursor.close()

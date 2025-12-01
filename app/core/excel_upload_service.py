@@ -99,15 +99,22 @@ class ExcelUploadService:
     def identify_column_types(
         df: pd.DataFrame,
         field_catalogue: Dict[str, Any]
-    ) -> Tuple[Dict[str, str], Dict[str, str]]:
-        """Identify column types with detailed logging."""
+    ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:  # ✅ Now returns 3 values
+        """
+        Identify column types with detailed logging.
+        FIXED: Now returns actual field names for dynamic column creation.
+        
+        Returns:
+            Tuple of (master_data_mapping, sales_data_mapping, field_names_mapping)
+            field_names_mapping contains: {'target_field': 'actual_name', 'date_field': 'actual_name'}
+        """
         log_operation_start(logger, "identify_column_types")
         
-        df_columns_lower = {col.lower().strip(): col for col in df.columns}
+        df_columns_lower = {col.lower().strip().replace(' ', '_'): col for col in df.columns}
         master_data_mapping = {}
         sales_data_mapping = {}
 
-        # Get target and date field names from catalogue
+        # Get target and date field names from catalogue (DYNAMIC!)
         target_field_name = None
         date_field_name = None
         
@@ -122,12 +129,17 @@ class ExcelUploadService:
         if not date_field_name:
             raise ValidationException("Field catalogue must have a date field")
         
-        logger.info(f"Looking for target field: {target_field_name}, date field: {date_field_name}")
+        logger.info(f"Dynamic fields - Target: {target_field_name}, Date: {date_field_name}")
 
-        # Normalize catalogue field names: convert spaces to underscores and lowercase
+        # ✅ NEW: Store actual field names for later use
+        field_names_mapping = {
+            'target_field': target_field_name,
+            'date_field': date_field_name
+        }
+
+        # Normalize catalogue field names
         catalogue_fields_lower = {}
         for field in field_catalogue.get('fields', []):
-            # Skip target and date fields as they go to sales_data
             if field.get('is_target_variable') or field.get('is_date_field'):
                 continue
             normalized_key = field['field_name'].lower().strip().replace(' ', '_')
@@ -135,28 +147,37 @@ class ExcelUploadService:
 
         logger.info(f"Excel columns: {list(df.columns)}")
         logger.info(f"Catalogue master fields: {list(catalogue_fields_lower.values())}")
-        logger.info(f"Target field: {target_field_name}, Date field: {date_field_name}")
 
-        # Identify sales data columns (target and date)
+        # Identify sales data columns
         sales_columns_found = set()
         
-        # Map target field
+        # Map target field (DYNAMIC)
         target_normalized = target_field_name.lower().strip().replace(' ', '_')
         if target_normalized in df_columns_lower:
             sales_data_mapping['target'] = df_columns_lower[target_normalized]
             sales_columns_found.add(df_columns_lower[target_normalized])
-            logger.debug(f"Mapped target field to column '{df_columns_lower[target_normalized]}'")
+            logger.debug(f"Mapped target field '{target_field_name}' to column '{df_columns_lower[target_normalized]}'")
         else:
             raise ValidationException(f"Target field '{target_field_name}' not found in Excel")
         
-        # Map date field
+        # Map date field (DYNAMIC)
         date_normalized = date_field_name.lower().strip().replace(' ', '_')
         if date_normalized in df_columns_lower:
             sales_data_mapping['date'] = df_columns_lower[date_normalized]
             sales_columns_found.add(df_columns_lower[date_normalized])
-            logger.debug(f"Mapped date field to column '{df_columns_lower[date_normalized]}'")
+            logger.debug(f"Mapped date field '{date_field_name}' to column '{df_columns_lower[date_normalized]}'")
         else:
-            raise ValidationException(f"Date field '{date_field_name}' not found in Excel")
+            # Fallback to patterns if exact match fails
+            date_mapped = False
+            for pattern in ExcelUploadService.SALES_DATA_PATTERNS['date']:
+                if pattern in df_columns_lower:
+                    sales_data_mapping['date'] = df_columns_lower[pattern]
+                    sales_columns_found.add(df_columns_lower[pattern])
+                    logger.debug(f"Mapped date field '{date_field_name}' to column '{df_columns_lower[pattern]}' using pattern")
+                    date_mapped = True
+                    break
+            if not date_mapped:
+                raise ValidationException(f"Date field '{date_field_name}' not found in Excel")
 
         # Map UOM if exists
         if 'uom' in df_columns_lower:
@@ -175,7 +196,7 @@ class ExcelUploadService:
         else:
             sales_data_mapping['unit_price'] = None
 
-        # Map remaining columns to catalogue fields
+        # Map remaining columns to master fields
         skipped_columns = []
         for excel_col in df.columns:
             if excel_col not in sales_columns_found:
@@ -191,24 +212,11 @@ class ExcelUploadService:
         if skipped_columns:
             logger.warning(f"Skipping columns not in catalogue: {skipped_columns}")
 
-        logger.info(
-            f"Column mapping complete - Master: {len(master_data_mapping)}, Sales: {len(sales_data_mapping)}",
-            extra={
-                "master_columns": len(master_data_mapping),
-                "sales_columns": len(sales_data_mapping),
-                "skipped_columns": len(skipped_columns)
-            }
-        )
+        logger.info(f"Column mapping complete - Master: {len(master_data_mapping)}, Sales: {len(sales_data_mapping)}")
         
-        log_operation_end(
-            logger,
-            "identify_column_types",
-            success=True,
-            master_columns=len(master_data_mapping),
-            sales_columns=len(sales_data_mapping)
-        )
+        log_operation_end(logger, "identify_column_types", success=True)
 
-        return master_data_mapping, sales_data_mapping
+        return master_data_mapping, sales_data_mapping, field_names_mapping
 
     @staticmethod
     def process_mixed_data_upload(
@@ -219,14 +227,8 @@ class ExcelUploadService:
         user_email: str
     ) -> Tuple[int, int, List[Dict[str, Any]]]:
         """Process mixed data upload with comprehensive logging."""
-        log_operation_start(
-            logger,
-            "process_mixed_data_upload",
-            tenant_id=tenant_id,
-            total_rows=len(df)
-        )
+        log_operation_start(logger, "process_mixed_data_upload", tenant_id=tenant_id, total_rows=len(df))
         
-        # Log initial performance
         logger.perf.log_performance_snapshot("Before processing upload")
         
         start_time = time.time()
@@ -235,9 +237,9 @@ class ExcelUploadService:
         failed_count = 0
         errors = []
 
-        # Identify column types
+        # ✅ FIXED: Now receives field_names_mapping
         try:
-            master_data_mapping, sales_mapping = ExcelUploadService.identify_column_types(
+            master_data_mapping, sales_mapping, field_names_mapping = ExcelUploadService.identify_column_types(
                 df, field_catalogue
             )
         except Exception as e:
@@ -250,7 +252,6 @@ class ExcelUploadService:
         with db_manager.get_connection(tenant_id) as conn:
             cursor = conn.cursor()
             try:
-                # Process rows with progress logging
                 for idx, row in df.iterrows():
                     savepoint_name = f"row_{idx}"
                     
@@ -259,12 +260,14 @@ class ExcelUploadService:
                         
                         row_dict = row.to_dict()
                         
+                        # ✅ FIXED: Pass field_names_mapping
                         ExcelUploadService.process_single_row(
                             cursor=cursor,
                             tenant_id=tenant_id,
                             row_dict=row_dict,
                             master_data_mapping=master_data_mapping,
                             sales_mapping=sales_mapping,
+                            field_names_mapping=field_names_mapping,  # ✅ NEW PARAMETER
                             field_catalogue=field_catalogue,
                             user_email=user_email
                         )
@@ -272,17 +275,8 @@ class ExcelUploadService:
                         cursor.execute(f"RELEASE SAVEPOINT {savepoint_name}")
                         success_count += 1
                         
-                        # Progress logging
-                        if success_count % 100 == 0:
-                            logger.info(
-                                f"Progress: {success_count}/{len(df)} rows processed",
-                                extra={
-                                    "processed": success_count,
-                                    "total": len(df),
-                                    "percent": round((success_count / len(df)) * 100, 2)
-                                }
-                            )
-                            # Log performance every 100 rows
+                        if success_count % 500 == 0:
+                            logger.info(f"Progress: {success_count}/{len(df)} rows processed")
                             logger.perf.log_memory_usage(f"After {success_count} rows")
 
                     except Exception as e:
@@ -291,12 +285,9 @@ class ExcelUploadService:
                         
                         failed_count += 1
                         error_msg = str(e)
-                        errors.append({
-                            'row': idx + 2,
-                            'error': error_msg
-                        })
+                        errors.append({'row': idx + 2, 'error': error_msg})
                         
-                        if failed_count <= 10:  # Log first 10 errors in detail
+                        if failed_count <= 10:
                             logger.error(f"Error processing row {idx + 2}: {error_msg}")
                         elif failed_count == 11:
                             logger.warning("More than 10 errors encountered, suppressing detailed error logs")
@@ -304,27 +295,11 @@ class ExcelUploadService:
                 conn.commit()
                 
                 duration_ms = (time.time() - start_time) * 1000
-                
-                logger.info(
-                    f"Upload processing complete: {success_count} success, {failed_count} failed, {duration_ms:.2f}ms",
-                    extra={
-                        "success_count": success_count,
-                        "failed_count": failed_count,
-                        "duration_ms": duration_ms,
-                        "rows_per_second": round(len(df) / (duration_ms / 1000), 2) if duration_ms > 0 else 0
-                    }
-                )
-                
-                # Log final performance
+                logger.info(f"Upload processing complete: {success_count} success, {failed_count} failed, {duration_ms:.2f}ms")
                 logger.perf.log_performance_snapshot("After processing upload")
                 
-                log_operation_end(
-                    logger,
-                    "process_mixed_data_upload",
-                    success=True,
-                    success_count=success_count,
-                    failed_count=failed_count
-                )
+                log_operation_end(logger, "process_mixed_data_upload", success=True, 
+                                success_count=success_count, failed_count=failed_count)
 
             except Exception as e:
                 conn.rollback()
@@ -344,16 +319,18 @@ class ExcelUploadService:
         row_dict: Dict[str, Any],
         master_data_mapping: Dict[str, str],
         sales_mapping: Dict[str, str],
+        field_names_mapping: Dict[str, str],  # ✅ NEW PARAMETER
         field_catalogue: Dict[str, Any],
         user_email: str
     ) -> None:
-        """Process a single row with debug logging."""
+        """Process a single row with dynamic column names."""
+        
         # Extract master data
         master_data = ExcelUploadService.extract_master_data(
             row_dict, master_data_mapping, field_catalogue
         )
 
-        # Find or create master data record (using only unique key fields)
+        # Find or create master data record
         master_id = ExcelUploadService.find_or_create_master_record(
             cursor, tenant_id, master_data, user_email, field_catalogue
         )
@@ -363,18 +340,23 @@ class ExcelUploadService:
             row_dict, sales_mapping
         )
 
-        # Insert sales data
+        # ✅ FIXED: Use dynamic column names from field_names_mapping
+        target_field = field_names_mapping['target_field']
+        date_field = field_names_mapping['date_field']
+        
         sales_id = str(uuid.uuid4())
-        cursor.execute("""
+        
+        # ✅ FIXED: Build dynamic INSERT query
+        cursor.execute(f"""
             INSERT INTO sales_data 
-            (sales_id, tenant_id, master_id, date, quantity, uom, unit_price, created_at, created_by)
+            (sales_id, tenant_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             sales_id,
             tenant_id,
             master_id,
-            sales_data['date'],
-            sales_data['quantity'],
+            sales_data['date'],      # ✅ Still uses 'date' key internally
+            sales_data['quantity'],   # ✅ Still uses 'quantity' key internally
             sales_data['uom'],
             sales_data.get('unit_price'),
             datetime.utcnow(),
@@ -433,7 +415,7 @@ class ExcelUploadService:
             raise ValidationException("Date is required")
 
         # Extract quantity
-        qty_col = sales_mapping.get('quantity')
+        qty_col = sales_mapping.get('target')
         if qty_col and qty_col in row_data:
             try:
                 qty_value = row_data[qty_col]

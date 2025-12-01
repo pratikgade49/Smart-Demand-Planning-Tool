@@ -8,28 +8,28 @@ import json
 class FieldDefinition:
     """Represents a field in the Field Catalogue."""
     
-def __init__(
-        self,
-        field_name: str,
-        data_type: str,
-        field_length: Optional[int] = None,
-        default_value: Optional[str] = None,
-        is_characteristic: bool = False,
-        is_unique_key: bool = False,
-        parent_field_name: Optional[str] = None,
-        is_target_variable: bool = False,
-        is_date_field: bool = False
-    ):
-        self.field_name = field_name
-        self.data_type = data_type
-        self.field_length = field_length
-        self.default_value = default_value
-        self.is_characteristic = is_characteristic
-        self.is_unique_key = is_unique_key
-        self.parent_field_name = parent_field_name
-        self.is_target_variable = is_target_variable
-        self.is_date_field = is_date_field
-    
+    def __init__(
+            self,
+            field_name: str,
+            data_type: str,
+            field_length: Optional[int] = None,
+            default_value: Optional[str] = None,
+            is_characteristic: bool = False,
+            is_unique_key: bool = False,
+            parent_field_name: Optional[str] = None,
+            is_target_variable: bool = False,
+            is_date_field: bool = False
+        ):
+            self.field_name = field_name
+            self.data_type = data_type
+            self.field_length = field_length
+            self.default_value = default_value
+            self.is_characteristic = is_characteristic
+            self.is_unique_key = is_unique_key
+            self.parent_field_name = parent_field_name
+            self.is_target_variable = is_target_variable
+            self.is_date_field = is_date_field
+        
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -40,13 +40,13 @@ def __init__(
             "is_characteristic": self.is_characteristic,
             "is_unique_key": self.is_unique_key,
             "parent_field_name": self.parent_field_name,
-            "is_target_variable": self.is_target_variable
+            "is_target_variable": self.is_target_variable,
+            "is_date_field": self.is_date_field
         }
 
     def get_sql_type(self) -> str:
         """Convert data type to SQL type."""
         data_type_upper = self.data_type.upper()
-
         if data_type_upper == "CHAR":
             if self.field_length:
                 return f"VARCHAR({self.field_length})"
