@@ -6,7 +6,7 @@ Handles tenant database creation and table setup.
 from typing import List, Dict, Any
 from app.models.database_models import FieldDefinition
 from app.core.database import get_db_manager
-from app.core.exceptions import DatabaseException
+from app.core.exceptions import DatabaseException, ValidationException
 import logging
 
 logger = logging.getLogger(__name__)
@@ -141,8 +141,8 @@ class SchemaManager:
     ) -> bool:
         """
         Create dynamic master data table based on field catalogue.
-        All characteristic fields are NULLABLE to allow partial data.
-        Creates a composite unique constraint on all catalogue fields + tenant_id.
+        Also creates sales_data table with dynamic target and date columns.
+        
         Args:
             tenant_id: Tenant identifier
             database_name: Tenant's database name
@@ -153,22 +153,56 @@ class SchemaManager:
             DatabaseException: If table creation fails
         """
         db_manager = get_db_manager()
+        
         try:
+            # Find target variable and date field
+            target_field = None
+            date_field = None
+            master_fields = []
+            
+            for field in fields:
+                if field.is_target_variable:
+                    if target_field is not None:
+                        raise ValidationException("Only one field can be marked as target variable")
+                    target_field = field
+                elif field.is_date_field:
+                    if date_field is not None:
+                        raise ValidationException("Only one field can be marked as date field")
+                    date_field = field
+                else:
+                    master_fields.append(field)
+            
+            # Validate required fields
+            if target_field is None:
+                raise ValidationException("Field catalogue must have one target variable field")
+            if date_field is None:
+                raise ValidationException("Field catalogue must have one date field")
+            
+            # Validate data types
+            if target_field.data_type.upper() not in ['NUMERIC', 'DECIMAL']:
+                raise ValidationException("Target variable must be numeric type")
+            if date_field.data_type.upper() not in ['DATE', 'TIMESTAMP']:
+                raise ValidationException("Date field must be DATE or TIMESTAMP type")
+            
+            logger.info(f"Creating tables with target variable: {target_field.field_name}, date field: {date_field.field_name}")
+            
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Drop existing master_data table
+                    # Drop existing tables
+                    cursor.execute("DROP TABLE IF EXISTS sales_data CASCADE")
                     cursor.execute("DROP TABLE IF EXISTS master_data CASCADE")
-                    # Build column definitions
+                    
+                    # Build master_data table columns
                     columns = []
-                    # Add master_id as primary key
                     columns.append("master_id UUID PRIMARY KEY DEFAULT gen_random_uuid()")
-                    # Add all fields as NULLABLE
+                    
                     field_names = []
-                    for field in fields:
+                    for field in master_fields:
                         sql_type = field.get_sql_type()
                         columns.append(f'"{field.field_name}" {sql_type}')
                         field_names.append(f'"{field.field_name}"')
+                    
                     # Add audit columns
                     columns.extend([
                         "tenant_id UUID NOT NULL",
@@ -177,53 +211,75 @@ class SchemaManager:
                         "updated_at TIMESTAMP",
                         "updated_by VARCHAR(255)"
                     ])
-                    # Add composite unique constraint on all fields + tenant_id
-                    # This constraint allows NULL values to be treated as distinct from each other
-                    # (PostgreSQL NULL handling: NULL != NULL for uniqueness)
+                    
+                    # Add composite unique constraint
                     composite_fields = field_names + ['"tenant_id"']
-                    unique_constraint = f"""
-                        UNIQUE NULLS DISTINCT ({', '.join(composite_fields)})
-                    """
+                    unique_constraint = f"UNIQUE NULLS DISTINCT ({', '.join(composite_fields)})"
                     columns.append(unique_constraint)
-                    # Create table
-                    create_table_sql = f"""
-                        CREATE TABLE master_data (
-                            {', '.join(columns)}
-                        )
-                    """
+                    
+                    # Create master_data table
+                    create_table_sql = f"CREATE TABLE master_data ({', '.join(columns)})"
                     cursor.execute(create_table_sql)
-                    # Create index for better query performance
+                    
+                    # Create index
                     index_columns = ', '.join(composite_fields)
+                    cursor.execute(f"CREATE INDEX idx_master_data_composite ON master_data ({index_columns})")
+                    
+                    # Create sales_data table with dynamic columns
+                    target_sql_type = target_field.get_sql_type()
+                    date_sql_type = date_field.get_sql_type()
+                    
                     cursor.execute(f"""
-                        CREATE INDEX idx_master_data_composite 
-                        ON master_data ({index_columns})
-                    """)
-                    # Recreate sales_data table with foreign key
-                    cursor.execute("DROP TABLE IF EXISTS sales_data CASCADE")
-                    cursor.execute("""
                         CREATE TABLE sales_data (
                             sales_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                             tenant_id UUID NOT NULL,
                             master_id UUID NOT NULL REFERENCES master_data(master_id),
-                            date DATE NOT NULL,
-                            quantity DECIMAL(18, 2) NOT NULL,
+                            "{date_field.field_name}" {date_sql_type} NOT NULL,
+                            "{target_field.field_name}" {target_sql_type} NOT NULL,
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL
                         )
                     """)
-                    # Recreate indexes
-                    cursor.execute("CREATE INDEX idx_sales_data_date ON sales_data(date)")
-                    cursor.execute("CREATE INDEX idx_sales_data_master_id ON sales_data(master_id)")
+                    
+                    # Create indexes on sales_data
+                    cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
+                    cursor.execute(f'CREATE INDEX idx_sales_data_master_id ON sales_data(master_id)')
+                    
+                    # Store metadata about target and date fields
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS field_catalogue_metadata (
+                            tenant_id UUID NOT NULL,
+                            target_field_name VARCHAR(255) NOT NULL,
+                            date_field_name VARCHAR(255) NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            CONSTRAINT unique_metadata_per_tenant UNIQUE(tenant_id)
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        INSERT INTO field_catalogue_metadata (tenant_id, target_field_name, date_field_name)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (tenant_id) DO UPDATE SET
+                            target_field_name = EXCLUDED.target_field_name,
+                            date_field_name = EXCLUDED.date_field_name,
+                            created_at = CURRENT_TIMESTAMP
+                    """, (tenant_id, target_field.field_name, date_field.field_name))
+                    
                     conn.commit()
-                    logger.info(f"Master data table created in {database_name} with {len(fields)} fields and composite unique constraint (NULLS DISTINCT)")
+                    logger.info(
+                        f"Created master_data and sales_data tables in {database_name} with "
+                        f"target: {target_field.field_name}, date: {date_field.field_name}"
+                    )
                     return True
                 finally:
                     cursor.close()
+        except ValidationException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to create master data table in {database_name}: {str(e)}")
-            raise DatabaseException(f"Failed to create master data table: {str(e)}")
+            logger.error(f"Failed to create tables in {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to create tables: {str(e)}")
         
     @staticmethod
     def add_upload_history_table(tenant_id: str, database_name: str) -> bool:

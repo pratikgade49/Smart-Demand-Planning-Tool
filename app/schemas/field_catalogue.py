@@ -28,6 +28,7 @@ class FieldCatalogueItemRequest(BaseModel):
     is_unique_key: bool = Field(False, description="Whether this field is part of the unique key")
     parent_field_name: Optional[str] = Field(None, description="Parent field name if this is a characteristic")
     is_target_variable: bool = Field(False, description="Whether this field is the target variable for forecasting")
+    is_date_field: bool = Field(False, description="Whether this field is the date field for time series")
     
     @field_validator("field_name")
     @classmethod

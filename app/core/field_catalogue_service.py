@@ -28,12 +28,25 @@ class FieldCatalogueService:
     ) -> Dict[str, Any]:
         """
         Create a new field catalogue in DRAFT status.
-        Validates parent field references and circular dependencies.
+        Validates parent field references, circular dependencies, and required fields.
         """
         catalogue_id = str(uuid.uuid4())
         db_manager = get_db_manager()
         
         try:
+            # Validate target variable and date field
+            target_count = sum(1 for f in request.fields if f.is_target_variable)
+            date_count = sum(1 for f in request.fields if f.is_date_field)
+            
+            if target_count == 0:
+                raise ValidationException("Field catalogue must have exactly one target variable field")
+            if target_count > 1:
+                raise ValidationException("Field catalogue can only have one target variable field")
+            if date_count == 0:
+                raise ValidationException("Field catalogue must have exactly one date field")
+            if date_count > 1:
+                raise ValidationException("Field catalogue can only have one date field")
+            
             # Validate all parent field references exist
             for field in request.fields:
                 if field.is_characteristic and field.parent_field_name:
@@ -59,7 +72,9 @@ class FieldCatalogueService:
                     default_value=f.default_value,
                     is_characteristic=f.is_characteristic,
                     is_unique_key=f.is_unique_key,
-                    parent_field_name=f.parent_field_name
+                    parent_field_name=f.parent_field_name,
+                    is_target_variable=f.is_target_variable,
+                    is_date_field=f.is_date_field
                 )
                 for f in request.fields
             ]

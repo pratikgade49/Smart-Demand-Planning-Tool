@@ -746,3 +746,37 @@ class ForecastingService:
                     )
             finally:
                 cursor.close()
+
+
+    @staticmethod
+    def _get_field_names(tenant_id: str, database_name: str) -> Tuple[str, str]:
+        """
+        Get target and date field names from field catalogue metadata.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            
+        Returns:
+            Tuple of (target_field_name, date_field_name)
+        """
+        db_manager = get_db_manager()
+        
+        with db_manager.get_tenant_connection(database_name) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    SELECT target_field_name, date_field_name
+                    FROM field_catalogue_metadata
+                    WHERE tenant_id = %s
+                """, (tenant_id,))
+                
+                result = cursor.fetchone()
+                if not result:
+                    # Fallback to default names for backward compatibility
+                    logger.warning(f"No metadata found for tenant {tenant_id}, using defaults")
+                    return ('quantity', 'date')
+                
+                return result[0], result[1]
+            finally:
+                cursor.close()

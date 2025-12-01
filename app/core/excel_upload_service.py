@@ -107,48 +107,78 @@ class ExcelUploadService:
         master_data_mapping = {}
         sales_data_mapping = {}
 
+        # Get target and date field names from catalogue
+        target_field_name = None
+        date_field_name = None
+        
+        for field in field_catalogue.get('fields', []):
+            if field.get('is_target_variable'):
+                target_field_name = field['field_name']
+            if field.get('is_date_field'):
+                date_field_name = field['field_name']
+        
+        if not target_field_name:
+            raise ValidationException("Field catalogue must have a target variable field")
+        if not date_field_name:
+            raise ValidationException("Field catalogue must have a date field")
+        
+        logger.info(f"Looking for target field: {target_field_name}, date field: {date_field_name}")
+
         # Normalize catalogue field names: convert spaces to underscores and lowercase
         catalogue_fields_lower = {}
         for field in field_catalogue.get('fields', []):
-            # Normalize: lowercase, replace spaces with underscores
+            # Skip target and date fields as they go to sales_data
+            if field.get('is_target_variable') or field.get('is_date_field'):
+                continue
             normalized_key = field['field_name'].lower().strip().replace(' ', '_')
             catalogue_fields_lower[normalized_key] = field['field_name']
 
         logger.info(f"Excel columns: {list(df.columns)}")
-        logger.info(f"Catalogue fields: {list(catalogue_fields_lower.values())}")
+        logger.info(f"Catalogue master fields: {list(catalogue_fields_lower.values())}")
+        logger.info(f"Target field: {target_field_name}, Date field: {date_field_name}")
 
-        # Identify sales data columns
+        # Identify sales data columns (target and date)
         sales_columns_found = set()
-        for sales_field, patterns in ExcelUploadService.SALES_DATA_PATTERNS.items():
-            for pattern in patterns:
-                if pattern in df_columns_lower:
-                    sales_data_mapping[sales_field] = df_columns_lower[pattern]
-                    sales_columns_found.add(df_columns_lower[pattern])
-                    logger.debug(f"Mapped sales field '{sales_field}' to column '{df_columns_lower[pattern]}'")
-                    break
-
-        # Validate required sales fields
-        if 'date' not in sales_data_mapping:
-            logger.error(f"Missing required 'date' column")
-            raise ValidationException(
-                f"Missing required 'date' column. Expected one of: {ExcelUploadService.SALES_DATA_PATTERNS['date']}"
-            )
         
-        if 'quantity' not in sales_data_mapping:
-            logger.error(f"Missing required 'quantity' column")
-            raise ValidationException(
-                f"Missing required 'quantity' column. Expected one of: {ExcelUploadService.SALES_DATA_PATTERNS['quantity']}"
-            )
+        # Map target field
+        target_normalized = target_field_name.lower().strip().replace(' ', '_')
+        if target_normalized in df_columns_lower:
+            sales_data_mapping['target'] = df_columns_lower[target_normalized]
+            sales_columns_found.add(df_columns_lower[target_normalized])
+            logger.debug(f"Mapped target field to column '{df_columns_lower[target_normalized]}'")
+        else:
+            raise ValidationException(f"Target field '{target_field_name}' not found in Excel")
+        
+        # Map date field
+        date_normalized = date_field_name.lower().strip().replace(' ', '_')
+        if date_normalized in df_columns_lower:
+            sales_data_mapping['date'] = df_columns_lower[date_normalized]
+            sales_columns_found.add(df_columns_lower[date_normalized])
+            logger.debug(f"Mapped date field to column '{df_columns_lower[date_normalized]}'")
+        else:
+            raise ValidationException(f"Date field '{date_field_name}' not found in Excel")
 
-        if 'uom' not in sales_data_mapping:
+        # Map UOM if exists
+        if 'uom' in df_columns_lower:
+            sales_data_mapping['uom'] = df_columns_lower['uom']
+            sales_columns_found.add(df_columns_lower['uom'])
+        else:
             logger.info("UoM column not found, will use default value 'EACH'")
             sales_data_mapping['uom'] = None
+
+        # Map unit price if exists
+        for price_pattern in ['unit_price', 'price', 'unitprice']:
+            if price_pattern in df_columns_lower:
+                sales_data_mapping['unit_price'] = df_columns_lower[price_pattern]
+                sales_columns_found.add(df_columns_lower[price_pattern])
+                break
+        else:
+            sales_data_mapping['unit_price'] = None
 
         # Map remaining columns to catalogue fields
         skipped_columns = []
         for excel_col in df.columns:
             if excel_col not in sales_columns_found:
-                # Normalize Excel column: lowercase, replace spaces with underscores
                 excel_col_normalized = excel_col.lower().strip().replace(' ', '_')
                 
                 if excel_col_normalized in catalogue_fields_lower:

@@ -8,7 +8,7 @@ import json
 class FieldDefinition:
     """Represents a field in the Field Catalogue."""
     
-    def __init__(
+def __init__(
         self,
         field_name: str,
         data_type: str,
@@ -17,7 +17,8 @@ class FieldDefinition:
         is_characteristic: bool = False,
         is_unique_key: bool = False,
         parent_field_name: Optional[str] = None,
-        is_target_variable: bool = False
+        is_target_variable: bool = False,
+        is_date_field: bool = False
     ):
         self.field_name = field_name
         self.data_type = data_type
@@ -27,6 +28,7 @@ class FieldDefinition:
         self.is_unique_key = is_unique_key
         self.parent_field_name = parent_field_name
         self.is_target_variable = is_target_variable
+        self.is_date_field = is_date_field
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
