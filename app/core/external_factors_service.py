@@ -212,6 +212,7 @@ class ExternalFactorsService:
                             # Convert to DataFrame
                             df = pd.DataFrame(rows, columns=['date', 'value', 'unit', 'source'])
                             df['date'] = pd.to_datetime(df['date'])
+                            df['value'] = df['value'].astype(float)
                             
                             interval_type = ExternalFactorsService._detect_factor_interval(df['date'])
                             forecast_dates = ExternalFactorsService._generate_forecast_dates(
@@ -410,6 +411,7 @@ class ExternalFactorsService:
                     # Convert to DataFrame and pivot
                     df = pd.DataFrame(rows, columns=['date', 'factor_name', 'factor_value'])
                     df['date'] = pd.to_datetime(df['date'])
+                    df['factor_value'] = df['factor_value'].astype(float)
                     
                     # Pivot so each factor becomes a column
                     df_pivot = df.pivot_table(

@@ -361,82 +361,6 @@ class ForecastingService:
         except Exception as e:
             logger.error(f"Failed to get forecast run: {str(e)}")
             raise DatabaseException(f"Failed to get forecast run: {str(e)}")
-        
-    # Add this to app/core/forecasting_service.py
-    # In the prepare_aggregated_data method, around line 340
-
-    @staticmethod
-    def prepare_aggregated_data(
-        tenant_id: str,
-        database_name: str,
-        aggregation_level: str,
-        interval: str,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> pd.DataFrame:
-        """
-        Prepare aggregated historical data for forecasting.
-        FIXED: Now uses dynamic target and date field names.
-        """
-        db_manager = get_db_manager()
-
-        try:
-            # ✅ FIXED: Get dynamic field names from metadata
-            target_field_name, date_field_name = ForecastingService._get_field_names(
-                tenant_id, database_name
-            )
-            
-            logger.info(f"Using dynamic fields - Target: '{target_field_name}', Date: '{date_field_name}'")
-            
-            # Get aggregation columns
-            agg_columns = ForecastingService._get_aggregation_columns(
-                tenant_id, database_name, aggregation_level
-            )
-            
-            # Build filter clause
-            filter_clause = ""
-            filter_params = []
-            if filters:
-                filter_conditions = []
-                for col, val in filters.items():
-                    if col not in ["aggregation_level", "interval", "selected_external_factors"]:
-                        filter_conditions.append(f'm."{col}" = %s')
-                        filter_params.append(val)
-                
-                if filter_conditions:
-                    filter_clause = "AND " + " AND ".join(filter_conditions)
-
-            with db_manager.get_tenant_connection(database_name) as conn:
-                # ✅ FIXED: Build SQL using dynamic field names
-                date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field_name)
-                
-                query = f"""
-                    SELECT 
-                        {date_trunc} as period,
-                        {', '.join([f'm."{col}"' for col in agg_columns])},
-                        SUM(s."{target_field_name}") as total_quantity,
-                        COUNT(DISTINCT s.sales_id) as transaction_count,
-                        AVG(s.unit_price) as avg_price
-                    FROM sales_data s
-                    JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s {filter_clause}
-                    GROUP BY {date_trunc}, {', '.join([f'm."{col}"' for col in agg_columns])}
-                    ORDER BY period
-                """
-                
-                params = [tenant_id] + filter_params
-                
-                # Execute query
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=UserWarning)
-                    df = pd.read_sql_query(query, conn, params=params)
-                
-                logger.info(f"Prepared {len(df)} aggregated records using target='{target_field_name}', date='{date_field_name}'")
-                return df
-
-        except Exception as e:
-            logger.error(f"Failed to prepare aggregated data: {str(e)}", exc_info=True)
-            raise DatabaseException(f"Failed to prepare data: {str(e)}")
 
     @staticmethod
     def list_forecast_runs(
@@ -545,7 +469,7 @@ class ForecastingService:
             if filters:
                 filter_conditions = []
                 for col, val in filters.items():
-                    if col not in ["aggregation_level", "interval"]:
+                    if col not in ["aggregation_level", "interval", "selected_external_factors"]:
                         filter_conditions.append(f'm."{col}" = %s')
                         filter_params.append(val)
                 
