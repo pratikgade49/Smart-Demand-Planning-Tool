@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
+import pandas as pd
 from psycopg2.extras import Json
 from app.schemas.forecasting import (
     ForecastRunCreate,
@@ -500,19 +501,6 @@ async def execute_forecast_best_fit(
 ):
     """
     Execute a forecast run using Advanced AI/ML auto model (Best Fit algorithm selection).
-    
-    This will:
-    1. Fetch historical data based on filters
-    2. Run all available algorithms in parallel
-    3. Select the best performing algorithm
-    4. Create ensemble from top 3 algorithms
-    5. Store forecast results
-    6. Update run status
-    
-    **When to use**: Select this when "Advanced AI/ML auto model" is chosen in the UI.
-    
-    **Note**: This is an asynchronous operation that may take time for large datasets.
-    Automatically selects the best algorithm without manual configuration.
     """
     try:
         from app.core.database import get_db_manager
@@ -526,13 +514,13 @@ async def execute_forecast_best_fit(
             forecast_run_id
         )
         
-        # Validate run status - allow Pending, Failed, or Completed (for re-execution)
+        # Validate run status
         if result['run_status'] not in ['Pending', 'Failed', 'Completed', 'Completed with Errors']:
             raise ValidationException(
                 f"Cannot execute forecast run with status: {result['run_status']}"
             )
         
-        # Check if best-fit algorithm already exists for this run and clean up
+        # Check and cleanup existing best-fit results
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
@@ -544,16 +532,13 @@ async def execute_forecast_best_fit(
                 existing_mapping = cursor.fetchone()
                 
                 if existing_mapping:
-                    # Delete existing best-fit results and mapping
                     logger.info(f"Removing existing best-fit results for forecast run: {forecast_run_id}")
                     
-                    # Delete forecast results first (foreign key constraint)
                     cursor.execute("""
                         DELETE FROM forecast_results
                         WHERE forecast_run_id = %s AND algorithm_id = 999
                     """, (forecast_run_id,))
                     
-                    # Delete algorithm mapping
                     cursor.execute("""
                         DELETE FROM forecast_algorithms_mapping
                         WHERE forecast_run_id = %s AND algorithm_id = 999
@@ -578,12 +563,13 @@ async def execute_forecast_best_fit(
         
         logger.info(f"Starting best-fit forecast execution for run: {forecast_run_id}")
 
-        # Prepare historical data
+        # ✅ FIXED: Extract filters and selected external factors
         filters = result.get('forecast_filters', {})
         aggregation_level = filters.get('aggregation_level', 'product')
         interval = filters.get('interval', 'MONTHLY')
+        selected_factors = filters.get('selected_external_factors')  # ✅ THIS IS THE KEY FIX
 
-        logger.info(f"Preparing historical data for best-fit analysis: aggregation_level={aggregation_level}, interval={interval}")
+        logger.info(f"Preparing historical data for best-fit analysis: aggregation_level={aggregation_level}, interval={interval}, selected_factors={selected_factors}")
 
         # Get historical data
         historical_data = ForecastingService.prepare_aggregated_data(
@@ -599,7 +585,48 @@ async def execute_forecast_best_fit(
 
         logger.info(f"Prepared {len(historical_data)} historical records for best-fit analysis")
         
-        # Calculate number of forecast periods
+        # ✅ LOAD AND MERGE EXTERNAL FACTORS
+        logger.info(f"Loading external factors for best-fit: {selected_factors}")
+        external_factors_df = ForecastExecutionService._prepare_external_factors(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            start_date=result['forecast_start'],
+            end_date=result['forecast_end'],
+            selected_factors=selected_factors
+        )
+        
+        # ✅ MERGE IF FACTORS EXIST
+        if not external_factors_df.empty:
+            logger.info(f"Merging {len(external_factors_df.columns)-1} external factors into historical data")
+            logger.info(f"External factors columns: {list(external_factors_df.columns)}")
+            logger.info(f"Historical data columns before merge: {list(historical_data.columns)}")
+
+            # Normalize date columns to ensure proper merge
+            # Convert both 'period' and 'date' to datetime64[ns] format for consistent merging
+            if 'period' in historical_data.columns:
+                historical_data['period'] = pd.to_datetime(historical_data['period'], errors='coerce')
+                logger.info(f"After conversion - historical_data['period'] dtype: {historical_data['period'].dtype}")
+            if 'date' in external_factors_df.columns:
+                external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
+                logger.info(f"After conversion - external_factors_df['date'] dtype: {external_factors_df['date'].dtype}")
+
+            historical_data = historical_data.merge(
+                external_factors_df,
+                left_on='period',
+                right_on='date',
+                how='left'
+            )
+
+            logger.info(f"Historical data columns after merge: {list(historical_data.columns)}")
+
+            # Drop the duplicate 'date' column if it exists
+            if 'date' in historical_data.columns and 'period' in historical_data.columns:
+                historical_data = historical_data.drop(columns=['date'])
+                logger.info(f"Dropped duplicate 'date' column after merge")
+        else:
+            logger.info("No external factors to merge - proceeding with historical data only")
+        
+        # Calculate forecast periods
         forecast_start_date = datetime.fromisoformat(result['forecast_start']).date()
         forecast_end_date = datetime.fromisoformat(result['forecast_end']).date()
         
@@ -635,7 +662,7 @@ async def execute_forecast_best_fit(
 
         logger.info(f"Storing best-fit results for algorithm: {forecast_result['selected_algorithm']}")
 
-        # Create forecast_algorithms_mapping record for best-fit
+        # Create mapping record
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
@@ -658,7 +685,6 @@ async def execute_forecast_best_fit(
                     'Completed',
                     tenant_data["email"]
                 ))
-
                 conn.commit()
             finally:
                 cursor.close()
@@ -670,12 +696,9 @@ async def execute_forecast_best_fit(
                 for forecast_date, forecast_value in zip(forecast_dates, forecast_result['forecast']):
                     result_id = str(uuid.uuid4())
                     forecast_value_float = float(forecast_value)
-
-                    # Validate bounds
                     max_forecast_value = 999999.9999
                     if not (0 <= forecast_value_float <= max_forecast_value):
                         forecast_value_float = min(max_forecast_value, max(0, forecast_value_float))
-
                     forecast_value_float = round(forecast_value_float, 4)
                     accuracy_metric = round(forecast_result['accuracy'], 2) if forecast_result['accuracy'] else None
 
@@ -705,7 +728,6 @@ async def execute_forecast_best_fit(
                         }),
                         tenant_data["email"]
                     ))
-
                 conn.commit()
             finally:
                 cursor.close()
@@ -747,7 +769,7 @@ async def execute_forecast_best_fit(
             'accuracy': forecast_result['accuracy'],
             'mae': forecast_result['mae'],
             'rmse': forecast_result['rmse'],
-            'mape': forecast_result['mape'],
+            'mape': forecast_result.get('mape'),
             'total_records': len(forecast_dates),
             'processed_records': len(forecast_dates),
             'failed_records': 0,

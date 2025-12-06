@@ -1494,6 +1494,7 @@ class ForecastExecutionService:
         """
         Identify external factor columns in the data.
         External factors are columns not in the standard set (period, total_quantity, quantity, date).
+        Also excludes aggregation columns and calculated fields.
         
         Args:
             data: DataFrame with historical data and potentially merged external factors
@@ -1501,8 +1502,29 @@ class ForecastExecutionService:
         Returns:
             List of external factor column names
         """
-        standard_columns = {'period', 'total_quantity', 'quantity', 'date'}
-        external_factors = [col for col in data.columns if col not in standard_columns]
+        # Standard columns from sales data and aggregation
+        standard_columns = {
+            'period', 'total_quantity', 'quantity', 'date',
+            'transaction_count', 'avg_price', 'uom'
+        }
+        
+        # Exclude any column that could be a master data aggregation field
+        # These would typically be string/categorical columns used for grouping
+        external_factors = []
+        for col in data.columns:
+            if col not in standard_columns:
+                # Check if it's likely a categorical aggregation column
+                # (typically has few unique values relative to data size)
+                if col in data.columns:
+                    dtype = data[col].dtype
+                    # If it's a string/object column with few unique values, it's likely an aggregation field
+                    if dtype == 'object' or dtype.name == 'category':
+                        unique_ratio = data[col].nunique() / len(data) if len(data) > 0 else 0
+                        if unique_ratio < 0.1:  # Less than 10% unique values = aggregation field
+                            continue
+                # Otherwise, treat as external factor
+                external_factors.append(col)
+        
         return external_factors
 
     @staticmethod
