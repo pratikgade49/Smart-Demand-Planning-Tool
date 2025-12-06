@@ -567,9 +567,10 @@ async def execute_forecast_best_fit(
         filters = result.get('forecast_filters', {})
         aggregation_level = filters.get('aggregation_level', 'product')
         interval = filters.get('interval', 'MONTHLY')
-        selected_factors = filters.get('selected_external_factors')  # ✅ THIS IS THE KEY FIX
+        selected_factors = filters.get('selected_external_factors')
 
-        logger.info(f"Preparing historical data for best-fit analysis: aggregation_level={aggregation_level}, interval={interval}, selected_factors={selected_factors}")
+        logger.info(f"Starting best-fit forecast execution for run: {forecast_run_id}")
+        logger.info(f"Aggregation: {aggregation_level}, Interval: {interval}, Selected factors: {selected_factors}")
 
         # Get historical data
         historical_data = ForecastingService.prepare_aggregated_data(
@@ -584,25 +585,24 @@ async def execute_forecast_best_fit(
             raise ValidationException("No historical data available for forecasting")
 
         logger.info(f"Prepared {len(historical_data)} historical records for best-fit analysis")
+        logger.info(f"Historical data date range: {historical_data['period'].min()} to {historical_data['period'].max()}")
         
-        # ✅ LOAD AND MERGE EXTERNAL FACTORS
+        # ✅ FIXED: Load external factors WITHOUT date filtering
         logger.info(f"Loading external factors for best-fit: {selected_factors}")
         external_factors_df = ForecastExecutionService._prepare_external_factors(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
-            start_date=result['forecast_start'],
-            end_date=result['forecast_end'],
-            selected_factors=selected_factors
+            selected_factors=selected_factors  # ✅ Only pass selected_factors
         )
         
-        # ✅ MERGE IF FACTORS EXIST
+        # ✅ IMPROVED: Merge with better logging and validation
         if not external_factors_df.empty:
             logger.info(f"Merging {len(external_factors_df.columns)-1} external factors into historical data")
             logger.info(f"External factors columns: {list(external_factors_df.columns)}")
+            logger.info(f"External factors date range: {external_factors_df['date'].min()} to {external_factors_df['date'].max()}")
             logger.info(f"Historical data columns before merge: {list(historical_data.columns)}")
 
             # Normalize date columns to ensure proper merge
-            # Convert both 'period' and 'date' to datetime64[ns] format for consistent merging
             if 'period' in historical_data.columns:
                 historical_data['period'] = pd.to_datetime(historical_data['period'], errors='coerce')
                 logger.info(f"After conversion - historical_data['period'] dtype: {historical_data['period'].dtype}")
@@ -610,6 +610,7 @@ async def execute_forecast_best_fit(
                 external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
                 logger.info(f"After conversion - external_factors_df['date'] dtype: {external_factors_df['date'].dtype}")
 
+            # Merge on date
             historical_data = historical_data.merge(
                 external_factors_df,
                 left_on='period',
@@ -618,6 +619,23 @@ async def execute_forecast_best_fit(
             )
 
             logger.info(f"Historical data columns after merge: {list(historical_data.columns)}")
+
+            # ✅ NEW: Validate merge success
+            factor_columns = [col for col in external_factors_df.columns if col != 'date']
+            non_null_count = historical_data[factor_columns].notna().sum().sum()
+            total_cells = len(historical_data) * len(factor_columns)
+            merge_success_rate = (non_null_count / total_cells * 100) if total_cells > 0 else 0
+            
+            logger.info(
+                f"External factors merge success: {non_null_count}/{total_cells} cells matched "
+                f"({merge_success_rate:.1f}% success rate)"
+            )
+            
+            if merge_success_rate < 50:
+                logger.warning(
+                    f"WARNING: Low merge success rate ({merge_success_rate:.1f}%)! "
+                    f"External factors may not overlap with historical data dates."
+                )
 
             # Drop the duplicate 'date' column if it exists
             if 'date' in historical_data.columns and 'period' in historical_data.columns:
@@ -645,6 +663,12 @@ async def execute_forecast_best_fit(
                 'periods': periods
             },
             process_log=process_log
+        )
+        
+        periods = ForecastExecutionService._calculate_periods(
+            forecast_start_date,
+            forecast_end_date,
+            interval
         )
         
         # Generate forecast dates

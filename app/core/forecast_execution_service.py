@@ -189,29 +189,20 @@ class ForecastExecutionService:
     ) -> Dict[str, Any]:
         """
         Execute a forecast run with all mapped algorithms.
-
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Tenant's database name
-            forecast_run_id: Forecast run identifier
-            user_email: User executing the forecast
-
-        Returns:
-            Execution summary
         """
         start_time = datetime.utcnow()
         initial_resources = ForecastExecutionService._get_system_resources()
-        logger.info(f"Starting forecast execution for run: {forecast_run_id}, tenant: {tenant_id}, database: {database_name}, user: {user_email}")
+        logger.info(f"Starting forecast execution for run: {forecast_run_id}")
         logger.info(f"Initial system resources - CPU: {initial_resources['cpu_percent']}%, Memory: {initial_resources['memory_mb']}MB ({initial_resources['memory_percent']}%)")
 
         db_manager = get_db_manager()
 
         try:
             # Get forecast run details
-            logger.debug(f"Retrieving forecast run details for run: {forecast_run_id}")
             forecast_run = ForecastingService.get_forecast_run(
                 tenant_id, database_name, forecast_run_id
             )
+            
             logger.info(f"Retrieved forecast run details: version_id={forecast_run.get('version_id')}, start={forecast_run.get('forecast_start')}, end={forecast_run.get('forecast_end')}")
 
             # Validate run status
@@ -259,13 +250,11 @@ class ForecastExecutionService:
             
             logger.info(f"Prepared {len(historical_data)} historical records")
             
-            # Get external factors
+            # ✅ FIXED: Get external factors WITHOUT date filtering
             external_factors = ForecastExecutionService._prepare_external_factors(
                 tenant_id,
                 database_name,
-                forecast_run['forecast_start'],
-                forecast_run['forecast_end'],
-                selected_factors=selected_factors
+                selected_factors=selected_factors  # ✅ Only pass selected_factors
             )
             
             # Execute each algorithm in parallel
@@ -438,11 +427,11 @@ class ForecastExecutionService:
         user_email: str
     ) -> List[Dict[str, Any]]:
         """Execute a single algorithm and store results."""
-
+        
         mapping_id = algorithm_mapping['mapping_id']
         algorithm_id = algorithm_mapping['algorithm_id']
         algorithm_name = algorithm_mapping['algorithm_name']
-        custom_params = algorithm_mapping.get('custom_parameters') or {}  # Handle None
+        custom_params = algorithm_mapping.get('custom_parameters') or {}
 
         # Validate custom parameters
         try:
@@ -472,16 +461,43 @@ class ForecastExecutionService:
                 interval
             )
             
-            # Merge external factors into historical data
+            # ✅ IMPROVED: Merge external factors with better logging
             if not external_factors.empty:
+                logger.info(
+                    f"Merging external factors with historical data for {algorithm_name}"
+                )
+                logger.debug(f"Historical data date range: {historical_data['period'].min()} to {historical_data['period'].max()}")
+                logger.debug(f"External factors date range: {external_factors['date'].min()} to {external_factors['date'].max()}")
+                logger.debug(f"External factor columns: {list(external_factors.columns)}")
+                
+                # Merge on date
                 historical_data = historical_data.merge(
                     external_factors,
                     left_on='period',
                     right_on='date',
                     how='left'
                 )
+                
+                # Check merge success
+                factor_columns = [col for col in external_factors.columns if col != 'date']
+                non_null_count = historical_data[factor_columns].notna().sum().sum()
+                total_cells = len(historical_data) * len(factor_columns)
+                merge_success_rate = (non_null_count / total_cells * 100) if total_cells > 0 else 0
+                
+                logger.info(
+                    f"External factors merge: {non_null_count}/{total_cells} cells matched "
+                    f"({merge_success_rate:.1f}% success rate)"
+                )
+                
+                if merge_success_rate < 50:
+                    logger.warning(
+                        f"Low merge success rate for external factors! "
+                        f"Check that factor dates overlap with historical data dates."
+                    )
+            else:
+                logger.info(f"No external factors to merge for {algorithm_name}")
             
-            # Route to appropriate algorithm based on algorithm_id
+            # Route to appropriate algorithm
             if algorithm_id == 1:  # ARIMA
                 forecast, metrics = ForecastExecutionService.arima_forecast(
                     data=historical_data,
@@ -2074,43 +2090,49 @@ class ForecastExecutionService:
     def _prepare_external_factors(
         tenant_id: str,
         database_name: str,
-        start_date: str,
-        end_date: str,
-        selected_factors: Optional[List[str]] = None  # NEW PARAMETER
+        selected_factors: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Prepare external factors data with optional factor selection.
         
+        FIXED: No longer filters by date range - fetches ALL available dates
+        so that factors can be properly merged with both historical data 
+        (for training) and forecast period data (for prediction).
+        
         Args:
             tenant_id: Tenant identifier
             database_name: Tenant's database name
-            start_date: Start date
-            end_date: End date  
             selected_factors: List of factor names to include (None/empty = no factors)
             
         Returns:
-            DataFrame with factors pivoted by name
+            DataFrame with factors pivoted by name, containing ALL available dates
         """
         try:
-            from datetime import datetime
-            
-            start = datetime.fromisoformat(start_date).date()
-            end = datetime.fromisoformat(end_date).date()
-
-            # Use enhanced service to get factors
+            # Use enhanced service to get factors WITHOUT date filtering
             df_pivot = ExternalFactorsService.get_factors_for_forecast_run(
                 tenant_id=tenant_id,
                 database_name=database_name,
                 selected_factors=selected_factors,
-                start_date=start,
-                end_date=end
+                start_date=None,  # ✅ FIXED: No date filtering
+                end_date=None     # ✅ FIXED: No date filtering
             )
+
+            if not df_pivot.empty:
+                logger.info(
+                    f"Loaded external factors for all available dates: "
+                    f"{len(df_pivot)} records, "
+                    f"{len(df_pivot.columns) - 1} factors, "
+                    f"date range: {df_pivot['date'].min()} to {df_pivot['date'].max()}"
+                )
+            else:
+                logger.info("No external factors loaded (none selected or no data available)")
 
             return df_pivot
 
         except Exception as e:
             logger.warning(f"Could not load external factors: {str(e)}")
             return pd.DataFrame()
+
 
     @staticmethod
     def _calculate_periods(start_date: date, end_date: date, interval: str) -> int:

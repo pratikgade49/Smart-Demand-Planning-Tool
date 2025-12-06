@@ -368,12 +368,21 @@ class ExternalFactorsService:
         tenant_id: str,
         database_name: str,
         selected_factors: Optional[List[str]],
-        start_date: date,
-        end_date: date
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None
     ) -> pd.DataFrame:
         """
         Get external factors for forecast run with optional selection.
-        Returns pivoted DataFrame ready for merging with historical data.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            selected_factors: List of factor names to include (None/empty = no factors)
+            start_date: Optional start date filter (None = no filtering)
+            end_date: Optional end date filter (None = no filtering)
+            
+        Returns:
+            DataFrame with factors pivoted by name
         """
         db_manager = get_db_manager()
         
@@ -381,39 +390,74 @@ class ExternalFactorsService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Build query based on selection
-                    if selected_factors and len(selected_factors) > 0:
-                        placeholders = ', '.join(['%s'] * len(selected_factors))
-                        query = f"""
-                            SELECT date, factor_name, factor_value
-                            FROM external_factors
-                            WHERE tenant_id = %s 
-                            AND deleted_at IS NULL
-                            AND date >= %s
-                            AND date <= %s
-                            AND factor_name IN ({placeholders})
-                            ORDER BY date, factor_name
-                        """
-                        params = [tenant_id, start_date, end_date] + selected_factors
-                    else:
-                        # No factors selected - return empty DataFrame
+                    # Check if any factors are selected
+                    if not selected_factors or len(selected_factors) == 0:
                         logger.info("No external factors selected for this forecast run")
                         return pd.DataFrame()
                     
-                    cursor.execute(query, params)
+                    logger.info(f"Fetching external factors: {selected_factors}")
                     
+                    # Build the query
+                    placeholders = ', '.join(['%s'] * len(selected_factors))
+                    params = [tenant_id]
+                    
+                    # Build optional date filters
+                    date_conditions = []
+                    if start_date is not None:
+                        date_conditions.append("date >= %s")
+                        params.append(start_date)
+                    
+                    if end_date is not None:
+                        date_conditions.append("date <= %s")
+                        params.append(end_date)
+                    
+                    date_filter = ""
+                    if date_conditions:
+                        date_filter = "AND " + " AND ".join(date_conditions)
+                    
+                    # Add selected factors to params
+                    params.extend(selected_factors)
+                    
+                    # Build final query
+                    query = f"""
+                        SELECT date, factor_name, factor_value
+                        FROM external_factors
+                        WHERE tenant_id = %s 
+                        AND deleted_at IS NULL
+                        {date_filter}
+                        AND factor_name IN ({placeholders})
+                        ORDER BY date, factor_name
+                    """
+                    
+                    # Execute query
+                    cursor.execute(query, params)
                     rows = cursor.fetchall()
                     
+                    # Log results
                     if not rows:
-                        logger.warning(f"No external factor data found for selected factors in date range")
+                        # Debug: Check what's actually in the table
+                        cursor.execute("""
+                            SELECT DISTINCT factor_name 
+                            FROM external_factors 
+                            WHERE tenant_id = %s AND deleted_at IS NULL
+                        """, (tenant_id,))
+                        available = [r[0] for r in cursor.fetchall()]
+                        
+                        logger.warning(
+                            f"No external factor data found! "
+                            f"Requested: {selected_factors}, "
+                            f"Available in DB: {available}"
+                        )
                         return pd.DataFrame()
                     
-                    # Convert to DataFrame and pivot
+                    logger.info(f"Fetched {len(rows)} external factor records")
+                    
+                    # Convert to DataFrame
                     df = pd.DataFrame(rows, columns=['date', 'factor_name', 'factor_value'])
                     df['date'] = pd.to_datetime(df['date'])
                     df['factor_value'] = df['factor_value'].astype(float)
                     
-                    # Pivot so each factor becomes a column
+                    # Pivot: each factor becomes a column
                     df_pivot = df.pivot_table(
                         index='date',
                         columns='factor_name',
@@ -421,10 +465,20 @@ class ExternalFactorsService:
                         aggfunc='mean'
                     ).reset_index()
                     
+                    date_range_msg = ""
+                    if start_date or end_date:
+                        date_range_msg = f" (filtered: {start_date or 'start'} to {end_date or 'end'})"
+                    
                     logger.info(
-                        f"Retrieved {len(df_pivot)} date records with "
+                        f"Prepared {len(df_pivot)} date records with "
                         f"{len(df_pivot.columns) - 1} factors: {list(df_pivot.columns[1:])}"
+                        f"{date_range_msg}"
                     )
+                    
+                    if not df_pivot.empty:
+                        logger.info(
+                            f"Factor data date range: {df_pivot['date'].min()} to {df_pivot['date'].max()}"
+                        )
                     
                     return df_pivot
                     
@@ -432,7 +486,7 @@ class ExternalFactorsService:
                     cursor.close()
                     
         except Exception as e:
-            logger.error(f"Failed to get factors for forecast: {str(e)}")
+            logger.error(f"Failed to get factors for forecast: {str(e)}", exc_info=True)
             raise DatabaseException(f"Failed to retrieve factors: {str(e)}")
 
     @staticmethod
@@ -525,3 +579,5 @@ class ExternalFactorsService:
         except Exception as e:
             logger.error(f"Failed to delete factor: {str(e)}")
             raise DatabaseException(f"Failed to delete factor: {str(e)}")
+        
+    
