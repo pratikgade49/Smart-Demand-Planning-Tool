@@ -526,22 +526,50 @@ async def execute_forecast_best_fit(
             forecast_run_id
         )
         
-        # Validate run status
-        if result['run_status'] not in ['Pending', 'Failed']:
+        # Validate run status - allow Pending, Failed, or Completed (for re-execution)
+        if result['run_status'] not in ['Pending', 'Failed', 'Completed', 'Completed with Errors']:
             raise ValidationException(
                 f"Cannot execute forecast run with status: {result['run_status']}"
             )
         
-        # Update status to In-Progress
+        # Check if best-fit algorithm already exists for this run and clean up
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
+                cursor.execute("""
+                    SELECT mapping_id FROM forecast_algorithms_mapping
+                    WHERE forecast_run_id = %s AND algorithm_id = 999
+                """, (forecast_run_id,))
+                
+                existing_mapping = cursor.fetchone()
+                
+                if existing_mapping:
+                    # Delete existing best-fit results and mapping
+                    logger.info(f"Removing existing best-fit results for forecast run: {forecast_run_id}")
+                    
+                    # Delete forecast results first (foreign key constraint)
+                    cursor.execute("""
+                        DELETE FROM forecast_results
+                        WHERE forecast_run_id = %s AND algorithm_id = 999
+                    """, (forecast_run_id,))
+                    
+                    # Delete algorithm mapping
+                    cursor.execute("""
+                        DELETE FROM forecast_algorithms_mapping
+                        WHERE forecast_run_id = %s AND algorithm_id = 999
+                    """, (forecast_run_id,))
+                    
+                    conn.commit()
+                    logger.info(f"Deleted existing best-fit records for re-execution")
+                
+                # Update status to In-Progress
                 cursor.execute("""
                     UPDATE forecast_runs
                     SET run_status = 'In-Progress',
                         started_at = %s,
                         updated_at = %s,
-                        updated_by = %s
+                        updated_by = %s,
+                        error_message = NULL
                     WHERE forecast_run_id = %s
                 """, (datetime.utcnow(), datetime.utcnow(), tenant_data["email"], forecast_run_id))
                 conn.commit()
@@ -601,19 +629,16 @@ async def execute_forecast_best_fit(
 
         logger.info(f"Generated {len(forecast_dates)} forecast periods from {forecast_start_date} to {forecast_end_date}")
 
-        # Store results with a special algorithm_id for best-fit
-        # Use algorithm_id = 999 for best-fit results
+        # Store results with algorithm_id = 999 for best-fit
         best_fit_algorithm_id = 999
-
-        # Create a best-fit algorithm mapping record
         best_fit_mapping_id = str(uuid.uuid4())
 
         logger.info(f"Storing best-fit results for algorithm: {forecast_result['selected_algorithm']}")
 
+        # Create forecast_algorithms_mapping record for best-fit
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
-                # First, create the forecast_algorithms_mapping record for best-fit
                 cursor.execute("""
                     INSERT INTO forecast_algorithms_mapping
                     (mapping_id, tenant_id, forecast_run_id, algorithm_id, algorithm_name, execution_order,
@@ -635,11 +660,10 @@ async def execute_forecast_best_fit(
                 ))
 
                 conn.commit()
-
             finally:
                 cursor.close()
 
-        # Now store the forecast results
+        # Store forecast results
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
@@ -653,7 +677,6 @@ async def execute_forecast_best_fit(
                         forecast_value_float = min(max_forecast_value, max(0, forecast_value_float))
 
                     forecast_value_float = round(forecast_value_float, 4)
-
                     accuracy_metric = round(forecast_result['accuracy'], 2) if forecast_result['accuracy'] else None
 
                     cursor.execute("""
@@ -667,7 +690,7 @@ async def execute_forecast_best_fit(
                         tenant_data["tenant_id"],
                         forecast_run_id,
                         result.get('version_id'),
-                        best_fit_mapping_id,  # Use the mapping_id from forecast_algorithms_mapping
+                        best_fit_mapping_id,
                         best_fit_algorithm_id,
                         forecast_date,
                         forecast_value_float,
@@ -684,7 +707,6 @@ async def execute_forecast_best_fit(
                     ))
 
                 conn.commit()
-
             finally:
                 cursor.close()
 
@@ -701,7 +723,8 @@ async def execute_forecast_best_fit(
                         failed_records = 0,
                         completed_at = %s,
                         updated_at = %s,
-                        updated_by = %s
+                        updated_by = %s,
+                        error_message = NULL
                     WHERE forecast_run_id = %s
                 """, (
                     len(forecast_dates),
