@@ -1490,6 +1490,89 @@ class ForecastExecutionService:
         return ForecastExecutionService.arima_forecast(data, periods)
 
     @staticmethod
+    def _get_external_factor_columns(data: pd.DataFrame) -> List[str]:
+        """
+        Identify external factor columns in the data.
+        External factors are columns not in the standard set (period, total_quantity, quantity, date).
+        
+        Args:
+            data: DataFrame with historical data and potentially merged external factors
+            
+        Returns:
+            List of external factor column names
+        """
+        standard_columns = {'period', 'total_quantity', 'quantity', 'date'}
+        external_factors = [col for col in data.columns if col not in standard_columns]
+        return external_factors
+
+    @staticmethod
+    def _extract_features_with_factors(data: pd.DataFrame, window: int, external_factors: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract features including both lagged values and external factors.
+        
+        Args:
+            data: DataFrame with historical data and external factors
+            window: Number of lags for time series features
+            external_factors: List of external factor column names
+            
+        Returns:
+            Tuple of (X features array, y target array)
+        """
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
+        else:
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        X = []
+        y_target = []
+        
+        for i in range(window, len(data)):
+            lags = y[i-window:i]
+            time_idx = i
+            features = list(lags) + [time_idx]
+            
+            for factor_name in external_factors:
+                if factor_name in data.columns:
+                    factor_value = data[factor_name].iloc[i]
+                    if pd.isna(factor_value):
+                        factor_value = 0.0
+                    features.append(float(factor_value))
+            
+            X.append(features)
+            y_target.append(y[i])
+        
+        return np.array(X), np.array(y_target)
+
+    @staticmethod
+    def _prepare_future_features_with_factors(recent_lags: List[float], n: int, idx: int, window: int, external_factors: List[str], last_factor_values: Dict[str, float]) -> np.ndarray:
+        """
+        Prepare features for future prediction including external factors.
+        For external factors, use the last known values.
+        
+        Args:
+            recent_lags: Recent lagged values
+            n: Current data length
+            idx: Forecast index
+            window: Window size for lags
+            external_factors: List of external factor column names
+            last_factor_values: Dictionary of last known external factor values
+            
+        Returns:
+            Feature array for prediction
+        """
+        features = recent_lags + [n + idx]
+        
+        for factor_name in external_factors:
+            if factor_name in last_factor_values:
+                features.append(last_factor_values[factor_name])
+            else:
+                features.append(0.0)
+        
+        return np.array(features)
+
+    @staticmethod
     def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         XGBoost forecasting with time series cross-validation to prevent data leakage.
@@ -1524,22 +1607,25 @@ class ForecastExecutionService:
             if n < 10:  # Need more data for proper cross-validation
                 raise ValueError("Need at least 10 historical data points for XGBoost with cross-validation")
 
-            # Feature engineering: create lag features and time index
+            # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-
-            # Build lagged features
-            X = []
-            y_target = []
-
-            for i in range(window, n):
-                lags = y[i-window:i]
-                time_idx = i
-                features = list(lags) + [time_idx]
-                X.append(features)
-                y_target.append(y[i])
-
-            X = np.array(X)
-            y_target = np.array(y_target)
+            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            
+            if external_factors:
+                logger.info(f"XGBoost: Using external factors: {external_factors}")
+                X, y_target = ForecastExecutionService._extract_features_with_factors(data, window, external_factors)
+            else:
+                # Build lagged features without external factors
+                X = []
+                y_target = []
+                for i in range(window, n):
+                    lags = y[i-window:i]
+                    time_idx = i
+                    features = list(lags) + [time_idx]
+                    X.append(features)
+                    y_target.append(y[i])
+                X = np.array(X)
+                y_target = np.array(y_target)
 
             if len(X) < 5:
                 raise ValueError("Insufficient data for XGBoost training")
@@ -1567,9 +1653,22 @@ class ForecastExecutionService:
             # Generate forecast
             forecast = []
             recent_lags = list(y[-window:])
+            
+            last_factor_values = {}
+            if external_factors and len(data) > 0:
+                for factor_name in external_factors:
+                    if factor_name in data.columns:
+                        factor_value = data[factor_name].iloc[-1]
+                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
 
             for i in range(periods):
-                features = recent_lags + [n + i]
+                if external_factors:
+                    features = ForecastExecutionService._prepare_future_features_with_factors(
+                        recent_lags, n, i, window, external_factors, last_factor_values
+                    )
+                else:
+                    features = np.array(recent_lags + [n + i])
+                
                 pred = model.predict([features])[0]
                 pred = max(0, pred)
                 forecast.append(pred)
@@ -1623,22 +1722,25 @@ class ForecastExecutionService:
             if n < 10:  # Need more data for proper cross-validation
                 raise ValueError("Need at least 10 historical data points for SVR with cross-validation")
 
-            # Feature engineering: create lag features and time index
+            # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-
-            # Build lagged features
-            X = []
-            y_target = []
-
-            for i in range(window, n):
-                lags = y[i-window:i]
-                time_idx = i
-                features = list(lags) + [time_idx]
-                X.append(features)
-                y_target.append(y[i])
-
-            X = np.array(X)
-            y_target = np.array(y_target)
+            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            
+            if external_factors:
+                logger.info(f"SVR: Using external factors: {external_factors}")
+                X, y_target = ForecastExecutionService._extract_features_with_factors(data, window, external_factors)
+            else:
+                # Build lagged features without external factors
+                X = []
+                y_target = []
+                for i in range(window, n):
+                    lags = y[i-window:i]
+                    time_idx = i
+                    features = list(lags) + [time_idx]
+                    X.append(features)
+                    y_target.append(y[i])
+                X = np.array(X)
+                y_target = np.array(y_target)
 
             if len(X) < 5:
                 raise ValueError("Insufficient data for SVR training")
@@ -1668,9 +1770,22 @@ class ForecastExecutionService:
             # Generate forecast
             forecast = []
             recent_lags = list(y[-window:])
+            
+            last_factor_values = {}
+            if external_factors and len(data) > 0:
+                for factor_name in external_factors:
+                    if factor_name in data.columns:
+                        factor_value = data[factor_name].iloc[-1]
+                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
 
             for i in range(periods):
-                features = recent_lags + [n + i]
+                if external_factors:
+                    features = ForecastExecutionService._prepare_future_features_with_factors(
+                        recent_lags, n, i, window, external_factors, last_factor_values
+                    )
+                else:
+                    features = np.array(recent_lags + [n + i])
+                
                 features_scaled = scaler.transform([features])[0]
                 pred = model.predict([features_scaled])[0]
                 pred = max(0, pred)
@@ -1718,22 +1833,25 @@ class ForecastExecutionService:
             if n < n_neighbors + 5:  # Need more data for proper cross-validation
                 raise ValueError(f"Need at least {n_neighbors + 5} historical data points for KNN with cross-validation")
 
-            # Feature engineering: create lag features and time index
+            # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-
-            # Build lagged features
-            X = []
-            y_target = []
-
-            for i in range(window, n):
-                lags = y[i-window:i]
-                time_idx = i
-                features = list(lags) + [time_idx]
-                X.append(features)
-                y_target.append(y[i])
-
-            X = np.array(X)
-            y_target = np.array(y_target)
+            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            
+            if external_factors:
+                logger.info(f"KNN: Using external factors: {external_factors}")
+                X, y_target = ForecastExecutionService._extract_features_with_factors(data, window, external_factors)
+            else:
+                # Build lagged features without external factors
+                X = []
+                y_target = []
+                for i in range(window, n):
+                    lags = y[i-window:i]
+                    time_idx = i
+                    features = list(lags) + [time_idx]
+                    X.append(features)
+                    y_target.append(y[i])
+                X = np.array(X)
+                y_target = np.array(y_target)
 
             if len(X) < n_neighbors:
                 raise ValueError(f"Insufficient data for KNN training (need at least {n_neighbors} samples)")
@@ -1762,9 +1880,22 @@ class ForecastExecutionService:
             # Generate forecast
             forecast = []
             recent_lags = list(y[-window:])
+            
+            last_factor_values = {}
+            if external_factors and len(data) > 0:
+                for factor_name in external_factors:
+                    if factor_name in data.columns:
+                        factor_value = data[factor_name].iloc[-1]
+                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
 
             for i in range(periods):
-                features = recent_lags + [n + i]
+                if external_factors:
+                    features = ForecastExecutionService._prepare_future_features_with_factors(
+                        recent_lags, n, i, window, external_factors, last_factor_values
+                    )
+                else:
+                    features = np.array(recent_lags + [n + i])
+                
                 features_scaled = scaler.transform([features])[0]
                 pred = model.predict([features_scaled])[0]
                 pred = max(0, pred)
@@ -1820,19 +1951,23 @@ class ForecastExecutionService:
                 raise ValueError("Need at least 10 historical data points for Random Forest with cross-validation")
 
             window = min(5, n - 1)
-
-            X = []
-            y_target = []
-
-            for i in range(window, n):
-                lags = y[i-window:i]
-                time_idx = i
-                features = list(lags) + [time_idx]
-                X.append(features)
-                y_target.append(y[i])
-
-            X = np.array(X)
-            y_target = np.array(y_target)
+            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            
+            if external_factors:
+                logger.info(f"Random Forest: Using external factors: {external_factors}")
+                X, y_target = ForecastExecutionService._extract_features_with_factors(data, window, external_factors)
+            else:
+                # Build lagged features without external factors
+                X = []
+                y_target = []
+                for i in range(window, n):
+                    lags = y[i-window:i]
+                    time_idx = i
+                    features = list(lags) + [time_idx]
+                    X.append(features)
+                    y_target.append(y[i])
+                X = np.array(X)
+                y_target = np.array(y_target)
 
             if len(X) < 5:
                 raise ValueError("Insufficient data for Random Forest training")
@@ -1857,9 +1992,22 @@ class ForecastExecutionService:
 
             forecast = []
             recent_lags = list(y[-window:])
+            
+            last_factor_values = {}
+            if external_factors and len(data) > 0:
+                for factor_name in external_factors:
+                    if factor_name in data.columns:
+                        factor_value = data[factor_name].iloc[-1]
+                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
 
             for i in range(periods):
-                features = recent_lags + [n + i]
+                if external_factors:
+                    features = ForecastExecutionService._prepare_future_features_with_factors(
+                        recent_lags, n, i, window, external_factors, last_factor_values
+                    )
+                else:
+                    features = np.array(recent_lags + [n + i])
+                
                 pred = model.predict([features])[0]
                 pred = max(0, pred)
                 forecast.append(pred)
