@@ -33,9 +33,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/forecasting", tags=["Forecasting"])
 
 
+def _get_algorithm_name_by_id(algorithm_id: int) -> str:
+    """Map algorithm_id to algorithm name for execution."""
+    algorithm_map = {
+        1: "arima",
+        2: "linear_regression",
+        3: "polynomial_regression",
+        4: "exponential_smoothing",
+        5: "exponential_smoothing",
+        6: "holt_winters",
+        7: "prophet",
+        8: "lstm",
+        9: "xgboost",
+        10: "svr",
+        11: "knn",
+        12: "gaussian_process",
+        13: "mlp_neural_network",
+        14: "simple_moving_average",
+        15: "seasonal_decomposition",
+        16: "moving_average",
+        17: "sarima",
+        999: "best_fit"
+    }
+    
+    if algorithm_id not in algorithm_map:
+        raise ValueError(f"Unknown algorithm_id: {algorithm_id}. Valid IDs are: {', '.join(map(str, algorithm_map.keys()))}")
+    
+    return algorithm_map[algorithm_id]
+
+
 # ============================================================================
 # FORECAST VERSION MANAGEMENT
 # ============================================================================
+
+class AlgorithmConfig(BaseModel):
+    algorithm_id: int
+    execution_order: int
+    custom_parameters: Optional[Dict[str, Any]] = None
+
 
 class DirectForecastExecutionRequest(BaseModel):
     """Request for direct forecast execution with automatic entity handling."""
@@ -43,8 +78,10 @@ class DirectForecastExecutionRequest(BaseModel):
     forecast_filters: Dict[str, Any]
     forecast_start: str = Field(..., description="Start date in YYYY-MM-DD format")
     forecast_end: str = Field(..., description="End date in YYYY-MM-DD format")
-    algorithm_id: int = Field(default=999, description="Algorithm to use (default: Best Fit)")
+    algorithm_id: Optional[int] = Field(default=999, description="Single algorithm ID")
     custom_parameters: Optional[Dict[str, Any]] = None
+    algorithms: Optional[List[AlgorithmConfig]] = None
+    run_percentage_frequency: Optional[int] = None
 
 
 @router.post("/execute-forecast", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
@@ -54,15 +91,35 @@ async def execute_forecast_directly(
 ):
     """
     Execute forecast directly with automatic entity detection and handling.
+    Supports all available forecasting algorithms including Best Fit ensemble.
     
     **Automatic Multi-Entity Handling:**
     - If filters select multiple entities (e.g., multiple products), creates separate forecast runs for each
     - Each entity gets its own forecast_run_id
     - Results are stored separately for each entity
     
+    **Supported Algorithms (algorithm_id):**
+    - 1: ARIMA
+    - 2: Linear Regression
+    - 3: Polynomial Regression
+    - 4-5: Exponential Smoothing
+    - 6: Holt-Winters
+    - 7: Prophet
+    - 8: LSTM Neural Network
+    - 9: XGBoost
+    - 10: Support Vector Regression (SVR)
+    - 11: K-Nearest Neighbors (KNN)
+    - 12: Gaussian Process
+    - 13: MLP Neural Network
+    - 14: Simple Moving Average
+    - 15: Seasonal Decomposition
+    - 16: Moving Average
+    - 17: SARIMA
+    - 999: Best Fit (evaluates all algorithms and selects best)
+    
     **Example Requests:**
     
-    **Single Entity:**
+    **Single Entity with Best Fit:**
     ```json
     {
       "version_id": "uuid",
@@ -77,7 +134,7 @@ async def execute_forecast_directly(
     }
     ```
     
-    **Multiple Entities (Auto-detected):**
+    **Multiple Entities with Specific Algorithm:**
     ```json
     {
       "version_id": "uuid",
@@ -88,7 +145,8 @@ async def execute_forecast_directly(
       },
       "forecast_start": "2025-06-01",
       "forecast_end": "2025-12-01",
-      "algorithm_id": 999
+      "algorithm_id": 8,
+      "custom_parameters": {"epochs": 50, "batch_size": 32}
     }
     ```
     
@@ -103,12 +161,16 @@ async def execute_forecast_directly(
             "entity": "product=10009736",
             "forecast_run_id": "uuid1",
             "status": "Completed",
+            "selected_algorithm": "LSTM (Best Fit) or lstm",
+            "accuracy": 92.5,
             "records": 7
           },
           {
             "entity": "product=10000408",
             "forecast_run_id": "uuid2",
             "status": "Completed",
+            "selected_algorithm": "LSTM (Best Fit) or lstm",
+            "accuracy": 89.3,
             "records": 7
           }
         ],
@@ -325,20 +387,93 @@ async def execute_forecast_directly(
                     forecast_start_date, periods, interval
                 )
                 
-                # Execute algorithm
+                # Execute algorithm(s)
                 process_log = []
+                entity_records_count = 0
                 
-                if request.algorithm_id == 999:
-                    # Best Fit algorithm
-                    forecast_result = ForecastExecutionService.generate_forecast(
-                        historical_data=historical_data,
-                        config={'interval': interval, 'periods': periods},
-                        process_log=process_log
-                    )
+                # Check if multiple algorithms are specified
+                algorithms_to_execute = []
+                if request.algorithms and len(request.algorithms) > 0:
+                    algorithms_to_execute = request.algorithms
+                elif request.algorithm_id is not None:
+                    algorithms_to_execute = [AlgorithmConfig(algorithm_id=request.algorithm_id, execution_order=1, custom_parameters=request.custom_parameters)]
+                else:
+                    algorithms_to_execute = [AlgorithmConfig(algorithm_id=999, execution_order=1)]
+                
+                logger.info(f"Executing {len(algorithms_to_execute)} algorithm(s) for entity {entity_name}")
+                
+                # Execute all specified algorithms and collect results
+                for algo_config in sorted(algorithms_to_execute, key=lambda x: x.execution_order):
+                    algo_mapping_id = str(uuid.uuid4())
                     
-                    # Store results
-                    best_fit_mapping_id = mapping_id
+                    # Insert algorithm mapping
+                    with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                        cursor = conn.cursor()
+                        try:
+                            cursor.execute("""
+                                SELECT algorithm_name FROM algorithms WHERE algorithm_id = %s
+                            """, (algo_config.algorithm_id,))
+                            result = cursor.fetchone()
+                            algo_name = result[0] if result else _get_algorithm_name_by_id(algo_config.algorithm_id)
+                            
+                            cursor.execute("""
+                                INSERT INTO forecast_algorithms_mapping
+                                (mapping_id, tenant_id, forecast_run_id, algorithm_id, 
+                                 algorithm_name, custom_parameters, execution_order, created_by)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                algo_mapping_id,
+                                tenant_data["tenant_id"],
+                                forecast_run_id,
+                                algo_config.algorithm_id,
+                                algo_name,
+                                Json(algo_config.custom_parameters or {}),
+                                algo_config.execution_order,
+                                tenant_data["email"]
+                            ))
+                            conn.commit()
+                        finally:
+                            cursor.close()
                     
+                    # Execute the algorithm
+                    if algo_config.algorithm_id == 999:
+                        # Best Fit algorithm - evaluate all algorithms and select best
+                        forecast_result = ForecastExecutionService.generate_forecast(
+                            historical_data=historical_data,
+                            config={'interval': interval, 'periods': periods},
+                            process_log=process_log
+                        )
+                        algo_name_for_result = "best_fit"
+                        algo_accuracy = forecast_result.get('accuracy')
+                        algo_forecast = forecast_result['forecast']
+                        algo_metrics = {
+                            'mae': forecast_result.get('mae'),
+                            'rmse': forecast_result.get('rmse'),
+                            'mape': forecast_result.get('mape'),
+                            'selected_algorithm': forecast_result['selected_algorithm']
+                        }
+                    else:
+                        # Execute specific algorithm
+                        algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
+                            algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
+                            data=historical_data.copy(),
+                            periods=periods
+                        )
+                        
+                        if algorithm_name_result['accuracy'] == 0:
+                            logger.warning(f"Algorithm {algo_config.algorithm_id} failed, skipping")
+                            continue
+                        
+                        algo_name_for_result = algorithm_name_result['algorithm']
+                        algo_accuracy = algorithm_name_result.get('accuracy')
+                        algo_forecast = algorithm_name_result['forecast']
+                        algo_metrics = {
+                            'mae': algorithm_name_result.get('mae'),
+                            'rmse': algorithm_name_result.get('rmse'),
+                            'mape': algorithm_name_result.get('mape')
+                        }
+                    
+                    # Store results for this algorithm
                     with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                         cursor = conn.cursor()
                         try:
@@ -351,20 +486,20 @@ async def execute_forecast_directly(
                                 WHERE mapping_id = %s
                             """, (
                                 Json({
-                                    'algorithms_evaluated': len(forecast_result.get('all_algorithms', [])),
-                                    'selected_algorithm': forecast_result['selected_algorithm'],
-                                    'entity_filter': entity_filter
+                                    'algorithm_name': algo_name_for_result,
+                                    'entity_filter': entity_filter,
+                                    **algo_metrics
                                 }),
                                 datetime.utcnow(),
-                                best_fit_mapping_id
+                                algo_mapping_id
                             ))
                             
                             # Store forecast results
-                            for forecast_date, forecast_value in zip(forecast_dates, forecast_result['forecast']):
+                            for forecast_date, forecast_value in zip(forecast_dates, algo_forecast):
                                 result_id = str(uuid.uuid4())
                                 forecast_value_float = min(999999.9999, max(0, float(forecast_value)))
                                 forecast_value_float = round(forecast_value_float, 4)
-                                accuracy_metric = round(forecast_result['accuracy'], 2) if forecast_result.get('accuracy') else None
+                                accuracy_metric = round(algo_accuracy, 2) if algo_accuracy else None
                                 
                                 cursor.execute("""
                                     INSERT INTO forecast_results
@@ -377,62 +512,65 @@ async def execute_forecast_directly(
                                     tenant_data["tenant_id"],
                                     forecast_run_id,
                                     request.version_id,
-                                    best_fit_mapping_id,
-                                    999,
+                                    algo_mapping_id,
+                                    algo_config.algorithm_id,
                                     forecast_date,
                                     forecast_value_float,
                                     accuracy_metric,
                                     'Accuracy',
                                     Json({
-                                        'selected_algorithm': forecast_result['selected_algorithm'],
-                                        'mae': forecast_result.get('mae'),
-                                        'rmse': forecast_result.get('rmse'),
-                                        'mape': forecast_result.get('mape'),
+                                        'algorithm': algo_name_for_result,
+                                        **algo_metrics,
                                         'entity_filter': entity_filter
                                     }),
                                     tenant_data["email"]
                                 ))
                             
-                            # Update forecast run to completed
-                            cursor.execute("""
-                                UPDATE forecast_runs
-                                SET run_status = 'Completed',
-                                    run_progress = 100,
-                                    total_records = %s,
-                                    processed_records = %s,
-                                    completed_at = %s,
-                                    updated_at = %s
-                                WHERE forecast_run_id = %s
-                            """, (
-                                len(forecast_dates),
-                                len(forecast_dates),
-                                datetime.utcnow(),
-                                datetime.utcnow(),
-                                forecast_run_id
-                            ))
-                            
                             conn.commit()
                         finally:
                             cursor.close()
                     
+                    entity_records_count += len(forecast_dates)
                     total_records += len(forecast_dates)
-                    successful_runs += 1
                     
-                    forecast_runs.append({
-                        "entity": entity_name,
-                        "entity_filter": entity_filter,
-                        "forecast_run_id": forecast_run_id,
-                        "status": "Completed",
-                        "selected_algorithm": forecast_result['selected_algorithm'],
-                        "accuracy": forecast_result.get('accuracy'),
-                        "records": len(forecast_dates)
-                    })
-                    
-                    logger.info(f"Entity {entity_name} completed: {len(forecast_dates)} forecast records")
+                    logger.info(f"Entity {entity_name}, Algorithm {algo_name_for_result}: {len(forecast_dates)} forecast records, Accuracy: {algo_accuracy:.2f}%")
                 
-                else:
-                    # Execute specific algorithm (non-Best Fit)
-                    raise ValidationException("Only Best Fit (algorithm_id=999) is currently supported for direct execution")
+                # Mark forecast run as completed after all algorithms
+                with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            UPDATE forecast_runs
+                            SET run_status = 'Completed',
+                                run_progress = 100,
+                                total_records = %s,
+                                processed_records = %s,
+                                completed_at = %s,
+                                updated_at = %s
+                            WHERE forecast_run_id = %s
+                        """, (
+                            entity_records_count,
+                            entity_records_count,
+                            datetime.utcnow(),
+                            datetime.utcnow(),
+                            forecast_run_id
+                        ))
+                        conn.commit()
+                    finally:
+                        cursor.close()
+                
+                successful_runs += 1
+                
+                forecast_runs.append({
+                    "entity": entity_name,
+                    "entity_filter": entity_filter,
+                    "forecast_run_id": forecast_run_id,
+                    "status": "Completed",
+                    "algorithms_executed": len(algorithms_to_execute),
+                    "records": entity_records_count
+                })
+                
+                logger.info(f"Entity {entity_name} completed with {len(algorithms_to_execute)} algorithm(s): {total_records} forecast records")
             
             except Exception as e:
                 logger.error(f"Failed to forecast entity {entity_name}: {str(e)}", exc_info=True)
@@ -858,89 +996,89 @@ async def get_forecast_run_status(
         logger.error(f"Unexpected error getting run status: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
     
-# @router.post("/runs/{forecast_run_id}/execute", response_model=Dict[str, Any])
-# async def execute_forecast_run(
-#     forecast_run_id: str,
-#     tenant_data: Dict = Depends(get_current_tenant)
-# ):
-#     """
-#     Execute a forecast run.
+@router.post("/runs/{forecast_run_id}/execute", response_model=Dict[str, Any])
+async def execute_forecast_run(
+    forecast_run_id: str,
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Execute a forecast run.
 
-#     This will:
-#     1. Fetch historical data based on filters
-#     2. Execute all mapped algorithms in order
-#     3. Store forecast results
-#     4. Update run status
+    This will:
+    1. Fetch historical data based on filters
+    2. Execute all mapped algorithms in order
+    3. Store forecast results
+    4. Update run status
 
-#     **Note**: This is an asynchronous operation that may take time for large datasets.
-#     """
-#     try:
-#         logger.info(f"Starting forecast execution for run {forecast_run_id} by user {tenant_data['email']}")
-#         result = ForecastExecutionService.execute_forecast_run(
-#             tenant_id=tenant_data["tenant_id"],
-#             database_name=tenant_data["database_name"],
-#             forecast_run_id=forecast_run_id,
-#             user_email=tenant_data["email"]
-#         )
-#         logger.info(f"Successfully executed forecast run {forecast_run_id}: {result.get('status', 'Unknown')}")
+    **Note**: This is an asynchronous operation that may take time for large datasets.
+    """
+    try:
+        logger.info(f"Starting forecast execution for run {forecast_run_id} by user {tenant_data['email']}")
+        result = ForecastExecutionService.execute_forecast_run(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            forecast_run_id=forecast_run_id,
+            user_email=tenant_data["email"]
+        )
+        logger.info(f"Successfully executed forecast run {forecast_run_id}: {result.get('status', 'Unknown')}")
 
-#         # Fetch forecast results if execution was successful
-#         forecast_results = []
-#         if result.get('status') == 'Completed':
-#             try:
-#                 from app.core.database import get_db_manager
-#                 db_manager = get_db_manager()
+        # Fetch forecast results if execution was successful
+        forecast_results = []
+        if result.get('status') == 'Completed':
+            try:
+                from app.core.database import get_db_manager
+                db_manager = get_db_manager()
 
-#                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
-#                     cursor = conn.cursor()
-#                     try:
-#                         cursor.execute("""
-#                             SELECT a.algorithm_id, a.algorithm_name, fr.forecast_date, fr.forecast_quantity
-#                             FROM forecast_results fr
-#                             JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
-#                             WHERE fr.tenant_id = %s AND fr.forecast_run_id = %s
-#                             ORDER BY a.algorithm_id, fr.forecast_date
-#                         """, (tenant_data["tenant_id"], forecast_run_id))
+                with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            SELECT a.algorithm_id, a.algorithm_name, fr.forecast_date, fr.forecast_quantity
+                            FROM forecast_results fr
+                            JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
+                            WHERE fr.tenant_id = %s AND fr.forecast_run_id = %s
+                            ORDER BY a.algorithm_id, fr.forecast_date
+                        """, (tenant_data["tenant_id"], forecast_run_id))
 
-#                         # Group results by algorithm
-#                         algorithm_results = {}
-#                         for row in cursor.fetchall():
-#                             algorithm_id = row[0]
-#                             algorithm_name = row[1]
-#                             forecast_date = row[2]
-#                             forecast_quantity = row[3]
+                        # Group results by algorithm
+                        algorithm_results = {}
+                        for row in cursor.fetchall():
+                            algorithm_id = row[0]
+                            algorithm_name = row[1]
+                            forecast_date = row[2]
+                            forecast_quantity = row[3]
 
-#                             if algorithm_id not in algorithm_results:
-#                                 algorithm_results[algorithm_id] = {
-#                                     "algorithm_id": algorithm_id,
-#                                     "algorithm_name": algorithm_name,
-#                                     "results": []
-#                                 }
+                            if algorithm_id not in algorithm_results:
+                                algorithm_results[algorithm_id] = {
+                                    "algorithm_id": algorithm_id,
+                                    "algorithm_name": algorithm_name,
+                                    "results": []
+                                }
 
-#                             algorithm_results[algorithm_id]["results"].append({
-#                                 "date": forecast_date.isoformat() if forecast_date else None,
-#                                 "quantity": float(forecast_quantity) if forecast_quantity else 0
-#                             })
+                            algorithm_results[algorithm_id]["results"].append({
+                                "date": forecast_date.isoformat() if forecast_date else None,
+                                "quantity": float(forecast_quantity) if forecast_quantity else 0
+                            })
 
-#                         forecast_results = list(algorithm_results.values())
-#                         logger.info(f"Fetched forecast results for {len(forecast_results)} algorithms in run {forecast_run_id}")
+                        forecast_results = list(algorithm_results.values())
+                        logger.info(f"Fetched forecast results for {len(forecast_results)} algorithms in run {forecast_run_id}")
 
-#                     finally:
-#                         cursor.close()
+                    finally:
+                        cursor.close()
 
-#             except Exception as e:
-#                 logger.warning(f"Failed to fetch forecast results for run {forecast_run_id}: {str(e)}")
-#                 # Continue without forecast results if fetch fails
+            except Exception as e:
+                logger.warning(f"Failed to fetch forecast results for run {forecast_run_id}: {str(e)}")
+                # Continue without forecast results if fetch fails
 
-#         # Add forecast results to the response data
-#         result['forecast_results'] = forecast_results
+        # Add forecast results to the response data
+        result['forecast_results'] = forecast_results
 
-#         return ResponseHandler.success(data=result)
-#     except AppException as e:
-#         raise HTTPException(status_code=e.status_code, detail=e.message)
-#     except Exception as e:
-#         logger.error(f"Unexpected error executing forecast: {str(e)}")
-#         raise HTTPException(status_code=500, detail="Internal server error")
+        return ResponseHandler.success(data=result)
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error executing forecast: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/runs/{forecast_run_id}/execute-best-fit", response_model=Dict[str, Any])
