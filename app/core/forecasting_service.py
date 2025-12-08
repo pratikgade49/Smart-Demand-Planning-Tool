@@ -446,7 +446,7 @@ class ForecastingService:
     ) -> pd.DataFrame:
         """
         Prepare aggregated historical data for forecasting.
-        FIXED: Now uses dynamic target and date field names.
+        FIXED: Now properly handles both single values and lists in filters.
         """
         db_manager = get_db_manager()
 
@@ -463,15 +463,23 @@ class ForecastingService:
                 tenant_id, database_name, aggregation_level
             )
             
-            # Build filter clause
+            # ✅ FIXED: Build filter clause with proper handling for lists
             filter_clause = ""
             filter_params = []
             if filters:
                 filter_conditions = []
                 for col, val in filters.items():
                     if col not in ["aggregation_level", "interval", "selected_external_factors"]:
-                        filter_conditions.append(f'm."{col}" = %s')
-                        filter_params.append(val)
+                        # ✅ NEW: Check if value is a list
+                        if isinstance(val, list):
+                            # Use IN clause for lists
+                            placeholders = ', '.join(['%s'] * len(val))
+                            filter_conditions.append(f'm."{col}" IN ({placeholders})')
+                            filter_params.extend(val)  # Add all values
+                        else:
+                            # Use = for single values
+                            filter_conditions.append(f'm."{col}" = %s')
+                            filter_params.append(val)
                 
                 if filter_conditions:
                     filter_clause = "AND " + " AND ".join(filter_conditions)
@@ -495,6 +503,10 @@ class ForecastingService:
                 """
                 
                 params = [tenant_id] + filter_params
+                
+                logger.info(f"Executing query with filters: {filters}")
+                logger.debug(f"SQL: {query}")
+                logger.debug(f"Params: {params}")
                 
                 import warnings
                 with warnings.catch_warnings():
