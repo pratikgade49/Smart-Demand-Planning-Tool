@@ -201,12 +201,12 @@ async def execute_forecast_directly(
                 
                 # Merge external factors if available
                 if not external_factors_df.empty:
-                    historical_data['period'] = pd.to_datetime(historical_data['period'], errors='coerce')
+                    historical_data[date_field_name] = pd.to_datetime(historical_data[date_field_name], errors='coerce')
                     external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
 
                     historical_data = historical_data.merge(
                         external_factors_df,
-                        left_on='period',
+                        left_on=date_field_name,
                         right_on='date',
                         how='left'
                     )
