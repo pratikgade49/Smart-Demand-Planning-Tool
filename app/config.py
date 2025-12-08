@@ -20,11 +20,11 @@ class Settings(BaseSettings):
     PORT: int = 8000
     
     # Master Database Settings (for tenant registry)
-    MASTER_DATABASE_URL: str = "postgresql://postgres:root@localhost:5432/smart_demand_master"
+    MASTER_DATABASE_URL: str = "postgresql://postgres:root@localhost:5433/smart_demand_master"
     
     # Database Connection Settings
     DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
+    DB_PORT: int = 5433
     DB_USER: str = "postgres"
     DB_PASSWORD: str = "root"
     DB_POOL_SIZE: int = 10
