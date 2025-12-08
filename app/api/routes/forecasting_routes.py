@@ -177,7 +177,7 @@ async def execute_forecast_directly(
                 logger.info(f"Executing forecast for {entity_name}")
                 
                 # Get historical data for this specific entity
-                historical_data = ForecastingService.prepare_aggregated_data(
+                historical_data, date_field_name = ForecastingService.prepare_aggregated_data(
                     tenant_id=tenant_data["tenant_id"],
                     database_name=tenant_data["database_name"],
                     aggregation_level=aggregation_level,
@@ -201,6 +201,9 @@ async def execute_forecast_directly(
                 
                 # Merge external factors if available
                 if not external_factors_df.empty:
+                    historical_data['period'] = pd.to_datetime(historical_data['period'], errors='coerce')
+                    external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
+
                     historical_data = historical_data.merge(
                         external_factors_df,
                         left_on='period',
@@ -1144,7 +1147,7 @@ async def execute_forecast_best_fit(
                 logger.info(f"Forecasting entity: {entity_name}")
 
                 # Get historical data for THIS specific entity
-                historical_data = ForecastingService.prepare_aggregated_data(
+                historical_data, date_field_name = ForecastingService.prepare_aggregated_data(
                     tenant_id=tenant_data["tenant_id"],
                     database_name=tenant_data["database_name"],
                     aggregation_level=aggregation_level,
@@ -1168,17 +1171,17 @@ async def execute_forecast_best_fit(
 
                 # Merge external factors
                 if not external_factors_df.empty:
-                    historical_data['period'] = pd.to_datetime(historical_data['period'], errors='coerce')
+                    historical_data[date_field_name] = pd.to_datetime(historical_data[date_field_name], errors='coerce')
                     external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
 
                     historical_data = historical_data.merge(
                         external_factors_df,
-                        left_on='period',
+                        left_on=date_field_name,
                         right_on='date',
                         how='left'
                     )
 
-                    if 'date' in historical_data.columns and 'period' in historical_data.columns:
+                    if 'date' in historical_data.columns and date_field_name in historical_data.columns:
                         historical_data = historical_data.drop(columns=['date'])
 
                 # Execute best-fit for this entity
@@ -1679,15 +1682,15 @@ async def validate_forecast_filters(
         
         # Gather statistics
         validation_result = {
-            "filters_applied": {k: v for k, v in forecast_filters.items() 
+            "filters_applied": {k: v for k, v in forecast_filters.items()
                                if k not in ['aggregation_level', 'interval']},
             "aggregation_level": aggregation_level,
             "interval": interval,
             "data_found": len(df) > 0,
             "total_records": len(df),
             "date_range": {
-                "start": df['period'].min().isoformat() if not df.empty else None,
-                "end": df['period'].max().isoformat() if not df.empty else None
+                "start": df[date_field_name].min().isoformat() if not df.empty else None,
+                "end": df[date_field_name].max().isoformat() if not df.empty else None
             },
             "total_quantity_sum": float(df['total_quantity'].sum()) if not df.empty else 0,
             "sample_data": df.head(10).to_dict('records') if not df.empty else []

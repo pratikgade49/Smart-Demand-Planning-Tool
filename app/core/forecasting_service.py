@@ -443,7 +443,7 @@ class ForecastingService:
         aggregation_level: str,
         interval: str,
         filters: Optional[Dict[str, Any]] = None
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, str]:
         """
         Prepare aggregated historical data for forecasting.
         FIXED: Now properly handles both single values and lists in filters.
@@ -489,8 +489,8 @@ class ForecastingService:
                 date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field_name)
                 
                 query = f"""
-                    SELECT 
-                        {date_trunc} as period,
+                    SELECT
+                        {date_trunc} as "{date_field_name}",
                         {', '.join([f'm."{col}"' for col in agg_columns])},
                         SUM(s."{target_field_name}") as total_quantity,
                         COUNT(DISTINCT s.sales_id) as transaction_count,
@@ -499,22 +499,22 @@ class ForecastingService:
                     JOIN master_data m ON s.master_id = m.master_id
                     WHERE s.tenant_id = %s {filter_clause}
                     GROUP BY {date_trunc}, {', '.join([f'm."{col}"' for col in agg_columns])}
-                    ORDER BY period
+                    ORDER BY "{date_field_name}"
                 """
-                
+
                 params = [tenant_id] + filter_params
-                
+
                 logger.info(f"Executing query with filters: {filters}")
                 logger.debug(f"SQL: {query}")
                 logger.debug(f"Params: {params}")
-                
+
                 import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
                     df = pd.read_sql_query(query, conn, params=params)
-                
+
                 logger.info(f"Prepared {len(df)} aggregated records for forecasting")
-                return df
+                return df, date_field_name
 
         except Exception as e:
             logger.error(f"Failed to prepare aggregated data: {str(e)}")
