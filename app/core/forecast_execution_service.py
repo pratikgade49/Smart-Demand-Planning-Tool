@@ -2422,6 +2422,10 @@ class ForecastExecutionService:
         Returns:
             Dictionary with algorithm results
         """
+        # Ensure target_column is properly set
+        if not target_column:
+            target_column = 'total_quantity'
+
         try:
             # Debug: Log data information
             logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
