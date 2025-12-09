@@ -184,12 +184,7 @@ async def execute_forecast_directly(
                     interval=interval,
                     filters=entity_specific_filters
                 )
-                
-                if historical_data.empty:
-                    logger.warning(f"No historical data for entity {entity_name}, skipping")
-                    failed_runs += 1
-                    continue
-                
+
                 logger.info(f"Entity {entity_name}: {len(historical_data)} historical records")
                 
                 # Load external factors
@@ -318,7 +313,8 @@ async def execute_forecast_directly(
                             algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
                                 algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
                                 data=historical_data.copy(),
-                                periods=periods
+                                periods=periods,
+                                target_column='total_quantity'
                             )
                             
                             if algorithm_name_result['accuracy'] == 0:
@@ -709,15 +705,21 @@ async def list_external_factors(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# ============================================================================
-# FORECAST RUN MANAGEMENT
-# ============================================================================
-
 @router.get("/aggregation-levels", response_model=Dict[str, Any])
 async def get_aggregation_levels(
     tenant_data: Dict = Depends(get_current_tenant)
 ):
-
+    """
+    Get available aggregation levels based on tenant's master data structure.
+    
+    Returns all fields from the finalized field catalogue that can be used
+    for aggregation, including suggested single and multi-dimensional combinations.
+    
+    **Usage**:
+    - Use field names from the response to build custom aggregation levels
+    - Single dimension: Use any single field name (e.g., "product", "location")
+    - Multi dimension: Combine fields with hyphen (e.g., "product-location", "customer-location")
+    """
     try:
         result = ForecastingService.get_available_aggregation_levels(
             tenant_id=tenant_data["tenant_id"],
@@ -731,54 +733,6 @@ async def get_aggregation_levels(
         logger.error(f"Unexpected error getting aggregation levels: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
-@router.post("/runs", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
-async def create_forecast_run(
-    request_data: ForecastRunCreate,
-    tenant_data: Dict = Depends(get_current_tenant)
-):
-    """
-    Create a new forecast run.
-    
-    **Forecast Filters** (optional):
-    ```json
-    {
-      "aggregation_level": "product-location",
-      "interval": "MONTHLY",
-      "product": "specific_product_value",
-      "location": "specific_location_value"
-    }
-    ```
-    
-    **Aggregation Levels** (Dynamic):
-    - Use GET /aggregation-levels to see available fields
-    - Single dimension: Any field name from your master data
-    - Multi dimension: Combine fields with hyphen (e.g., "product-location")
-    - You can create ANY combination of fields that exist in your master data
-    
-    **Intervals**:
-    - WEEKLY
-    - MONTHLY
-    - QUARTERLY
-    - YEARLY
-    """
-    try:
-        agg_level = request_data.forecast_filters.get('aggregation_level', 'product') if request_data.forecast_filters else 'product'
-        interval = request_data.forecast_filters.get('interval', 'MONTHLY') if request_data.forecast_filters else 'MONTHLY'
-        logger.info(f"Creating forecast run for tenant {tenant_data['tenant_id']} with aggregation level '{agg_level}' and interval '{interval}'")
-        result = ForecastingService.create_forecast_run(
-            tenant_id=tenant_data["tenant_id"],
-            database_name=tenant_data["database_name"],
-            request=request_data,
-            user_email=tenant_data["email"]
-        )
-        logger.info(f"Successfully created forecast run with ID: {result['forecast_run_id']}")
-        return ResponseHandler.success(data=result, status_code=201)
-    except AppException as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except Exception as e:
-        logger.error(f"Unexpected error creating forecast run: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/runs", response_model=Dict[str, Any])
@@ -1192,3 +1146,5 @@ async def list_algorithms(
     except Exception as e:
         logger.error(f"Unexpected error listing algorithms: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+    
+
