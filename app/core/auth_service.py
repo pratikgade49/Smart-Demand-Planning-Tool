@@ -122,31 +122,6 @@ class AuthService:
                 finally:
                     cursor.close()
 
-            # Insert tenant record in their own database
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        """
-                        INSERT INTO tenants
-                        (tenant_id, tenant_name, tenant_identifier, admin_email,
-                         admin_password_hash, database_name, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            tenant_id,
-                            request.tenant_name,
-                            request.tenant_identifier,
-                            request.email,
-                            password_hash,
-                            database_name,
-                            "ACTIVE"
-                        )
-                    )
-                    conn.commit()
-                finally:
-                    cursor.close()
-
             logger.info(f"Tenant registered successfully: {tenant_id} with database: {database_name}")
 
             return {

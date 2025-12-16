@@ -1509,22 +1509,46 @@ class ForecastExecutionService:
         
         X = []
         y_target = []
-        
+
+        # Preprocess external factors: factorize categorical columns to numeric codes
+        encoded_columns = {}
+        for factor_name in external_factors:
+            if factor_name in data.columns:
+                col = data[factor_name].fillna('__NA__')
+                if not np.issubdtype(col.dtype, np.number):
+                    codes, uniques = pd.factorize(col)
+                    # store encoded series as float
+                    encoded_columns[factor_name] = codes.astype(float)
+                else:
+                    # numeric column: convert NaN to 0.0 and keep
+                    encoded_columns[factor_name] = col.astype(float).fillna(0.0).values
+
         for i in range(window, len(data)):
             lags = y[i-window:i]
             time_idx = i
             features = list(lags) + [time_idx]
-            
+
             for factor_name in external_factors:
                 if factor_name in data.columns:
-                    factor_value = data[factor_name].iloc[i]
-                    if pd.isna(factor_value):
-                        factor_value = 0.0
+                    # use precomputed encoded value when available
+                    if factor_name in encoded_columns:
+                        factor_value = encoded_columns[factor_name][i]
+                    else:
+                        factor_value = data[factor_name].iloc[i]
+                        if pd.isna(factor_value):
+                            factor_value = 0.0
+                        else:
+                            try:
+                                factor_value = float(factor_value)
+                            except Exception:
+                                # last resort: use hash-based deterministic encoding
+                                factor_value = float(abs(hash(str(factor_value))) % 1000000) / 1000.0
+
                     features.append(float(factor_value))
-            
+
             X.append(features)
             y_target.append(y[i])
-        
+
         return np.array(X), np.array(y_target)
 
     @staticmethod
@@ -1640,8 +1664,21 @@ class ForecastExecutionService:
             if external_factors and len(data) > 0:
                 for factor_name in external_factors:
                     if factor_name in data.columns:
-                        factor_value = data[factor_name].iloc[-1]
-                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
+                        factor_value_raw = data[factor_name].iloc[-1]
+                        if pd.isna(factor_value_raw):
+                            val = 0.0
+                        else:
+                            try:
+                                val = float(factor_value_raw)
+                            except Exception:
+                                # Try to factorize entire column and pick numeric code for last value
+                                try:
+                                    codes, uniques = pd.factorize(data[factor_name].fillna('__NA__'))
+                                    val = float(codes[-1])
+                                except Exception:
+                                    # fallback deterministic encoding
+                                    val = float(abs(hash(str(factor_value_raw))) % 1000000) / 1000.0
+                        last_factor_values[factor_name] = val
 
             for i in range(periods):
                 if external_factors:
@@ -1755,8 +1792,19 @@ class ForecastExecutionService:
             if external_factors and len(data) > 0:
                 for factor_name in external_factors:
                     if factor_name in data.columns:
-                        factor_value = data[factor_name].iloc[-1]
-                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
+                        factor_value_raw = data[factor_name].iloc[-1]
+                        if pd.isna(factor_value_raw):
+                            val = 0.0
+                        else:
+                            try:
+                                val = float(factor_value_raw)
+                            except Exception:
+                                try:
+                                    codes, uniques = pd.factorize(data[factor_name].fillna('__NA__'))
+                                    val = float(codes[-1])
+                                except Exception:
+                                    val = float(abs(hash(str(factor_value_raw))) % 1000000) / 1000.0
+                        last_factor_values[factor_name] = val
 
             for i in range(periods):
                 if external_factors:
@@ -1860,8 +1908,19 @@ class ForecastExecutionService:
             if external_factors and len(data) > 0:
                 for factor_name in external_factors:
                     if factor_name in data.columns:
-                        factor_value = data[factor_name].iloc[-1]
-                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
+                        factor_value_raw = data[factor_name].iloc[-1]
+                        if pd.isna(factor_value_raw):
+                            val = 0.0
+                        else:
+                            try:
+                                val = float(factor_value_raw)
+                            except Exception:
+                                try:
+                                    codes, uniques = pd.factorize(data[factor_name].fillna('__NA__'))
+                                    val = float(codes[-1])
+                                except Exception:
+                                    val = float(abs(hash(str(factor_value_raw))) % 1000000) / 1000.0
+                        last_factor_values[factor_name] = val
 
             for i in range(periods):
                 if external_factors:
@@ -2162,13 +2221,12 @@ class ForecastExecutionService:
                     
                     cursor.execute("""
                         INSERT INTO forecast_results
-                        (result_id, tenant_id, forecast_run_id, version_id, mapping_id,
+                        (result_id, forecast_run_id, version_id, mapping_id,
                          algorithm_id, forecast_date, forecast_quantity, accuracy_metric,
                          metric_type, metadata, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         result_id,
-                        tenant_id,
                         forecast_run_id,
                         version_id,
                         mapping_id,
@@ -2329,11 +2387,29 @@ class ForecastExecutionService:
                     process_log.append(f"❌ Algorithm {algorithm_name} failed: {str(exc)}")
                     logger.warning(f"Algorithm {algorithm_name} failed: {str(exc)}")
         
-        # Filter out failed results
-        successful_results = [res for res in algorithm_results if res.get('accuracy', 0) > 0]
-        
+        # Filter out failed results: prefer positive accuracy and non-empty forecasts
+        successful_results = [res for res in algorithm_results if res.get('accuracy', 0) > 0 and res.get('forecast')]
+
+        # If none have positive accuracy, fall back to any algorithm that produced a non-empty forecast
         if not successful_results:
-            raise ValueError("All algorithms failed to produce valid results")
+            fallback_results = [res for res in algorithm_results if res.get('forecast')]
+            if fallback_results:
+                successful_results = fallback_results
+                process_log.append("No algorithm produced positive accuracy; using algorithms with non-empty forecasts as fallback")
+            else:
+                # Final fallback: use a simple moving average forecast
+                process_log.append("All algorithms failed to produce forecasts; using simple moving average fallback")
+                sma_forecast, sma_metrics = ForecastExecutionService.simple_moving_average(historical_data, periods=periods)
+                return {
+                    'selected_algorithm': 'simple_moving_average (fallback)',
+                    'accuracy': sma_metrics.get('accuracy', 0),
+                    'mae': sma_metrics.get('mae', 0),
+                    'rmse': sma_metrics.get('rmse', 0),
+                    'mape': sma_metrics.get('mape'),
+                    'forecast': sma_forecast.tolist() if isinstance(sma_forecast, np.ndarray) else sma_forecast,
+                    'all_algorithms': algorithm_results,
+                    'process_log': process_log
+                }
         
         process_log.append(
             f"Parallel execution completed. {len(successful_results)} algorithms succeeded, "

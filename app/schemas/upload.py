@@ -25,7 +25,6 @@ class ExcelUploadResponse(BaseModel):
     """Response schema for Excel upload."""
 
     upload_id: str
-    tenant_id: str
     upload_type: str
     file_name: str
     total_rows: int
@@ -54,7 +53,6 @@ class UploadHistoryResponse(BaseModel):
     """Response schema for upload history."""
 
     upload_id: str
-    tenant_id: str
     upload_type: str
     file_name: str
     total_rows: int

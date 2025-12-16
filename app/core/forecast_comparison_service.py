@@ -87,12 +87,12 @@ class ForecastComparisonService:
             
             # Build WHERE clause for entity fields
             where_conditions = []
-            params = [tenant_id]
-            
+            params = []
+
             for field, value in entity_fields.items():
                 where_conditions.append(f'm."{field}" = %s')
                 params.append(value)
-            
+
             where_clause = " AND ".join(where_conditions)
             
             # Build date truncation based on interval
@@ -102,14 +102,14 @@ class ForecastComparisonService:
                 cursor = conn.cursor()
                 try:
                     query = f"""
-                        SELECT 
+                        SELECT
                             {date_trunc_expr} as period,
-                            SUM(s."{target_field}") as actual_quantity,
+                            SUM(CAST(s."{target_field}" AS numeric)) as actual_quantity,
                             COUNT(DISTINCT s.sales_id) as transaction_count,
                             AVG(s.unit_price) as avg_price
                         FROM sales_data s
                         JOIN master_data m ON s.master_id = m.master_id
-                        WHERE s.tenant_id = %s AND {where_clause}
+                        WHERE {where_clause}
                         GROUP BY period
                         ORDER BY period
                     """
@@ -167,17 +167,17 @@ class ForecastComparisonService:
                         "fr.forecast_filters->>'aggregation_level' = %s",
                         "fr.forecast_filters->>'interval' = %s"
                     ]
-                    params = [tenant_id, aggregation_level, interval]
-                    
+                    params = [aggregation_level, interval]
+
                     # Add entity field filters
                     for field, value in entity_fields.items():
                         jsonb_conditions.append(f"fr.forecast_filters->>'{field}' = %s")
                         params.append(value)
-                    
+
                     jsonb_where = " AND ".join(jsonb_conditions)
-                    
+
                     query = f"""
-                        SELECT 
+                        SELECT
                             fr.forecast_run_id,
                             fr.version_id,
                             fv.version_name,
@@ -190,8 +190,7 @@ class ForecastComparisonService:
                             fr.created_by
                         FROM forecast_runs fr
                         JOIN forecast_versions fv ON fr.version_id = fv.version_id
-                        WHERE fr.tenant_id = %s
-                          AND {jsonb_where}
+                        WHERE {jsonb_where}
                           AND fr.run_status = 'Completed'
                         ORDER BY fr.created_at DESC
                     """
@@ -636,22 +635,21 @@ class ForecastComparisonService:
     def _get_field_names(tenant_id: str, database_name: str) -> Tuple[str, str]:
         """Get target and date field names from metadata."""
         db_manager = get_db_manager()
-        
+
         with db_manager.get_tenant_connection(database_name) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute("""
                     SELECT target_field_name, date_field_name
                     FROM field_catalogue_metadata
-                    WHERE tenant_id = %s
-                """, (tenant_id,))
-                
+                """)
+
                 result = cursor.fetchone()
                 if not result:
                     raise ValidationException(
                         "Field catalogue not finalized. Please finalize your field catalogue first."
                     )
-                
+
                 return result[0], result[1]
             finally:
                 cursor.close()

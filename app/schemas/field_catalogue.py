@@ -10,6 +10,7 @@ class FieldDataType(str, Enum):
     """Supported field data types."""
     CHAR = "Char"
     NUMERIC = "Numeric"
+    DECIMAL = "Decimal"
     DATE = "Date"
     TIMESTAMP = "Timestamp"
     BOOLEAN = "Boolean"
@@ -19,8 +20,9 @@ class FieldDataType(str, Enum):
 # MODIFY FieldCatalogueItemRequest:
 class FieldCatalogueItemRequest(BaseModel):
     """Request schema for a single field in Field Catalogue."""
-    
+
     field_name: str = Field(..., min_length=1, max_length=100, description="Field name")
+    description: Optional[str] = Field(None, max_length=500, description="Description of the field")
     data_type: FieldDataType = Field(..., description="Data type of the field")
     field_length: Optional[int] = Field(None, ge=1, le=1000, description="Field length for Char type")
     default_value: Optional[str] = Field(None, max_length=255, description="Default value")
@@ -74,7 +76,6 @@ class FieldCatalogueResponse(BaseModel):
     """Response schema for Field Catalogue."""
     
     catalogue_id: str
-    tenant_id: str
     fields: List[FieldCatalogueItemResponse]
     version: int
     status: str  # DRAFT, FINALIZED, ACTIVE

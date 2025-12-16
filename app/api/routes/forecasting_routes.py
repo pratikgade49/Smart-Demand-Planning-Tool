@@ -163,12 +163,11 @@ def _process_entity_forecast(
                     try:
                         cursor.execute("""
                             INSERT INTO forecast_runs
-                            (forecast_run_id, tenant_id, version_id, forecast_filters,
+                            (forecast_run_id, version_id, forecast_filters,
                              forecast_start, forecast_end, run_status, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
                             forecast_run_id,
-                            tenant_data["tenant_id"],
                             request_data.version_id,
                             Json(entity_specific_filters),
                             forecast_start_date,
@@ -192,12 +191,11 @@ def _process_entity_forecast(
 
                         cursor.execute("""
                             INSERT INTO forecast_algorithms_mapping
-                            (mapping_id, tenant_id, forecast_run_id, algorithm_id,
+                            (mapping_id, forecast_run_id, algorithm_id,
                              algorithm_name, custom_parameters, execution_order, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
                             algo_mapping_id,
-                            tenant_data["tenant_id"],
                             forecast_run_id,
                             algo_config.algorithm_id,
                             algo_name,
@@ -258,7 +256,6 @@ def _process_entity_forecast(
 
                     batch_data.append((
                         result_id,
-                        tenant_data["tenant_id"],
                         forecast_run_id,
                         request_data.version_id,
                         algo_mapping_id,
@@ -281,10 +278,10 @@ def _process_entity_forecast(
                     try:
                         cursor.executemany("""
                             INSERT INTO forecast_results
-                            (result_id, tenant_id, forecast_run_id, version_id, mapping_id,
+                            (result_id, forecast_run_id, version_id, mapping_id,
                              algorithm_id, forecast_date, forecast_quantity, accuracy_metric,
                              metric_type, metadata, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, batch_data)
                         conn.commit()
                     finally:

@@ -94,10 +94,10 @@ class ExternalFactorsService:
                                 # Try insert, update on conflict
                                 cursor.execute("""
                                     INSERT INTO external_factors
-                                    (factor_id, tenant_id, date, factor_name, factor_value,
+                                    (factor_id, date, factor_name, factor_value,
                                      unit, source, created_by, created_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                    ON CONFLICT (tenant_id, factor_name, date) 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (factor_name, date) 
                                     DO UPDATE SET 
                                         factor_value = EXCLUDED.factor_value,
                                         unit = EXCLUDED.unit,
@@ -107,7 +107,6 @@ class ExternalFactorsService:
                                     RETURNING (xmax = 0) AS inserted
                                 """, (
                                     factor_id,
-                                    tenant_id,
                                     record_date,
                                     factor_name,
                                     float(row['value']),
@@ -193,11 +192,10 @@ class ExternalFactorsService:
                             cursor.execute("""
                                 SELECT date, factor_value, unit, source
                                 FROM external_factors
-                                WHERE tenant_id = %s 
-                                AND factor_name = %s 
+                                WHERE factor_name = %s 
                                 AND deleted_at IS NULL
                                 ORDER BY date
-                            """, (tenant_id, factor_name))
+                            """, (factor_name,))
                             
                             rows = cursor.fetchall()
                             
@@ -244,18 +242,17 @@ class ExternalFactorsService:
                                 
                                 cursor.execute("""
                                     INSERT INTO external_factors
-                                    (factor_id, tenant_id, date, factor_name, factor_value,
+                                    (factor_id, date, factor_name, factor_value,
                                      unit, source, created_by, created_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                    ON CONFLICT (tenant_id, factor_name, date) 
-                                    DO UPDATE SET 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (factor_name, date)
+                                    DO UPDATE SET
                                         factor_value = EXCLUDED.factor_value,
                                         source = EXCLUDED.source,
                                         updated_at = %s,
                                         updated_by = %s
                                 """, (
                                     factor_id,
-                                    tenant_id,
                                     forecast_date,
                                     factor_name,
                                     float(forecast_value),
@@ -399,7 +396,7 @@ class ExternalFactorsService:
                     
                     # Build the query
                     placeholders = ', '.join(['%s'] * len(selected_factors))
-                    params = [tenant_id]
+                    params = []
                     
                     # Build optional date filters
                     date_conditions = []
@@ -422,8 +419,7 @@ class ExternalFactorsService:
                     query = f"""
                         SELECT date, factor_name, factor_value
                         FROM external_factors
-                        WHERE tenant_id = %s 
-                        AND deleted_at IS NULL
+                        WHERE deleted_at IS NULL
                         {date_filter}
                         AND factor_name IN ({placeholders})
                         ORDER BY date, factor_name
@@ -439,8 +435,8 @@ class ExternalFactorsService:
                         cursor.execute("""
                             SELECT DISTINCT factor_name 
                             FROM external_factors 
-                            WHERE tenant_id = %s AND deleted_at IS NULL
-                        """, (tenant_id,))
+                            WHERE deleted_at IS NULL
+                        """)
                         available = [r[0] for r in cursor.fetchall()]
                         
                         logger.warning(
@@ -515,10 +511,10 @@ class ExternalFactorsService:
                             MIN(factor_value) as min_value,
                             MAX(factor_value) as max_value
                         FROM external_factors
-                        WHERE tenant_id = %s AND deleted_at IS NULL
+                        WHERE deleted_at IS NULL
                         GROUP BY factor_name
                         ORDER BY factor_name
-                    """, (tenant_id,))
+                    """)
                     
                     factors = []
                     for row in cursor.fetchall():
@@ -562,10 +558,9 @@ class ExternalFactorsService:
                     cursor.execute("""
                         UPDATE external_factors
                         SET deleted_at = %s
-                        WHERE tenant_id = %s 
-                        AND factor_name = %s 
+                        WHERE factor_name = %s 
                         AND deleted_at IS NULL
-                    """, (datetime.utcnow(), tenant_id, factor_name))
+                    """, (datetime.utcnow(), factor_name))
                     
                     deleted_count = cursor.rowcount
                     conn.commit()

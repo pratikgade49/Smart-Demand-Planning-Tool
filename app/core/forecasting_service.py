@@ -55,12 +55,12 @@ class ForecastingService:
                 try:
                     # Get finalized field catalogue
                     cursor.execute("""
-                        SELECT fields_json 
-                        FROM field_catalogue 
-                        WHERE tenant_id = %s AND status = 'FINALIZED'
+                        SELECT fields_json
+                        FROM field_catalogue
+                        WHERE status = 'FINALIZED'
                         ORDER BY created_at DESC
                         LIMIT 1
-                    """, (tenant_id,))
+                    """)
                     
                     result = cursor.fetchone()
                     if not result:
@@ -195,14 +195,13 @@ class ForecastingService:
                 try:
                     # Insert forecast run
                     cursor.execute("""
-                        INSERT INTO forecast_runs 
-                        (forecast_run_id, tenant_id, version_id, forecast_filters,
+                        INSERT INTO forecast_runs
+                        (forecast_run_id, version_id, forecast_filters,
                          forecast_start, forecast_end, run_status, run_percentage_frequency,
                          created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         forecast_run_id,
-                        tenant_id,
                         str(request.version_id),
                         Json(request.forecast_filters) if request.forecast_filters is not None else None,
                         request.forecast_start,
@@ -293,8 +292,8 @@ class ForecastingService:
                                failed_records, error_message, created_at, updated_at,
                                started_at, completed_at, created_by
                         FROM forecast_runs
-                        WHERE forecast_run_id = %s AND tenant_id = %s
-                    """, (forecast_run_id, tenant_id))
+                        WHERE forecast_run_id = %s
+                    """, (forecast_run_id,))
 
                     result = cursor.fetchone()
                     if not result:
@@ -379,8 +378,8 @@ class ForecastingService:
                 cursor = conn.cursor()
                 try:
                     # Build WHERE clause
-                    where_clauses = ["tenant_id = %s"]
-                    params = [tenant_id]
+                    where_clauses = []
+                    params = []
 
                     if version_id:
                         where_clauses.append("version_id = %s")
@@ -492,17 +491,17 @@ class ForecastingService:
                     SELECT
                         {date_trunc} as "{date_field_name}",
                         {', '.join([f'm."{col}"' for col in agg_columns])},
-                        SUM(s."{target_field_name}") as total_quantity,
+                        SUM(CAST(s."{target_field_name}" AS numeric)) as total_quantity,
                         COUNT(DISTINCT s.sales_id) as transaction_count,
                         AVG(s.unit_price) as avg_price
                     FROM sales_data s
                     JOIN master_data m ON s.master_id = m.master_id
-                    WHERE s.tenant_id = %s {filter_clause}
+                    WHERE 1=1 {filter_clause}
                     GROUP BY {date_trunc}, {', '.join([f'm."{col}"' for col in agg_columns])}
                     ORDER BY "{date_field_name}"
                 """
 
-                params = [tenant_id] + filter_params
+                params = filter_params
 
                 logger.info(f"Executing query with filters: {filters}")
                 logger.debug(f"SQL: {query}")
@@ -613,8 +612,8 @@ class ForecastingService:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "SELECT 1 FROM forecast_versions WHERE version_id = %s AND tenant_id = %s",
-                    (version_id, tenant_id)
+                    "SELECT 1 FROM forecast_versions WHERE version_id = %s",
+                    (version_id,)
                 )
                 if not cursor.fetchone():
                     raise NotFoundException("Forecast Version", version_id)
@@ -668,8 +667,7 @@ class ForecastingService:
                 cursor.execute("""
                     SELECT target_field_name, date_field_name
                     FROM field_catalogue_metadata
-                    WHERE tenant_id = %s
-                """, (tenant_id,))
+                """)
                 
                 result = cursor.fetchone()
                 if not result:

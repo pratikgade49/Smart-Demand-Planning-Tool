@@ -39,25 +39,10 @@ class SchemaManager:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Create tenants table (for tenant's own record)
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS tenants (
-                            tenant_id UUID PRIMARY KEY,
-                            tenant_name VARCHAR(255) NOT NULL,
-                            tenant_identifier VARCHAR(100) NOT NULL,
-                            admin_email VARCHAR(255) NOT NULL,
-                            admin_password_hash VARCHAR(255) NOT NULL,
-                            database_name VARCHAR(100) NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            status VARCHAR(50) DEFAULT 'ACTIVE'
-                        )
-                    """)
-                    
                     # Create field_catalogue table
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue (
                             catalogue_id UUID PRIMARY KEY,
-                            tenant_id UUID NOT NULL,
                             version INT DEFAULT 1,
                             status VARCHAR(50) DEFAULT 'DRAFT',
                             fields_json JSONB NOT NULL,
@@ -72,7 +57,6 @@ class SchemaManager:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS master_data (
                             master_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                            tenant_id UUID NOT NULL,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL,
                             updated_at TIMESTAMP,
@@ -84,7 +68,6 @@ class SchemaManager:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS sales_data (
                             sales_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                            tenant_id UUID NOT NULL,
                             master_id UUID NOT NULL REFERENCES master_data(master_id),
                             date DATE NOT NULL,
                             quantity DECIMAL(18, 2) NOT NULL,
@@ -99,7 +82,6 @@ class SchemaManager:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS upload_history (
                             upload_id UUID PRIMARY KEY,
-                            tenant_id UUID NOT NULL,
                             upload_type VARCHAR(50) NOT NULL,
                             file_name VARCHAR(255) NOT NULL,
                             total_rows INT DEFAULT 0,
@@ -114,7 +96,6 @@ class SchemaManager:
                     # Create indexes
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sales_data_date ON sales_data(date)")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sales_data_master_id ON sales_data(master_id)")
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_upload_history_tenant ON upload_history(tenant_id)")
                     
                     conn.commit()
                     logger.info(f"Database initialized successfully for tenant: {tenant_id}")
@@ -179,8 +160,8 @@ class SchemaManager:
                 raise ValidationException("Field catalogue must have one date field")
             
             # Validate data types
-            if target_field.data_type.upper() not in ['NUMERIC', 'DECIMAL']:
-                raise ValidationException("Target variable must be numeric type")
+            if target_field.data_type.upper() not in ['DECIMAL']:
+                raise ValidationException("Target variable must be DECIMAL type")
             if date_field.data_type.upper() not in ['DATE', 'TIMESTAMP']:
                 raise ValidationException("Date field must be DATE or TIMESTAMP type")
             
@@ -205,7 +186,6 @@ class SchemaManager:
                     
                     # Add audit columns
                     columns.extend([
-                        "tenant_id UUID NOT NULL",
                         "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                         "created_by VARCHAR(255) NOT NULL",
                         "updated_at TIMESTAMP",
@@ -213,7 +193,7 @@ class SchemaManager:
                     ])
                     
                     # Add composite unique constraint
-                    composite_fields = field_names + ['"tenant_id"']
+                    composite_fields = field_names
                     unique_constraint = f"UNIQUE NULLS DISTINCT ({', '.join(composite_fields)})"
                     columns.append(unique_constraint)
                     
@@ -232,7 +212,6 @@ class SchemaManager:
                     cursor.execute(f"""
                         CREATE TABLE sales_data (
                             sales_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                            tenant_id UUID NOT NULL,
                             master_id UUID NOT NULL REFERENCES master_data(master_id),
                             "{date_field.field_name}" {date_sql_type} NOT NULL,
                             "{target_field.field_name}" {target_sql_type} NOT NULL,
@@ -250,22 +229,27 @@ class SchemaManager:
                     # Store metadata about target and date fields
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue_metadata (
-                            tenant_id UUID NOT NULL,
                             target_field_name VARCHAR(255) NOT NULL,
                             date_field_name VARCHAR(255) NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            CONSTRAINT unique_metadata_per_tenant UNIQUE(tenant_id)
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
                     
-                    cursor.execute("""
-                        INSERT INTO field_catalogue_metadata (tenant_id, target_field_name, date_field_name)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (tenant_id) DO UPDATE SET
-                            target_field_name = EXCLUDED.target_field_name,
-                            date_field_name = EXCLUDED.date_field_name,
-                            created_at = CURRENT_TIMESTAMP
-                    """, (tenant_id, target_field.field_name, date_field.field_name))
+                    # Check if metadata exists (since we don't have tenant_id for unique constraint anymore)
+                    # We assume one row per database
+                    cursor.execute("SELECT 1 FROM field_catalogue_metadata LIMIT 1")
+                    if cursor.fetchone():
+                        cursor.execute("""
+                            UPDATE field_catalogue_metadata 
+                            SET target_field_name = %s,
+                                date_field_name = %s,
+                                created_at = CURRENT_TIMESTAMP
+                        """, (target_field.field_name, date_field.field_name))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO field_catalogue_metadata (target_field_name, date_field_name)
+                            VALUES (%s, %s)
+                        """, (target_field.field_name, date_field.field_name))
                     
                     conn.commit()
                     logger.info(
@@ -302,7 +286,6 @@ class SchemaManager:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS upload_history (
                             upload_id UUID PRIMARY KEY,
-                            tenant_id UUID NOT NULL,
                             upload_type VARCHAR(50) NOT NULL,
                             file_name VARCHAR(255) NOT NULL,
                             total_rows INT DEFAULT 0,
@@ -383,7 +366,7 @@ class SchemaManager:
                     tables = {row[0] for row in cursor.fetchall()}
                     
                     # Check required tables
-                    required_tables = {'tenants', 'field_catalogue', 'master_data', 'sales_data', 'upload_history'}
+                    required_tables = {'field_catalogue', 'master_data', 'sales_data', 'upload_history'}
                     missing_tables = required_tables - tables
                     
                     # Get row counts
@@ -468,7 +451,6 @@ class SchemaManager:
                     -- Forecast Versions table
                     CREATE TABLE IF NOT EXISTS forecast_versions (
                         version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         version_name VARCHAR(255) NOT NULL,
                         version_type VARCHAR(50) NOT NULL,
                         is_active BOOLEAN DEFAULT FALSE,
@@ -477,19 +459,17 @@ class SchemaManager:
                         created_by VARCHAR(255),
                         updated_by VARCHAR(255),
                         CONSTRAINT check_version_type CHECK (version_type IN ('Baseline', 'Simulation', 'Final')),
-                        CONSTRAINT unique_version_name_per_tenant UNIQUE(tenant_id, version_name)
+                        CONSTRAINT unique_version_name UNIQUE(version_name)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_tenant ON forecast_versions(tenant_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_active ON forecast_versions(tenant_id, is_active);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_type ON forecast_versions(tenant_id, version_type);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_active ON forecast_versions(is_active);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_versions_type ON forecast_versions(version_type);
 
                     -- ============================================================================
                     -- UPDATED: External Factors table with UNIQUE CONSTRAINT
                     -- ============================================================================
                     CREATE TABLE IF NOT EXISTS external_factors (
                         factor_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         date DATE NOT NULL,
                         factor_name VARCHAR(255) NOT NULL,
                         factor_value DECIMAL(18, 4) NOT NULL,
@@ -501,20 +481,18 @@ class SchemaManager:
                         updated_by VARCHAR(255),
                         deleted_at TIMESTAMP,
                         -- NEW: Unique constraint to prevent duplicates
-                        CONSTRAINT unique_factor_per_date UNIQUE (tenant_id, factor_name, date)
+                        CONSTRAINT unique_factor_per_date UNIQUE (factor_name, date)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_external_factors_tenant ON external_factors(tenant_id);
-                    CREATE INDEX IF NOT EXISTS idx_external_factors_date ON external_factors(tenant_id, date);
-                    CREATE INDEX IF NOT EXISTS idx_external_factors_name ON external_factors(tenant_id, factor_name);
-                    CREATE INDEX IF NOT EXISTS idx_external_factors_composite ON external_factors(tenant_id, factor_name, date);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_date ON external_factors(date);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_name ON external_factors(factor_name);
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_composite ON external_factors(factor_name, date);
                     -- NEW: Index for active (non-deleted) factors
-                    CREATE INDEX IF NOT EXISTS idx_external_factors_active ON external_factors(tenant_id, factor_name, date) WHERE deleted_at IS NULL;
+                    CREATE INDEX IF NOT EXISTS idx_external_factors_active ON external_factors(factor_name, date) WHERE deleted_at IS NULL;
 
                     -- Forecast Runs table
                     CREATE TABLE IF NOT EXISTS forecast_runs (
                         forecast_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
                         forecast_filters JSONB,
                         forecast_start DATE NOT NULL,
@@ -537,16 +515,14 @@ class SchemaManager:
                         CONSTRAINT check_forecast_dates CHECK (forecast_end >= forecast_start)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_tenant ON forecast_runs(tenant_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_status ON forecast_runs(tenant_id, run_status);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_version ON forecast_runs(tenant_id, version_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_created ON forecast_runs(tenant_id, created_at DESC);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_composite ON forecast_runs(tenant_id, run_status, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_status ON forecast_runs(run_status);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_version ON forecast_runs(version_id);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_created ON forecast_runs(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_runs_composite ON forecast_runs(run_status, created_at DESC);
 
                     -- Forecast Algorithms Mapping table
                     CREATE TABLE IF NOT EXISTS forecast_algorithms_mapping (
                         mapping_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
                         algorithm_id INTEGER NOT NULL REFERENCES algorithms(algorithm_id),
                         algorithm_name VARCHAR(255) NOT NULL,
@@ -563,7 +539,6 @@ class SchemaManager:
                         CONSTRAINT unique_algo_per_run UNIQUE(forecast_run_id, algorithm_id)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_tenant ON forecast_algorithms_mapping(tenant_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_run ON forecast_algorithms_mapping(forecast_run_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_algo ON forecast_algorithms_mapping(algorithm_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_status ON forecast_algorithms_mapping(forecast_run_id, execution_status);
@@ -571,7 +546,6 @@ class SchemaManager:
                     -- Forecast Results table
                     CREATE TABLE IF NOT EXISTS forecast_results (
                         result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
                         version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
                         mapping_id UUID NOT NULL REFERENCES forecast_algorithms_mapping(mapping_id) ON DELETE CASCADE,
@@ -589,17 +563,15 @@ class SchemaManager:
                         created_by VARCHAR(255)
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_forecast_results_tenant ON forecast_results(tenant_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_run ON forecast_results(forecast_run_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_results_date ON forecast_results(tenant_id, forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_date ON forecast_results(forecast_date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_algo ON forecast_results(algorithm_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(tenant_id, forecast_run_id, forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(forecast_run_id, forecast_date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_version ON forecast_results(version_id);
 
                     -- Forecast Audit Log table
                     CREATE TABLE IF NOT EXISTS forecast_audit_log (
                         audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        tenant_id UUID NOT NULL,
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
                         action VARCHAR(50) NOT NULL,
                         entity_type VARCHAR(100),
@@ -610,7 +582,6 @@ class SchemaManager:
                         CONSTRAINT check_action CHECK (action IN ('Created', 'Updated', 'Deleted', 'Executed', 'Cancelled'))
                     );
 
-                    CREATE INDEX IF NOT EXISTS idx_forecast_audit_tenant ON forecast_audit_log(tenant_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_run ON forecast_audit_log(forecast_run_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_timestamp ON forecast_audit_log(performed_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_action ON forecast_audit_log(action);
@@ -716,10 +687,10 @@ class SchemaManager:
                     
                     for version_name, version_type, is_active, created_by_user in versions_data:
                         cursor.execute("""
-                            INSERT INTO forecast_versions (tenant_id, version_name, version_type, is_active, created_by)
-                            VALUES (%s, %s, %s, %s, %s)
-                            ON CONFLICT (tenant_id, version_name) DO NOTHING
-                        """, (tenant_id, version_name, version_type, is_active, created_by_user))
+                            INSERT INTO forecast_versions (version_name, version_type, is_active, created_by)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (version_name) DO NOTHING
+                        """, (version_name, version_type, is_active, created_by_user))
                     
                     conn.commit()
                     logger.info(f"Default forecast versions seeded for tenant: {tenant_id}")

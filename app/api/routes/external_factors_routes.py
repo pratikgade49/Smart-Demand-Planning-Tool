@@ -268,7 +268,7 @@ async def get_available_factors(
             cursor = conn.cursor()
             try:
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         factor_name,
                         MIN(date) as earliest_date,
                         MAX(date) as latest_date,
@@ -276,10 +276,10 @@ async def get_available_factors(
                         MAX(unit) as unit,
                         MAX(source) as source
                     FROM external_factors
-                    WHERE tenant_id = %s AND deleted_at IS NULL
+                    WHERE deleted_at IS NULL
                     GROUP BY factor_name
                     ORDER BY factor_name
-                """, (tenant_data["tenant_id"],))
+                """)
                 
                 factors = []
                 for row in cursor.fetchall():

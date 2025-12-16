@@ -18,7 +18,8 @@ class FieldDefinition:
             is_unique_key: bool = False,
             parent_field_name: Optional[str] = None,
             is_target_variable: bool = False,
-            is_date_field: bool = False
+            is_date_field: bool = False,
+            description: Optional[str] = None
         ):
             self.field_name = field_name
             self.data_type = data_type
@@ -29,11 +30,13 @@ class FieldDefinition:
             self.parent_field_name = parent_field_name
             self.is_target_variable = is_target_variable
             self.is_date_field = is_date_field
+            self.description = description
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
             "field_name": self.field_name,
+            "description": self.description,
             "data_type": self.data_type,
             "field_length": self.field_length,
             "default_value": self.default_value,

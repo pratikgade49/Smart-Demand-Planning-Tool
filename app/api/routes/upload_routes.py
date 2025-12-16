@@ -86,27 +86,24 @@ async def get_upload_history(
             try:
                 # Get total count
                 cursor.execute(
-                    "SELECT COUNT(*) FROM upload_history WHERE tenant_id = %s",
-                    (tenant_data["tenant_id"],)
+                    "SELECT COUNT(*) FROM upload_history"
                 )
                 total_count = cursor.fetchone()[0]
 
                 # Get paginated results
                 cursor.execute("""
-                    SELECT upload_id, tenant_id, upload_type, file_name, total_rows,
+                    SELECT upload_id, upload_type, file_name, total_rows,
                            success_count, failed_count, status, uploaded_at, uploaded_by
                     FROM upload_history
-                    WHERE tenant_id = %s
                     ORDER BY uploaded_at DESC
                     LIMIT %s OFFSET %s
-                """, (tenant_data["tenant_id"], page_size, offset))
+                """, (page_size, offset))
 
                 uploads = []
                 for row in cursor.fetchall():
-                    upload_id, ten_id, upload_type, file_name, total_rows, success_count, failed_count, status, uploaded_at, uploaded_by = row
+                    upload_id, upload_type, file_name, total_rows, success_count, failed_count, status, uploaded_at, uploaded_by = row
                     uploads.append({
                         "upload_id": upload_id,
-                        "tenant_id": ten_id,
                         "upload_type": upload_type,
                         "file_name": file_name,
                         "total_rows": total_rows,
@@ -151,21 +148,20 @@ async def get_upload_details(
             cursor = conn.cursor()
             try:
                 cursor.execute("""
-                    SELECT upload_id, tenant_id, upload_type, file_name, total_rows,
+                    SELECT upload_id, upload_type, file_name, total_rows,
                            success_count, failed_count, status, uploaded_at, uploaded_by
                     FROM upload_history
-                    WHERE upload_id = %s AND tenant_id = %s
-                """, (upload_id, tenant_data["tenant_id"]))
+                    WHERE upload_id = %s
+                """, (upload_id,))
 
                 result = cursor.fetchone()
                 if not result:
                     raise HTTPException(status_code=404, detail="Upload not found")
 
-                upload_id, ten_id, upload_type, file_name, total_rows, success_count, failed_count, status, uploaded_at, uploaded_by = result
+                upload_id, upload_type, file_name, total_rows, success_count, failed_count, status, uploaded_at, uploaded_by = result
 
                 upload_details = {
                     "upload_id": upload_id,
-                    "tenant_id": ten_id,
                     "upload_type": upload_type,
                     "file_name": file_name,
                     "total_rows": total_rows,

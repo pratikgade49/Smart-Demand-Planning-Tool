@@ -1,0 +1,231 @@
+{
+	"info": {
+		"_postman_id": "6126366a-1e9a-472c-8d14-55e865f75360",
+		"name": "New Collection",
+		"schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
+		"_exporter_id": "44813640"
+	},
+	"item": [
+		{
+			"name": "http://localhost:8000/api/v1/field-catalogue/04b80755-2e2a-405e-b537-e2469c58a903/finalize",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI3OTQxMjEyMy01ZDJjLTRiN2YtODJmZS01MjExZTY4M2QyMmIiLCJ0ZW5hbnRfaWRlbnRpZmllciI6InRlY2hub2xvZ2llcyIsImVtYWlsIjoicHJhdGlrQHlhc2guY29tIiwiZGF0YWJhc2VfbmFtZSI6InRlbmFudF90ZWNobm9sb2dpZXMiLCJleHAiOjE3NjI4NTIzMTh9.r7-q5E50kRVOYSxSScJOJElVpTDiqf9J6heZIcXvLh0"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"url": "http://localhost:8000/api/v1/field-catalogue/04b80755-2e2a-405e-b537-e2469c58a903/finalize"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/auth/register",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{    \"tenant_name\": \"Yash\",    \"tenant_identifier\": \"technologies\",    \"email\": \"pratik@yash.com\",    \"password\": \"test@123\"  }",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8000/api/v1/auth/register"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/auth/login",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{    \"tenant_identifier\": \"technologies\",    \"email\": \"pratik@yash.com\",    \"password\": \"test@123\"  }",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8000/api/v1/auth/login"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/field-catalogue",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI3OTQxMjEyMy01ZDJjLTRiN2YtODJmZS01MjExZTY4M2QyMmIiLCJ0ZW5hbnRfaWRlbnRpZmllciI6InRlY2hub2xvZ2llcyIsImVtYWlsIjoicHJhdGlrQHlhc2guY29tIiwiZGF0YWJhc2VfbmFtZSI6InRlbmFudF90ZWNobm9sb2dpZXMiLCJleHAiOjE3NjI4NTIzMTh9.r7-q5E50kRVOYSxSScJOJElVpTDiqf9J6heZIcXvLh0"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"catalogue_name\": \"Customer Hierarchy\",\r\n  \"description\": \"Multi-level customer catalogue\",\r\n  \"fields\": [\r\n    {\r\n      \"field_name\": \"customer_master\",\r\n      \"data_type\": \"Char\",\r\n      \"field_length\": 30,\r\n      \"default_value\": null,\r\n      \"is_characteristic\": false,\r\n      \"parent_field_name\": null\r\n    },\r\n    {\r\n      \"field_name\": \"customer_region\",\r\n      \"data_type\": \"Char\",\r\n      \"field_length\": 30,\r\n      \"default_value\": null,\r\n      \"is_characteristic\": true,\r\n      \"parent_field_name\": \"customer_master\"\r\n    },\r\n    {\r\n      \"field_name\": \"customer_zone\",\r\n      \"data_type\": \"Char\",\r\n      \"field_length\": 30,\r\n      \"default_value\": null,\r\n      \"is_characteristic\": true,\r\n      \"parent_field_name\": \"customer_region\"\r\n    },\r\n    {\r\n      \"field_name\": \"customer_territory\",\r\n      \"data_type\": \"Char\",\r\n      \"field_length\": 30,\r\n      \"default_value\": null,\r\n      \"is_characteristic\": true,\r\n      \"parent_field_name\": \"customer_zone\"\r\n    }\r\n  ]\r\n}\r\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8000/api/v1/field-catalogue"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/upload/excel",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiJjMTgyYjBhNy0yNmNlLTQ5MTYtOGNhZC1hNTQzNDYyYmYwZTciLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2Mjk0MTI3N30.hk98GmV4GZhiWRfsu0chI8zqM9_F0coJw3gI55oBhSU"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "formdata",
+					"formdata": [
+						{
+							"key": "file",
+							"type": "file",
+							"src": []
+						},
+						{
+							"key": "upload_type",
+							"value": "mixed_data",
+							"type": "text"
+						},
+						{
+							"key": "catalogue_id",
+							"value": "f9bf7c64-9f32-457b-8d2e-b766e7490bea",
+							"type": "text"
+						}
+					]
+				},
+				"url": "http://localhost:8000/api/v1/upload/excel"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/versions",
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzUzNzk3Nn0.SYRwNyhLFm5aj8bpRAl2adje3dc6lCd_WC_M9plNKPI"
+					}
+				},
+				"method": "GET",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"version_name\": \"Q1 2025 Baseline\",\r\n  \"version_type\": \"Baseline\",\r\n  \"is_active\": true\r\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8000/api/v1/forecasting/versions"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/algorithms",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzUzNzk3Nn0.SYRwNyhLFm5aj8bpRAl2adje3dc6lCd_WC_M9plNKPI"
+					}
+				},
+				"method": "GET",
+				"header": [],
+				"url": "http://localhost:8000/api/v1/forecasting/algorithms"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/aggregation-levels",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzUzNzk3Nn0.SYRwNyhLFm5aj8bpRAl2adje3dc6lCd_WC_M9plNKPI"
+					}
+				},
+				"method": "GET",
+				"header": [],
+				"url": "http://localhost:8000/api/v1/forecasting/aggregation-levels"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/runs",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzcwODAzOH0.UgXgIBxvKqLupEJXfYgSXRNfB37hYpb9TKNK6k0_HVg"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"version_id\": \"8a827e3e-f31f-4078-af1f-eedb548960ae\",\r\n  \"forecast_filters\": {\r\n    \"aggregation_level\": \"product\",\r\n    \"interval\": \"MONTHLY\",\r\n    \"product\": \"18320\"\r\n  },\r\n  \"forecast_start\": \"2025-06-01\",\r\n  \"forecast_end\": \"2025-12-01\",\r\n  \"run_percentage_frequency\": 50,\r\n  \"algorithms\": [\r\n    {\r\n      \"algorithm_id\": 1,\r\n      \"execution_order\": 1,\r\n      \"custom_parameters\": {\r\n        \"order\": [2, 0, 1]\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 2,\r\n      \"execution_order\": 2,\r\n      \"custom_parameters\": {}\r\n    },\r\n    {\r\n      \"algorithm_id\": 3,\r\n      \"execution_order\": 3,\r\n      \"custom_parameters\": {\r\n        \"degree\": 3\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 4,\r\n      \"execution_order\": 4,\r\n      \"custom_parameters\": {\r\n        \"alpha\": 0.5\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 5,\r\n      \"execution_order\": 5,\r\n      \"custom_parameters\": {\r\n        \"alphas\": [0.2, 0.4, 0.6]\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 6,\r\n      \"execution_order\": 6,\r\n      \"custom_parameters\": {\r\n        \"season_length\": 24\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 7,\r\n      \"execution_order\": 7,\r\n      \"custom_parameters\": {\r\n        \"window\": 5\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 8,\r\n      \"execution_order\": 8,\r\n      \"custom_parameters\": {\r\n        \"window\": 10\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 9,\r\n      \"execution_order\": 9,\r\n      \"custom_parameters\": {\r\n        \"n_estimators_list\": [100, 200],\r\n        \"learning_rate_list\": [0.1, 0.15, 0.25],\r\n        \"max_depth_list\": [4, 5, 6]\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 10,\r\n      \"execution_order\": 10,\r\n      \"custom_parameters\": {\r\n        \"C_list\": [0.5, 5, 50],\r\n        \"epsilon_list\": [0.05, 0.15]\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 11,\r\n      \"execution_order\": 11,\r\n      \"custom_parameters\": {\r\n        \"n_neighbors_list\": [5, 15]\r\n      }\r\n    },\r\n    {\r\n      \"algorithm_id\": 12,\r\n      \"execution_order\": 12,\r\n      \"custom_parameters\": {}\r\n    },\r\n    {\r\n      \"algorithm_id\": 13,\r\n      \"execution_order\": 13,\r\n      \"custom_parameters\": {\r\n        \"hidden_layer_sizes_list\": [[15], [25, 15]],\r\n        \"alpha_list\": [0.0005, 0.005]\r\n      }\r\n    }\r\n  ]\r\n}\r\n",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": "http://localhost:8000/api/v1/forecasting/runs"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/runs/9b625964-30ee-42ea-aa42-9b44f21c8979/execute",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzcwODAzOH0.UgXgIBxvKqLupEJXfYgSXRNfB37hYpb9TKNK6k0_HVg"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"url": "http://localhost:8000/api/v1/forecasting/runs/9b625964-30ee-42ea-aa42-9b44f21c8979/execute"
+			},
+			"response": []
+		},
+		{
+			"name": "http://localhost:8000/api/v1/forecasting/runs/430e1272-edcd-45a6-998d-2953f80ebd72/execute-best-fit",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": {
+						"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZW5hbnRfaWQiOiI5ZWQ2Zjc0Ny0xZDMzLTRiOGItODg3Yi1lMDJlM2EwMTJiYzgiLCJ0ZW5hbnRfaWRlbnRpZmllciI6ImFjbWVfY29ycCIsImVtYWlsIjoiYWRtaW5AYWNtZS5jb20iLCJkYXRhYmFzZV9uYW1lIjoidGVuYW50X2FjbWVfY29ycCIsImV4cCI6MTc2MzUzNzk3Nn0.SYRwNyhLFm5aj8bpRAl2adje3dc6lCd_WC_M9plNKPI"
+					}
+				},
+				"method": "POST",
+				"header": [],
+				"url": "http://localhost:8000/api/v1/forecasting/runs/430e1272-edcd-45a6-998d-2953f80ebd72/execute-best-fit"
+			},
+			"response": []
+		}
+	]
+}

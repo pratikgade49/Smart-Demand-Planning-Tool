@@ -38,11 +38,11 @@ class ForecastVersionService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Check if version name already exists for this tenant
+                    # Check if version name already exists (tenant isolation via separate database)
                     cursor.execute("""
                         SELECT version_id FROM forecast_versions
-                        WHERE tenant_id = %s AND version_name = %s
-                    """, (tenant_id, request.version_name))
+                        WHERE version_name = %s
+                    """, (request.version_name,))
                     
                     if cursor.fetchone():
                         raise ConflictException(
@@ -54,18 +54,17 @@ class ForecastVersionService:
                         cursor.execute("""
                             UPDATE forecast_versions
                             SET is_active = FALSE, updated_at = %s, updated_by = %s
-                            WHERE tenant_id = %s AND version_type = %s AND is_active = TRUE
-                        """, (datetime.utcnow(), user_email, tenant_id, request.version_type))
+                            WHERE version_type = %s AND is_active = TRUE
+                        """, (datetime.utcnow(), user_email, request.version_type))
 
-                    # Insert new version
+                    # Insert new version (tenant isolation via separate database)
                     cursor.execute("""
                         INSERT INTO forecast_versions
-                        (version_id, tenant_id, version_name, version_type, 
+                        (version_id, version_name, version_type,
                          is_active, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s)
                     """, (
                         version_id,
-                        tenant_id,
                         request.version_name,
                         request.version_type,
                         request.is_active,
@@ -103,11 +102,11 @@ class ForecastVersionService:
                 cursor = conn.cursor()
                 try:
                     cursor.execute("""
-                        SELECT version_id, tenant_id, version_name, version_type,
+                        SELECT version_id, version_name, version_type,
                                is_active, created_at, updated_at, created_by, updated_by
                         FROM forecast_versions
-                        WHERE version_id = %s AND tenant_id = %s
-                    """, (version_id, tenant_id))
+                        WHERE version_id = %s
+                    """, (version_id,))
 
                     result = cursor.fetchone()
                     if not result:
@@ -115,14 +114,14 @@ class ForecastVersionService:
 
                     return {
                         "version_id": str(result[0]),
-                        "tenant_id": str(result[1]),
-                        "version_name": result[2],
-                        "version_type": result[3],
-                        "is_active": result[4],
-                        "created_at": result[5].isoformat() if result[5] else None,
-                        "updated_at": result[6].isoformat() if result[6] else None,
-                        "created_by": result[7],
-                        "updated_by": result[8]
+                        "tenant_id": tenant_id,  # Pass tenant_id from parameter
+                        "version_name": result[1],
+                        "version_type": result[2],
+                        "is_active": result[3],
+                        "created_at": result[4].isoformat() if result[4] else None,
+                        "updated_at": result[5].isoformat() if result[5] else None,
+                        "created_by": result[6],
+                        "updated_by": result[7]
                     }
 
                 finally:
@@ -166,8 +165,8 @@ class ForecastVersionService:
                     if request.version_name and request.version_name != current_name:
                         cursor.execute("""
                             SELECT version_id FROM forecast_versions
-                            WHERE tenant_id = %s AND version_name = %s AND version_id != %s
-                        """, (tenant_id, request.version_name, version_id))
+                            WHERE version_name = %s AND version_id != %s
+                        """, (request.version_name, version_id))
                         
                         if cursor.fetchone():
                             raise ConflictException(
@@ -179,9 +178,9 @@ class ForecastVersionService:
                         cursor.execute("""
                             UPDATE forecast_versions
                             SET is_active = FALSE, updated_at = %s, updated_by = %s
-                            WHERE tenant_id = %s AND version_type = %s 
+                            WHERE version_type = %s
                             AND is_active = TRUE AND version_id != %s
-                        """, (datetime.utcnow(), user_email, tenant_id, version_type, version_id))
+                        """, (datetime.utcnow(), user_email, version_type, version_id))
 
                     # Build update query
                     update_fields = []
@@ -202,12 +201,12 @@ class ForecastVersionService:
                         )
 
                     update_fields.extend(["updated_at = %s", "updated_by = %s"])
-                    params.extend([datetime.utcnow(), user_email, version_id, tenant_id])
+                    params.extend([datetime.utcnow(), user_email, version_id])
 
                     query = f"""
                         UPDATE forecast_versions
                         SET {', '.join(update_fields)}
-                        WHERE version_id = %s AND tenant_id = %s
+                        WHERE version_id = %s
                     """
 
                     cursor.execute(query, params)
@@ -245,8 +244,8 @@ class ForecastVersionService:
                 cursor = conn.cursor()
                 try:
                     # Build WHERE clause
-                    where_clauses = ["tenant_id = %s"]
-                    params = [tenant_id]
+                    where_clauses = []
+                    params = []
 
                     if version_type:
                         where_clauses.append("version_type = %s")
@@ -256,7 +255,7 @@ class ForecastVersionService:
                         where_clauses.append("is_active = %s")
                         params.append(is_active)
 
-                    where_sql = " AND ".join(where_clauses)
+                    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
                     # Get total count
                     cursor.execute(

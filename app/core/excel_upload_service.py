@@ -348,12 +348,11 @@ class ExcelUploadService:
         
         # ✅ FIXED: Build dynamic INSERT query
         cursor.execute(f"""
-            INSERT INTO sales_data 
-            (sales_id, tenant_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO sales_data
+            (sales_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             sales_id,
-            tenant_id,
             master_id,
             sales_data['date'],      # ✅ Still uses 'date' key internally
             sales_data['quantity'],   # ✅ Still uses 'quantity' key internally
@@ -491,16 +490,14 @@ class ExcelUploadService:
                 values.append(value)
             unique_key_count += 1
         
-        # Add tenant_id condition
-        where_conditions.append('tenant_id = %s')
-        values.append(tenant_id)
+
         
         # If no unique key fields configured, log warning and create new record
         if unique_key_count == 0:
             logger.warning("No unique key fields configured in field catalogue")
             master_id = str(uuid.uuid4())
-            columns = ['master_id', 'tenant_id', 'created_at', 'created_by']
-            insert_values = [master_id, tenant_id, datetime.utcnow(), user_email]
+            columns = ['master_id', 'created_at', 'created_by']
+            insert_values = [master_id, datetime.utcnow(), user_email]
             
             for field, value in master_data.items():
                 columns.append(f'"{field}"')
@@ -528,8 +525,8 @@ class ExcelUploadService:
         
         # Create new master record with all master_data (including characteristics)
         master_id = str(uuid.uuid4())
-        columns = ['master_id', 'tenant_id', 'created_at', 'created_by']
-        insert_values = [master_id, tenant_id, datetime.utcnow(), user_email]
+        columns = ['master_id', 'created_at', 'created_by']
+        insert_values = [master_id, datetime.utcnow(), user_email]
         
         for field, value in master_data.items():
             columns.append(f'"{field}"')
@@ -601,11 +598,11 @@ class ExcelUploadService:
                 try:
                     cursor.execute("""
                         INSERT INTO upload_history
-                        (upload_id, tenant_id, upload_type, file_name, total_rows, 
+                        (upload_id, upload_type, file_name, total_rows, 
                          success_count, failed_count, status, uploaded_at, uploaded_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        upload_id, tenant_id, upload_type, file_name, total_rows,
+                        upload_id, upload_type, file_name, total_rows,
                         success_count, failed_count, 'completed',
                         datetime.utcnow(), user_email
                     ))
@@ -635,7 +632,6 @@ class ExcelUploadService:
 
             return ExcelUploadResponse(
                 upload_id=upload_id,
-                tenant_id=tenant_id,
                 upload_type=upload_type,
                 file_name=file_name,
                 total_rows=total_rows,
@@ -664,11 +660,11 @@ class ExcelUploadService:
                         if not cursor.fetchone():
                             cursor.execute("""
                                 INSERT INTO upload_history
-                                (upload_id, tenant_id, upload_type, file_name, total_rows,
+                                (upload_id, upload_type, file_name, total_rows,
                                  success_count, failed_count, status, uploaded_at, uploaded_by)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """, (
-                                upload_id, tenant_id, upload_type, file_name, 0,
+                                upload_id, upload_type, file_name, 0,
                                 0, 0, 'failed', datetime.utcnow(), user_email
                             ))
                             conn.commit()

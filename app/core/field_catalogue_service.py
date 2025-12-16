@@ -74,7 +74,8 @@ class FieldCatalogueService:
                     is_unique_key=f.is_unique_key,
                     parent_field_name=f.parent_field_name,
                     is_target_variable=f.is_target_variable,
-                    is_date_field=f.is_date_field
+                    is_date_field=f.is_date_field,
+                    description=f.description
                 )
                 for f in request.fields
             ]
@@ -87,12 +88,11 @@ class FieldCatalogueService:
                 try:
                     cursor.execute("""
                         INSERT INTO field_catalogue 
-                        (catalogue_id, tenant_id, version, status, fields_json, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        (catalogue_id, version, status, fields_json, created_by)
+                        VALUES (%s, %s, %s, %s, %s)
                         """,
                         (
                             catalogue_id,
-                            tenant_id,
                             1,
                             "DRAFT",
                             fields_json,
@@ -105,7 +105,6 @@ class FieldCatalogueService:
                     
                     return {
                         "catalogue_id": catalogue_id,
-                        "tenant_id": tenant_id,
                         "fields": [f.to_dict() for f in field_definitions],
                         "version": 1,
                         "status": "DRAFT",
@@ -154,9 +153,9 @@ class FieldCatalogueService:
                     # Fetch current catalogue
                     cursor.execute("""
                         SELECT fields_json, status FROM field_catalogue 
-                        WHERE catalogue_id = %s AND tenant_id = %s
+                        WHERE catalogue_id = %s
                         """,
-                        (catalogue_id, tenant_id)
+                        (catalogue_id,)
                     )
                     result = cursor.fetchone()
                     
@@ -198,7 +197,6 @@ class FieldCatalogueService:
                     
                     return {
                         "catalogue_id": catalogue_id,
-                        "tenant_id": tenant_id,
                         "fields": fields_data,
                         "version": 1,
                         "status": "FINALIZED",
@@ -241,19 +239,19 @@ class FieldCatalogueService:
                 cursor = conn.cursor()
                 try:
                     cursor.execute("""
-                        SELECT catalogue_id, tenant_id, version, status, fields_json, 
+                        SELECT catalogue_id, version, status, fields_json, 
                                created_at, created_by, updated_at, updated_by
                         FROM field_catalogue 
-                        WHERE catalogue_id = %s AND tenant_id = %s
+                        WHERE catalogue_id = %s
                         """,
-                        (catalogue_id, tenant_id)
+                        (catalogue_id,)
                     )
                     result = cursor.fetchone()
                     
                     if not result:
                         raise NotFoundException("Field Catalogue", catalogue_id)
                     
-                    cat_id, ten_id, version, status, fields_json_raw, created_at, created_by, updated_at, updated_by = result
+                    cat_id, version, status, fields_json_raw, created_at, created_by, updated_at, updated_by = result
                     
                     # Parse fields
                     if isinstance(fields_json_raw, str):
@@ -267,7 +265,6 @@ class FieldCatalogueService:
                     
                     return {
                         "catalogue_id": cat_id,
-                        "tenant_id": ten_id,
                         "fields": fields_data,
                         "version": version,
                         "status": status,
@@ -313,27 +310,25 @@ class FieldCatalogueService:
                 try:
                     # Get total count
                     cursor.execute(
-                        "SELECT COUNT(*) FROM field_catalogue WHERE tenant_id = %s",
-                        (tenant_id,)
+                        "SELECT COUNT(*) FROM field_catalogue"
                     )
                     total_count = cursor.fetchone()[0]
                     
                     # Get paginated results
                     offset = (page - 1) * page_size
                     cursor.execute("""
-                        SELECT catalogue_id, tenant_id, version, status, fields_json, 
+                        SELECT catalogue_id, version, status, fields_json, 
                                created_at, created_by, updated_at, updated_by
                         FROM field_catalogue 
-                        WHERE tenant_id = %s
                         ORDER BY created_at DESC
                         LIMIT %s OFFSET %s
                         """,
-                        (tenant_id, page_size, offset)
+                        (page_size, offset)
                     )
                     
                     catalogues = []
                     for row in cursor.fetchall():
-                        cat_id, ten_id, version, status, fields_json_raw, created_at, created_by, updated_at, updated_by = row
+                        cat_id, version, status, fields_json_raw, created_at, created_by, updated_at, updated_by = row
                         
                         # Parse fields
                         if isinstance(fields_json_raw, str):
@@ -345,7 +340,6 @@ class FieldCatalogueService:
                         
                         catalogues.append({
                             "catalogue_id": cat_id,
-                            "tenant_id": ten_id,
                             "fields": fields_data,
                             "version": version,
                             "status": status,
