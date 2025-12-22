@@ -436,16 +436,102 @@ class ForecastingService:
             raise DatabaseException(f"Failed to list forecast runs: {str(e)}")
 
     @staticmethod
+    def get_aggregation_combinations(
+        tenant_id: str,
+        database_name: str,
+        aggregation_level: str,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all distinct combinations of aggregation level fields from filtered data.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            aggregation_level: Aggregation level string (e.g., "customer-location")
+            filters: Filters to apply before finding combinations
+            
+        Returns:
+            List of dictionaries, each containing one unique combination of aggregation fields
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            # Get aggregation columns
+            agg_columns = ForecastingService._get_aggregation_columns(
+                tenant_id, database_name, aggregation_level
+            )
+            
+            # Build filter clause
+            filter_clause = ""
+            filter_params = []
+            if filters:
+                filter_conditions = []
+                for col, val in filters.items():
+                    if col not in ["aggregation_level", "interval", "selected_external_factors"]:
+                        if isinstance(val, list):
+                            placeholders = ', '.join(['%s'] * len(val))
+                            filter_conditions.append(f'm."{col}" IN ({placeholders})')
+                            filter_params.extend(val)
+                        else:
+                            filter_conditions.append(f'm."{col}" = %s')
+                            filter_params.append(val)
+                
+                if filter_conditions:
+                    filter_clause = "AND " + " AND ".join(filter_conditions)
+            
+            with db_manager.get_tenant_connection(database_name) as conn:
+                # Get distinct combinations
+                query = f"""
+                    SELECT DISTINCT {', '.join([f'm."{col}"' for col in agg_columns])}
+                    FROM sales_data s
+                    JOIN master_data m ON s.master_id = m.master_id
+                    WHERE 1=1 {filter_clause}
+                    ORDER BY {', '.join([f'm."{col}"' for col in agg_columns])}
+                """
+                
+                logger.info(f"Fetching aggregation combinations for level: {aggregation_level}")
+                logger.debug(f"SQL: {query}")
+                logger.debug(f"Params: {filter_params}")
+                
+                df = pd.read_sql_query(query, conn, params=filter_params)
+                
+                # Convert rows to list of dictionaries
+                combinations = []
+                for _, row in df.iterrows():
+                    combo = {col: row[col] for col in agg_columns}
+                    combinations.append(combo)
+                
+                logger.info(f"Found {len(combinations)} distinct aggregation combinations")
+                return combinations
+        
+        except Exception as e:
+            logger.error(f"Failed to get aggregation combinations: {str(e)}")
+            raise DatabaseException(f"Failed to get aggregation combinations: {str(e)}")
+
+    @staticmethod
     def prepare_aggregated_data(
         tenant_id: str,
         database_name: str,
         aggregation_level: str,
         interval: str,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
+        specific_combination: Optional[Dict[str, Any]] = None
     ) -> Tuple[pd.DataFrame, str]:
         """
         Prepare aggregated historical data for forecasting.
-        FIXED: Now properly handles both single values and lists in filters.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            aggregation_level: Aggregation level (e.g., "customer-location")
+            interval: Forecast interval (WEEKLY, MONTHLY, etc.)
+            filters: Base filters to apply
+            specific_combination: If provided, filter to this specific aggregation combination
+                                 (e.g., {"customer": "CUST001", "location": "LOC001"})
+        
+        Returns:
+            Tuple of (DataFrame with aggregated data, date_field_name)
         """
         db_manager = get_db_manager()
 
@@ -462,26 +548,29 @@ class ForecastingService:
                 tenant_id, database_name, aggregation_level
             )
             
-            # ✅ FIXED: Build filter clause with proper handling for lists
+            # Build filter clause with base filters
             filter_clause = ""
             filter_params = []
             if filters:
                 filter_conditions = []
                 for col, val in filters.items():
                     if col not in ["aggregation_level", "interval", "selected_external_factors"]:
-                        # ✅ NEW: Check if value is a list
                         if isinstance(val, list):
-                            # Use IN clause for lists
                             placeholders = ', '.join(['%s'] * len(val))
                             filter_conditions.append(f'm."{col}" IN ({placeholders})')
-                            filter_params.extend(val)  # Add all values
+                            filter_params.extend(val)
                         else:
-                            # Use = for single values
                             filter_conditions.append(f'm."{col}" = %s')
                             filter_params.append(val)
                 
                 if filter_conditions:
                     filter_clause = "AND " + " AND ".join(filter_conditions)
+            
+            # ✅ NEW: Add specific combination filters if provided
+            if specific_combination:
+                for col, val in specific_combination.items():
+                    filter_clause += f' AND m."{col}" = %s'
+                    filter_params.append(val)
 
             with db_manager.get_tenant_connection(database_name) as conn:
                 # Build SQL based on interval - using DYNAMIC field names
@@ -501,16 +590,14 @@ class ForecastingService:
                     ORDER BY "{date_field_name}"
                 """
 
-                params = filter_params
-
-                logger.info(f"Executing query with filters: {filters}")
+                logger.info(f"Executing query with filters: {filters}, combination: {specific_combination}")
                 logger.debug(f"SQL: {query}")
-                logger.debug(f"Params: {params}")
+                logger.debug(f"Params: {filter_params}")
 
                 import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)
-                    df = pd.read_sql_query(query, conn, params=params)
+                    df = pd.read_sql_query(query, conn, params=filter_params)
 
                 logger.info(f"Prepared {len(df)} aggregated records for forecasting")
                 return df, date_field_name

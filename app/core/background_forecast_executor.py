@@ -61,52 +61,20 @@ class BackgroundForecastExecutor:
             interval = request_data.get('forecast_filters', {}).get('interval', 'MONTHLY')
             selected_factors = request_data.get('forecast_filters', {}).get('selected_external_factors')
             
-            # Detect entity combinations
-            agg_columns = ForecastingService._get_aggregation_columns(
-                tenant_id,
-                database_name,
-                aggregation_level
+            # ✅ CHANGED: Get distinct aggregation combinations from filtered data
+            # instead of building from filter values
+            # This allows forecasts for all combinations where filters apply
+            filters_for_data = {k: v for k, v in request_data.get('forecast_filters', {}).items() 
+                               if k not in ['aggregation_level', 'interval', 'selected_external_factors']}
+            
+            entity_combinations = ForecastingService.get_aggregation_combinations(
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level,
+                filters=filters_for_data if filters_for_data else None
             )
             
-            entity_combinations = []
-            multi_entity = False
-            
-            # Build entity combinations from filters
-            for col in agg_columns:
-                if col in request_data.get('forecast_filters', {}):
-                    filter_value = request_data['forecast_filters'][col]
-                    
-                    if isinstance(filter_value, list) and len(filter_value) > 1:
-                        multi_entity = True
-                        if not entity_combinations:
-                            entity_combinations = [{col: val} for val in filter_value]
-                        else:
-                            new_combinations = []
-                            for combo in entity_combinations:
-                                for val in filter_value:
-                                    new_combo = combo.copy()
-                                    new_combo[col] = val
-                                    new_combinations.append(new_combo)
-                            entity_combinations = new_combinations
-                    
-                    elif isinstance(filter_value, list) and len(filter_value) == 1:
-                        if not entity_combinations:
-                            entity_combinations = [{col: filter_value[0]}]
-                        else:
-                            for combo in entity_combinations:
-                                combo[col] = filter_value[0]
-                    
-                    else:
-                        if not entity_combinations:
-                            entity_combinations = [{col: filter_value}]
-                        else:
-                            for combo in entity_combinations:
-                                combo[col] = filter_value
-            
-            if not entity_combinations:
-                entity_combinations = [{}]
-            
-            logger.info(f"Job {job_id}: Detected {len(entity_combinations)} entity combinations")
+            logger.info(f"Job {job_id}: Detected {len(entity_combinations)} distinct entity combinations from database")
             
             # Execute forecast for each entity
             forecast_runs = []

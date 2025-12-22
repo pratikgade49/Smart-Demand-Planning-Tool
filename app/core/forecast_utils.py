@@ -77,17 +77,19 @@ def _process_entity_forecast(
     try:
         logger.info(f"Processing entity: {entity_name}")
 
-        # Create specific filter for this entity
-        entity_specific_filters = request_data.forecast_filters.copy()
-        entity_specific_filters.update(entity_filter)
+        # ✅ CHANGED: Use specific_combination parameter instead of updating filters
+        # Get base filters without aggregation-level-specific fields
+        base_filters = {k: v for k, v in request_data.forecast_filters.items() 
+                       if k not in ['aggregation_level', 'interval', 'selected_external_factors']}
 
-        # Get historical data for this specific entity
+        # Get historical data for this specific aggregation combination
         historical_data, date_field_name = ForecastingService.prepare_aggregated_data(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             aggregation_level=aggregation_level,
             interval=interval,
-            filters=entity_specific_filters
+            filters=base_filters,
+            specific_combination=entity_filter if entity_filter else None
         )
 
         logger.info(f"Entity {entity_name}: {len(historical_data)} historical records")
@@ -125,6 +127,12 @@ def _process_entity_forecast(
 
             try:
                 # Create forecast run
+                # ✅ CHANGED: Use base_filters + entity_filter for storage
+                filters_to_store = base_filters.copy()
+                filters_to_store.update(entity_filter)
+                filters_to_store['aggregation_level'] = aggregation_level
+                filters_to_store['interval'] = interval
+                
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                     cursor = conn.cursor()
                     try:
@@ -136,7 +144,7 @@ def _process_entity_forecast(
                         """, (
                             forecast_run_id,
                             request_data.version_id,
-                            Json(entity_specific_filters),
+                            Json(filters_to_store),
                             forecast_start_date,
                             forecast_end_date,
                             "In-Progress",
