@@ -78,6 +78,25 @@ class SchemaManager:
                         )
                     """)
                     
+                    # Create users table
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            user_id UUID PRIMARY KEY,
+                            tenant_id UUID NOT NULL,
+                            email VARCHAR(255) NOT NULL UNIQUE,
+                            password_hash VARCHAR(255) NOT NULL,
+                            first_name VARCHAR(100),
+                            last_name VARCHAR(100),
+                            role VARCHAR(50) NOT NULL DEFAULT 'user',
+                            status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_login TIMESTAMP,
+                            CONSTRAINT check_user_role CHECK (role IN ('admin', 'user', 'manager')),
+                            CONSTRAINT check_user_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED'))
+                        )
+                    """)
+
                     # Create upload_history table
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS upload_history (

@@ -1,11 +1,63 @@
 """
-Master Data schemas - currently not in use.
-
-These schemas were planned for direct master data CRUD endpoints that are not yet implemented.
-Master data is currently managed indirectly through the Field Catalogue finalization process,
-which creates the master_data table based on the defined field structure.
-
-Keeping this file as reference for future development of explicit master data endpoints.
+Master Data schemas for field and value retrieval endpoints.
+Used for UI dropdown population with master data fields and their distinct values.
 """
 
-# No active schemas - all master data operations are handled through field catalogue flow
+from typing import Dict, List, Any, Optional
+from pydantic import BaseModel, Field
+
+
+class MasterDataField(BaseModel):
+    """Schema for master data field information."""
+    field_name: str = Field(..., description="The actual field name in the database")
+    data_type: str = Field(..., description="PostgreSQL data type of the field")
+    is_nullable: bool = Field(..., description="Whether the field allows NULL values")
+    display_name: str = Field(..., description="Human-readable display name")
+
+
+class FieldValue(BaseModel):
+    """Schema for individual field values with metadata."""
+    value: Any = Field(..., description="The actual value (can be string, number, etc.)")
+    count: int = Field(..., description="Number of occurrences of this value")
+    display_value: str = Field(..., description="Display-friendly version of the value")
+
+
+class FieldValuesRequest(BaseModel):
+    """Request schema for getting values of a specific field."""
+    field_name: str = Field(..., description="The field to get values for")
+    filters: Optional[Dict[str, List[str]]] = Field(
+        None,
+        description="Optional filters for other fields (e.g., {'product': ['A', 'B']})"
+    )
+
+
+class MultipleFieldValuesRequest(BaseModel):
+    """Request schema for getting values of multiple fields with cross-filtering."""
+    field_selections: Dict[str, List[str]] = Field(
+        ...,
+        description="Dictionary mapping field names to lists of selected values for filtering",
+        example={
+            "product": ["Product A", "Product B"],
+            "customer": ["Customer X"]
+        }
+    )
+
+
+class MasterDataFieldsResponse(BaseModel):
+    """Response schema for available master data fields."""
+    fields: List[MasterDataField] = Field(..., description="List of available fields")
+
+
+class FieldValuesResponse(BaseModel):
+    """Response schema for field values."""
+    field_name: str = Field(..., description="The field these values belong to")
+    values: List[FieldValue] = Field(..., description="List of distinct values with counts")
+    total_count: int = Field(..., description="Total number of distinct values")
+
+
+class MultipleFieldValuesResponse(BaseModel):
+    """Response schema for multiple field values with cross-filtering."""
+    field_values: Dict[str, List[FieldValue]] = Field(
+        ...,
+        description="Dictionary mapping field names to their value lists"
+    )

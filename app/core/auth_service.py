@@ -12,9 +12,13 @@ from app.core.exceptions import (
     AuthenticationException,
     ConflictException,
     NotFoundException,
-    DatabaseException
+    DatabaseException,
+    ValidationException
 )
-from app.schemas.auth import TenantLoginRequest, TenantRegisterRequest
+from app.schemas.auth import (
+    TenantLoginRequest, TenantRegisterRequest,
+    TenantOnboardRequest, UserRegisterRequest, UserLoginRequest
+)
 from app.config import settings
 import logging
 
@@ -339,3 +343,350 @@ class AuthService:
         except Exception as e:
             logger.error(f"Failed to update tenant status: {str(e)}")
             raise DatabaseException(f"Failed to update tenant status: {str(e)}")
+
+    @staticmethod
+    def onboard_tenant(request: TenantOnboardRequest) -> Dict[str, Any]:
+        """
+        Onboard a new tenant with dedicated database (without creating users).
+
+        Args:
+            request: Tenant onboarding request
+
+        Returns:
+            Dictionary containing tenant_id, tenant_name, and database_name
+
+        Raises:
+            ConflictException: If tenant already exists
+            DatabaseException: If onboarding fails
+        """
+        tenant_id = str(uuid.uuid4())
+        database_name = AuthService._generate_database_name(request.tenant_identifier)
+        db_manager = get_db_manager()
+        database_created = False
+
+        try:
+            # Check if tenant identifier already exists in master database
+            with db_manager.get_master_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        SELECT tenant_id FROM public.tenants
+                        WHERE tenant_identifier = %s
+                        """,
+                        (request.tenant_identifier,)
+                    )
+                    if cursor.fetchone():
+                        raise ConflictException(
+                            f"Tenant identifier '{request.tenant_identifier}' already exists"
+                        )
+                finally:
+                    cursor.close()
+
+            # Create tenant database and initialize tables
+            SchemaManager.create_tenant_database(tenant_id, database_name)
+            database_created = True
+
+            # Insert tenant in master database (without admin user)
+            with db_manager.get_master_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO public.tenants
+                        (tenant_id, tenant_name, tenant_identifier, database_name, status)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            tenant_id,
+                            request.tenant_name,
+                            request.tenant_identifier,
+                            database_name,
+                            "ACTIVE"
+                        )
+                    )
+                    conn.commit()
+                finally:
+                    cursor.close()
+
+            logger.info(f"Tenant onboarded successfully: {tenant_id} with database: {database_name}")
+
+            return {
+                "tenant_id": tenant_id,
+                "tenant_name": request.tenant_name,
+                "database_name": database_name
+            }
+
+        except ConflictException:
+            # No cleanup needed - database wasn't created yet
+            raise
+        except Exception as e:
+            # Cleanup only if database was created
+            if database_created:
+                try:
+                    db_manager.drop_tenant_database(database_name)
+                except:
+                    pass
+            logger.error(f"Tenant onboarding failed: {str(e)}")
+            raise DatabaseException(f"Tenant onboarding failed: {str(e)}")
+
+    @staticmethod
+    def register_user(request: UserRegisterRequest) -> Dict[str, Any]:
+        """
+        Register a new user under an existing tenant.
+
+        Args:
+            request: User registration request
+
+        Returns:
+            Dictionary containing user_id, tenant_id, and email
+
+        Raises:
+            NotFoundException: If tenant not found
+            ConflictException: If user email already exists in tenant
+            DatabaseException: If registration fails
+        """
+        user_id = str(uuid.uuid4())
+        db_manager = get_db_manager()
+
+        try:
+            # Verify tenant exists and get database name
+            tenant_info = AuthService.get_tenant_by_id(request.tenant_id)
+            if tenant_info["status"] != "ACTIVE":
+                raise NotFoundException("Tenant", request.tenant_id)
+
+            database_name = tenant_info["database_name"]
+
+            # Check if email already exists in tenant database
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        SELECT user_id FROM users
+                        WHERE email = %s
+                        """,
+                        (request.email,)
+                    )
+                    if cursor.fetchone():
+                        raise ConflictException(
+                            f"Email '{request.email}' already registered in this tenant"
+                        )
+                finally:
+                    cursor.close()
+
+            # Hash password
+            password_hash = PasswordHandler.hash_password(request.password)
+
+            # Insert user in tenant database
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO users
+                        (user_id, tenant_id, email, password_hash, first_name, last_name, role, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            user_id,
+                            request.tenant_id,
+                            request.email,
+                            password_hash,
+                            request.first_name,
+                            request.last_name,
+                            request.role,
+                            "ACTIVE"
+                        )
+                    )
+                    conn.commit()
+                finally:
+                    cursor.close()
+
+            logger.info(f"User registered successfully: {user_id} in tenant: {request.tenant_id}")
+
+            return {
+                "user_id": user_id,
+                "tenant_id": request.tenant_id,
+                "email": request.email
+            }
+
+        except (NotFoundException, ConflictException):
+            raise
+        except Exception as e:
+            logger.error(f"User registration failed: {str(e)}")
+            raise DatabaseException(f"User registration failed: {str(e)}")
+
+    @staticmethod
+    def login_user(request: UserLoginRequest) -> Dict[str, Any]:
+        """
+        Login a user and generate JWT token.
+
+        Args:
+            request: User login request
+
+        Returns:
+            Dictionary containing user_id, tenant_id, tenant_name, email, and access_token
+
+        Raises:
+            NotFoundException: If tenant or user not found
+            AuthenticationException: If credentials are invalid
+        """
+        db_manager = get_db_manager()
+
+        try:
+            # Get tenant info first
+            with db_manager.get_master_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        SELECT tenant_id, tenant_name, database_name, status
+                        FROM public.tenants
+                        WHERE tenant_identifier = %s
+                        """,
+                        (request.tenant_identifier,)
+                    )
+                    tenant_result = cursor.fetchone()
+
+                    if not tenant_result:
+                        raise NotFoundException("Tenant", request.tenant_identifier)
+
+                    tenant_id, tenant_name, database_name, tenant_status = tenant_result
+
+                    # Check if tenant is active
+                    if tenant_status != "ACTIVE":
+                        raise AuthenticationException(f"Tenant account is {tenant_status}")
+
+                finally:
+                    cursor.close()
+
+            # Now check user credentials in tenant database
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        SELECT user_id, password_hash, first_name, last_name, role, status
+                        FROM users
+                        WHERE email = %s
+                        """,
+                        (request.email,)
+                    )
+                    user_result = cursor.fetchone()
+
+                    if not user_result:
+                        raise NotFoundException("User", request.email)
+
+                    user_id, password_hash, first_name, last_name, role, user_status = user_result
+
+                    # Check if user is active
+                    if user_status != "ACTIVE":
+                        raise AuthenticationException(f"User account is {user_status}")
+
+                    # Verify password
+                    if not PasswordHandler.verify_password(request.password, password_hash):
+                        raise AuthenticationException("Invalid password")
+
+                    # Create JWT token
+                    token_data = {
+                        "user_id": user_id,
+                        "tenant_id": tenant_id,
+                        "tenant_identifier": request.tenant_identifier,
+                        "email": request.email,
+                        "database_name": database_name,
+                        "role": role
+                    }
+                    access_token = JWTHandler.create_token(token_data)
+
+                    logger.info(f"User logged in successfully: {user_id} (tenant: {tenant_id})")
+
+                    return {
+                        "user_id": user_id,
+                        "tenant_id": tenant_id,
+                        "tenant_name": tenant_name,
+                        "email": request.email,
+                        "access_token": access_token,
+                        "token_type": "bearer"
+                    }
+
+                finally:
+                    cursor.close()
+
+        except (AuthenticationException, NotFoundException):
+            raise
+        except Exception as e:
+            logger.error(f"User login failed: {str(e)}")
+            raise DatabaseException(f"Login failed: {str(e)}")
+
+    @staticmethod
+    def list_tenants() -> list[Dict[str, Any]]:
+        """
+        List all active tenants for user registration dropdown.
+
+        Returns:
+            List of tenant dictionaries with tenant_id, tenant_name, tenant_identifier
+        """
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_master_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        """
+                        SELECT tenant_id, tenant_name, tenant_identifier
+                        FROM public.tenants
+                        WHERE status = 'ACTIVE'
+                        ORDER BY tenant_name
+                        """
+                    )
+                    results = cursor.fetchall()
+
+                    tenants = []
+                    for row in results:
+                        tenant_id, tenant_name, tenant_identifier = row
+                        tenants.append({
+                            "tenant_id": tenant_id,
+                            "tenant_name": tenant_name,
+                            "tenant_identifier": tenant_identifier
+                        })
+
+                    return tenants
+
+                finally:
+                    cursor.close()
+
+        except Exception as e:
+            logger.error(f"Failed to list tenants: {str(e)}")
+            raise DatabaseException(f"Failed to list tenants: {str(e)}")
+
+    @staticmethod
+    def verify_user_token(token: str) -> Dict[str, Any]:
+        """
+        Verify JWT token and extract user information.
+
+        Args:
+            token: JWT token
+
+        Returns:
+            Decoded token payload with user and tenant info
+
+        Raises:
+            AuthenticationException: If token is invalid
+        """
+        try:
+            payload = JWTHandler.verify_token(token)
+
+            # Ensure required fields are in payload
+            required_fields = ["user_id", "tenant_id", "database_name"]
+            for field in required_fields:
+                if field not in payload:
+                    raise AuthenticationException("Invalid token format")
+
+            return payload
+        except AuthenticationException:
+            raise
+        except Exception as e:
+            logger.error(f"Token verification failed: {str(e)}")
+            raise AuthenticationException("Invalid token")

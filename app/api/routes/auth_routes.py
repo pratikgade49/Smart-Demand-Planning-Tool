@@ -9,7 +9,14 @@ from app.schemas.auth import (
     TenantRegisterRequest,
     TenantRegisterResponse,
     TenantLoginRequest,
-    TenantLoginResponse
+    TenantLoginResponse,
+    TenantOnboardRequest,
+    TenantOnboardResponse,
+    UserRegisterRequest,
+    UserRegisterResponse,
+    UserLoginRequest,
+    UserLoginResponse,
+    TenantListResponse
 )
 from app.core.auth_service import AuthService
 from app.core.responses import ResponseHandler
@@ -145,4 +152,109 @@ async def update_tenant_status(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Error updating tenant status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/onboard-tenant", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
+async def onboard_tenant(request: TenantOnboardRequest):
+    """
+    Onboard a new tenant.
+    Creates tenant database without creating any users.
+    """
+    try:
+        result = AuthService.onboard_tenant(request)
+
+        response_data = {
+            "tenant_id": result["tenant_id"],
+            "tenant_name": result["tenant_name"],
+            "database_name": result["database_name"],
+            "message": "Tenant onboarded successfully."
+        }
+
+        return ResponseHandler.success(data=response_data, status_code=201)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in onboard_tenant: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/register-user", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
+async def register_user(request: UserRegisterRequest):
+    """
+    Register a new user under an existing tenant.
+    """
+    try:
+        result = AuthService.register_user(request)
+
+        response_data = {
+            "user_id": result["user_id"],
+            "tenant_id": result["tenant_id"],
+            "email": result["email"],
+            "message": "User registered successfully. Please login to continue."
+        }
+
+        return ResponseHandler.success(data=response_data, status_code=201)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in register_user: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/user-login", response_model=Dict[str, Any])
+async def login_user(request: UserLoginRequest):
+    """
+    Login user and get JWT access token.
+    """
+    try:
+        result = AuthService.login_user(request)
+
+        return ResponseHandler.success(data=result)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in login_user: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/tenants", response_model=Dict[str, Any])
+async def list_tenants():
+    """
+    List all active tenants for user registration dropdown.
+    """
+    try:
+        result = AuthService.list_tenants()
+
+        return ResponseHandler.success(data={"tenants": result})
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in list_tenants: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/verify-user-token", response_model=Dict[str, Any])
+async def verify_user_token(token: str):
+    """
+    Verify JWT user token validity.
+    """
+    try:
+        payload = AuthService.verify_user_token(token)
+
+        return ResponseHandler.success(data={
+            "valid": True,
+            "user_id": payload.get("user_id"),
+            "tenant_id": payload.get("tenant_id"),
+            "email": payload.get("email")
+        })
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in verify_user_token: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
