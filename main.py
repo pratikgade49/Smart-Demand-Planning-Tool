@@ -25,6 +25,8 @@ from app.api.routes import auth_routes, field_catalogue_routes, upload_routes, f
 from app.api.routes import external_factors_routes
 from app.api.routes import forecast_comparison_routes
 from app.api.routes import sap_ibp_routes
+from app.api.routes import sales_data_routes
+from app.api.routes import master_data_routes
 
 
 # Setup logging before anything else
@@ -258,6 +260,10 @@ app.include_router(forecast_comparison_routes.router, prefix="/api/v1")
 logger.debug("Registered forecast comparison routes")
 app.include_router(sap_ibp_routes.router, prefix="/api/v1")
 logger.debug("Registered SAP IBP routes")
+app.include_router(master_data_routes.router, prefix="/api/v1")
+logger.debug("Registered master data routes")
+app.include_router(sales_data_routes.router, prefix="/api/v1")
+logger.debug("Registered sales data routes")
 logger.info("All API routes registered successfully")
 
 
