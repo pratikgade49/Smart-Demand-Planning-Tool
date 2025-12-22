@@ -249,7 +249,7 @@ class ExcelUploadService:
 
         logger.info(f"Starting mixed data processing: {len(df)} rows")
 
-        with db_manager.get_connection(tenant_id) as conn:
+        with db_manager.get_tenant_connection(database_name) as conn:
             cursor = conn.cursor()
             try:
                 for idx, row in df.iterrows():
@@ -593,7 +593,7 @@ class ExcelUploadService:
 
             # Log upload to database
             db_manager = get_db_manager()
-            with db_manager.get_connection(tenant_id) as conn:
+            with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
                     cursor.execute("""
@@ -650,7 +650,7 @@ class ExcelUploadService:
             # Log failed upload
             try:
                 db_manager = get_db_manager()
-                with db_manager.get_connection(tenant_id) as conn:
+                with db_manager.get_tenant_connection(database_name) as conn:
                     cursor = conn.cursor()
                     try:
                         cursor.execute(

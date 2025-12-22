@@ -81,7 +81,7 @@ async def get_upload_history(
         db_manager = ExcelUploadService.get_db_manager()
         offset = (page - 1) * page_size
 
-        with db_manager.get_connection(tenant_data["tenant_id"]) as conn:
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
                 # Get total count
@@ -144,7 +144,7 @@ async def get_upload_details(
     try:
         db_manager = ExcelUploadService.get_db_manager()
 
-        with db_manager.get_connection(tenant_data["tenant_id"]) as conn:
+        with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute("""
