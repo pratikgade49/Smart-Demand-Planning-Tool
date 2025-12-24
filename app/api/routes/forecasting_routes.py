@@ -12,6 +12,11 @@ from app.schemas.forecasting import (
     ExternalFactorCreate,
     ExternalFactorUpdate
 )
+
+
+
+from app.core.resource_monitor import monitor_endpoint, ResourceMonitor
+import logging
 from app.core.database import get_db_manager
 from app.core.forecasting_service import ForecastingService
 from app.core.forecast_version_service import ForecastVersionService
@@ -43,14 +48,14 @@ class DirectForecastExecutionRequest(BaseModel):
 
 
 @router.post("/execute-forecast-async", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
+@monitor_endpoint("Forecast Request Submission", warn_threshold=3.0)  # Add monitoring decorator
 async def execute_forecast_async(
-    request: Request,
-    request_data: DirectForecastExecutionRequest,
+    request_data: Dict[str, Any],  # Your request model here
     background_tasks: BackgroundTasks,
     tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
-    Asynchronously execute a forecast in the background.
+    Asynchronously execute a forecast in the background with resource monitoring.
     
     This endpoint returns immediately with a job_id. Use the job_id to check 
     the status and retrieve results via the /job-status/{job_id} endpoint.
@@ -59,18 +64,24 @@ async def execute_forecast_async(
         - job_id: Unique identifier for tracking the forecast execution
         - status: Current job status (will be "pending")
         - created_at: Timestamp when the job was created
+        - start_resources: System resources at job creation
     
     Check job status with: GET /api/v1/forecasting/job-status/{job_id}
     """
     try:
-        logger.info(f"Async forecast execution requested for tenant {tenant_data['tenant_id']}")
-        logger.info(f"Request: {request.method} {request.url.path}")
+        # Get current resources for logging
+        current_resources = ResourceMonitor.get_system_resources()
+        
+        logger.info(
+            f"Async forecast execution requested for tenant {tenant_data['tenant_id']}",
+            extra={'start_resources': current_resources}
+        )
         
         # Create forecast job record
         job_result = ForecastJobService.create_job(
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
-            request_data=request_data.dict(),
+            request_data=request_data,
             user_email=tenant_data['email']
         )
         
@@ -82,46 +93,45 @@ async def execute_forecast_async(
             job_id=job_id,
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
-            request_data=request_data.dict(),
+            request_data=request_data,
             tenant_data=tenant_data
         )
         
         logger.info(f"Created async forecast job {job_id}, added to background task queue")
         
-        return ResponseHandler.success(
-            data={
+        return {
+            "status": "success",
+            "data": {
                 "job_id": job_id,
                 "status": "pending",
                 "created_at": job_result['created_at'],
-                "message": "Forecast execution started in background. Use job_id to check status."
-            },
-            status_code=202
-        )
+                "message": "Forecast execution started in background. Use job_id to check status.",
+                "start_resources": current_resources
+            }
+        }
     
-    except ValidationException as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except AppException as e:
-        logger.error(f"App error: {str(e)}")
-        raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error in async forecast execution: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@router.get("/job-status/{job_id}", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+
+
+@router.get("/job-status/{job_id}", response_model=Dict[str, Any])
+@monitor_endpoint("Forecast Job Status Check", warn_threshold=2.0)
 async def get_forecast_job_status(
     job_id: str,
     tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
-    Get the status and results of a forecast job.
+    Get the status and results of a forecast job with performance metrics.
     
     Returns:
         - job_id: Job identifier
         - status: Current status (pending, running, completed, failed)
         - result: Forecast results (if completed)
         - error: Error message (if failed)
+        - performance_metrics: Resource usage and timing information
         - created_at: Job creation timestamp
         - started_at: Job start timestamp
         - completed_at: Job completion timestamp
@@ -138,7 +148,10 @@ async def get_forecast_job_status(
         if job_status.get('status') == 'not_found':
             raise HTTPException(status_code=404, detail="Job not found")
         
-        return ResponseHandler.success(data=job_status, status_code=200)
+        return {
+            "status": "success",
+            "data": job_status
+        }
     
     except HTTPException:
         raise
@@ -541,3 +554,28 @@ async def list_algorithms(
         raise HTTPException(status_code=500, detail="Internal server error")
     
 
+@router.get("/metrics/performance", response_model=Dict[str, Any])
+async def get_performance_metrics(
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Get performance metrics for forecasting operations.
+    
+    Returns:
+        - current_resources: Current system resource usage
+        - performance_summary: Summary of all tracked operations
+    """
+    from app.core.resource_monitor import performance_tracker
+    
+    summary = performance_tracker.get_summary()
+    current_resources = ResourceMonitor.get_system_resources()
+    resource_warnings = ResourceMonitor.check_resource_warnings(current_resources)
+    
+    return {
+        "status": "success",
+        "data": {
+            "current_resources": current_resources,
+            "resource_warnings": resource_warnings,
+            "performance_summary": summary
+        }
+    }

@@ -27,6 +27,8 @@ from app.api.routes import forecast_comparison_routes
 from app.api.routes import sap_ibp_routes
 from app.api.routes import sales_data_routes
 from app.api.routes import master_data_routes
+from app.api.middleware.monitoring_middleware import ResourceMonitoringMiddleware
+
 
 
 # Setup logging before anything else
@@ -106,6 +108,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(ResourceMonitoringMiddleware)
 
 logger.info("CORS middleware configured")
 

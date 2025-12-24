@@ -171,7 +171,8 @@ class ForecastJobService:
         job_id: str,
         status: JobStatus,
         result_data: Optional[Dict[str, Any]] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        **kwargs
     ) -> None:
         """
         Update job status and optionally store results.
@@ -183,6 +184,7 @@ class ForecastJobService:
             status: New job status
             result_data: Result data (if completed successfully)
             error_message: Error message (if failed)
+            **kwargs: Additional arguments (e.g., metadata)
         """
         db_manager = get_db_manager()
         
@@ -196,11 +198,22 @@ class ForecastJobService:
                     completed_at = None
                     
                     if status == JobStatus.RUNNING:
-                        cursor.execute("""
-                            UPDATE forecast_jobs
-                            SET status = %s, started_at = %s, updated_at = %s
-                            WHERE job_id = %s AND tenant_id = %s
-                        """, (status.value, updated_at, updated_at, job_id, tenant_id))
+                        # Check if metadata is provided
+                        metadata = kwargs.get('metadata')
+                        if metadata:
+                            # Store metadata in result_data for RUNNING state
+                            result_json = json.dumps(metadata, default=str)
+                            cursor.execute("""
+                                UPDATE forecast_jobs
+                                SET status = %s, started_at = %s, updated_at = %s, result_data = %s
+                                WHERE job_id = %s AND tenant_id = %s
+                            """, (status.value, updated_at, updated_at, result_json, job_id, tenant_id))
+                        else:
+                            cursor.execute("""
+                                UPDATE forecast_jobs
+                                SET status = %s, started_at = %s, updated_at = %s
+                                WHERE job_id = %s AND tenant_id = %s
+                            """, (status.value, updated_at, updated_at, job_id, tenant_id))
                     
                     elif status in [JobStatus.COMPLETED, JobStatus.FAILED]:
                         result_json = json.dumps(result_data, default=str) if result_data else None

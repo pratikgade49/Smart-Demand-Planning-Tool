@@ -1234,7 +1234,7 @@ class ForecastExecutionService:
                 forecast = np.maximum(forecast, 0)
 
                 # Calculate metrics
-                fitted = auto_model.fittedvalues()
+                fitted = auto_model.predict_in_sample()
                 if len(fitted) == len(y):
                     metrics = ForecastExecutionService.calculate_metrics(y, fitted)
                 else:
