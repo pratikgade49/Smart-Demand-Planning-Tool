@@ -197,9 +197,9 @@ class ForecastingService:
                     cursor.execute("""
                         INSERT INTO forecast_runs
                         (forecast_run_id, version_id, forecast_filters,
-                         forecast_start, forecast_end, run_status, run_percentage_frequency,
+                         forecast_start, forecast_end, run_status,
                          created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """, (
                         forecast_run_id,
                         str(request.version_id),
@@ -207,7 +207,6 @@ class ForecastingService:
                         request.forecast_start,
                         request.forecast_end,
                         "Pending",
-                        request.run_percentage_frequency,
                         user_email
                     ))
 
@@ -288,7 +287,7 @@ class ForecastingService:
                     cursor.execute("""
                         SELECT forecast_run_id, tenant_id, version_id, forecast_filters,
                                forecast_start, forecast_end, run_status, run_progress,
-                               run_percentage_frequency, total_records, processed_records,
+                               total_records, processed_records,
                                failed_records, error_message, created_at, updated_at,
                                started_at, completed_at, created_by
                         FROM forecast_runs
@@ -300,7 +299,7 @@ class ForecastingService:
                         raise NotFoundException("Forecast Run", forecast_run_id)
 
                     (run_id, ten_id, version_id, filters, start, end, status,
-                     progress, freq, total, processed, failed, error_msg,
+                     progress, total, processed, failed, error_msg,
                      created_at, updated_at, started_at, completed_at, created_by) = result
 
                     # Get algorithm mappings
@@ -339,7 +338,6 @@ class ForecastingService:
                         "forecast_end": end.isoformat() if end else None,
                         "run_status": status,
                         "run_progress": progress,
-                        "run_percentage_frequency": freq,
                         "total_records": total,
                         "processed_records": processed,
                         "failed_records": failed,

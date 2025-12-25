@@ -56,7 +56,7 @@ class ForecastRunCreate(BaseModel):
     forecast_filters: Optional[Dict[str, Any]] = None
     forecast_start: str = Field(..., description="Start date in YYYY-MM-DD format")
     forecast_end: str = Field(..., description="End date in YYYY-MM-DD format")
-    run_percentage_frequency: Optional[int] = Field(50, ge=1, le=100)
+
     algorithms: List[AlgorithmMapping] = Field(..., min_items=1)
 
 class ForecastRunResponse(BaseModel):
@@ -68,7 +68,6 @@ class ForecastRunResponse(BaseModel):
     forecast_end: str
     run_status: str
     run_progress: int
-    run_percentage_frequency: Optional[int] = None
     total_records: Optional[int] = None
     processed_records: Optional[int] = None
     failed_records: Optional[int] = None

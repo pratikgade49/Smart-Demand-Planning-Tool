@@ -211,6 +211,205 @@ class ForecastExecutionService:
         )
 
     @staticmethod
+    def execute_forecast_run(
+        tenant_id: str,
+        database_name: str,
+        forecast_run_id: str,
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Execute a forecast run with all mapped algorithms.
+        """
+        start_time = datetime.utcnow()
+        initial_resources = ForecastExecutionService._get_system_resources()
+        logger.info(f"Starting forecast execution for run: {forecast_run_id}")
+        logger.info(f"Initial system resources - CPU: {initial_resources['cpu_percent']}%, Memory: {initial_resources['memory_mb']}MB ({initial_resources['memory_percent']}%)")
+ 
+        db_manager = get_db_manager()
+ 
+        try:
+            # Get forecast run details
+            forecast_run = ForecastingService.get_forecast_run(
+                tenant_id, database_name, forecast_run_id
+            )
+           
+            logger.info(f"Retrieved forecast run details: version_id={forecast_run.get('version_id')}, start={forecast_run.get('forecast_start')}, end={forecast_run.get('forecast_end')}")
+ 
+            # Validate run status
+            if forecast_run['run_status'] not in ['Pending', 'Failed']:
+                logger.error(f"Invalid run status for forecast run {forecast_run_id}: {forecast_run['run_status']}")
+                raise ValidationException(
+                    f"Cannot execute forecast run with status: {forecast_run['run_status']}"
+                )
+ 
+            # Update status to In-Progress
+            logger.debug(f"Updating forecast run status to 'In-Progress' for run: {forecast_run_id}")
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        UPDATE forecast_runs
+                        SET run_status = 'In-Progress',
+                            started_at = %s,
+                            updated_at = %s,
+                            updated_by = %s
+                        WHERE forecast_run_id = %s
+                    """, (datetime.utcnow(), datetime.utcnow(), user_email, forecast_run_id))
+                    conn.commit()
+                    logger.info(f"Successfully updated forecast run {forecast_run_id} status to 'In-Progress'")
+                finally:
+                    cursor.close()
+           
+            # Prepare historical data
+            filters = forecast_run.get('forecast_filters', {})
+            aggregation_level = filters.get('aggregation_level', 'product')
+            interval = filters.get('interval', 'MONTHLY')
+            selected_factors = filters.get('selected_external_factors')
+           
+            # Get historical data
+            historical_data = ForecastingService.prepare_aggregated_data(
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level,
+                interval=interval,
+                filters=filters
+            )
+ 
+            logger.info(f"Prepared {len(historical_data)} historical records")
+           
+            # ✅ FIXED: Get external factors WITHOUT date filtering
+            external_factors = ForecastExecutionService._prepare_external_factors(
+                tenant_id,
+                database_name,
+                selected_factors=selected_factors  # ✅ Only pass selected_factors
+            )
+           
+            # Execute each algorithm in parallel
+            algorithms = forecast_run.get('algorithms', [])
+            total_records = 0
+            processed_records = 0
+            failed_records = 0
+ 
+            # Use ThreadPoolExecutor for parallel algorithm execution
+            max_workers = min(len(algorithms), os.cpu_count() or 4)
+            logger.info(f"Starting parallel execution of {len(algorithms)} algorithms with {max_workers} workers")
+ 
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all algorithm tasks
+                future_to_algorithm = {}
+ 
+                for algo in algorithms:
+                    # Add version_id to algorithm mapping
+                    algo['version_id'] = forecast_run['version_id']
+ 
+                    future = executor.submit(
+                        ForecastExecutionService._execute_algorithm_parallel,
+                        tenant_id=tenant_id,
+                        database_name=database_name,
+                        forecast_run_id=forecast_run_id,
+                        algorithm_mapping=algo,
+                        historical_data=historical_data.copy(),
+                        external_factors=external_factors,
+                        forecast_start=forecast_run['forecast_start'],
+                        forecast_end=forecast_run['forecast_end'],
+                        interval=interval,
+                        user_email=user_email
+                    )
+                    future_to_algorithm[future] = algo
+ 
+                # Collect results as they complete
+                for future in as_completed(future_to_algorithm):
+                    algo = future_to_algorithm[future]
+                    try:
+                        results = future.result()
+                        total_records += len(results)
+                        processed_records += len(results)
+                        logger.info(f"Algorithm {algo['algorithm_name']} completed: {len(results)} results")
+ 
+                    except Exception as e:
+                        failed_records += 1
+                        error_msg = f"Algorithm {algo['algorithm_name']} failed: {str(e)}"
+                        logger.error(error_msg, exc_info=True)
+ 
+                        # Update algorithm mapping status
+                        ForecastExecutionService._update_algorithm_status(
+                            database_name,
+                            algo['mapping_id'],
+                            'Failed',
+                            error_message=str(e)
+                        )
+           
+            # Update forecast run completion
+            if failed_records == 0:
+                final_status = 'Completed'
+            elif processed_records == 0:
+                final_status = 'Failed'
+            else:
+                # Some succeeded, some failed - still mark as Completed
+                final_status = 'Completed'
+           
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        UPDATE forecast_runs
+                        SET run_status = %s,
+                            run_progress = 100,
+                            total_records = %s,
+                            processed_records = %s,
+                            failed_records = %s,
+                            completed_at = %s,
+                            updated_at = %s,
+                            updated_by = %s
+                        WHERE forecast_run_id = %s
+                    """, (
+                        final_status,
+                        total_records,
+                        processed_records,
+                        failed_records,
+                        datetime.utcnow(),
+                        datetime.utcnow(),
+                        user_email,
+                        forecast_run_id
+                    ))
+                    conn.commit()
+                finally:
+                    cursor.close()
+           
+            logger.info(f"Forecast run completed: {forecast_run_id}")
+           
+            return {
+                'forecast_run_id': forecast_run_id,
+                'status': final_status,
+                'total_records': total_records,
+                'processed_records': processed_records,
+                'failed_records': failed_records,
+                'algorithms_executed': len(algorithms)
+            }
+           
+        except Exception as e:
+            # Update run status to Failed
+            try:
+                with db_manager.get_tenant_connection(database_name) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            UPDATE forecast_runs
+                            SET run_status = 'Failed',
+                                error_message = %s,
+                                updated_at = %s,
+                                updated_by = %s
+                            WHERE forecast_run_id = %s
+                        """, (str(e), datetime.utcnow(), user_email, forecast_run_id))
+                        conn.commit()
+                    finally:
+                        cursor.close()
+            except:
+                pass
+           
+            logger.error(f"Forecast execution failed: {str(e)}")
+            raise DatabaseException(f"Forecast execution failed: {str(e)}")
+    @staticmethod
     def _execute_algorithm(
         tenant_id: str,
         database_name: str,
@@ -1278,6 +1477,10 @@ class ForecastExecutionService:
                 if col in data.columns:
                     dtype = data[col].dtype
                     # If it's a string/object column with few unique values, it's likely an aggregation field
+                     # Exclude datetime columns (likely the date field)
+                    if pd.api.types.is_datetime64_any_dtype(dtype):
+                        continue
+                    
                     if dtype == 'object' or dtype.name == 'category':
                         unique_ratio = data[col].nunique() / len(data) if len(data) > 0 else 0
                         if unique_ratio < 0.1:  # Less than 10% unique values = aggregation field

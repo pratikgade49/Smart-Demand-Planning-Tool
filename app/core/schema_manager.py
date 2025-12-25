@@ -1,6 +1,6 @@
 """
-Schema management utilities for tenant isolation.
-Handles tenant database creation and table setup.
+Schema management utilities for tenant isolation with FULL AUDIT TRAILS.
+Handles tenant database creation and table setup with proper audit fields.
 """
 
 from typing import List, Dict, Any
@@ -12,12 +12,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 class SchemaManager:
-    """Manages database schemas and tenant isolation."""
+    """Manages database schemas and tenant isolation with audit trails."""
     
     @staticmethod
     def create_tenant_database(tenant_id: str, database_name: str) -> bool:
         """
-        Create a new database for tenant and initialize tables.
+        Create a new database for tenant and initialize tables with audit trails.
         
         Args:
             tenant_id: Unique tenant identifier
@@ -39,32 +39,46 @@ class SchemaManager:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Create field_catalogue table
+                    # ========================================================================
+                    # Create field_catalogue table with FULL AUDIT TRAIL
+                    # ========================================================================
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue (
                             catalogue_id UUID PRIMARY KEY,
                             version INT DEFAULT 1,
                             status VARCHAR(50) DEFAULT 'DRAFT',
                             fields_json JSONB NOT NULL,
+                            
+                            -- Audit fields
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL,
                             updated_at TIMESTAMP,
                             updated_by VARCHAR(255)
                         )
                     """)
+                    logger.info(" Created field_catalogue table with audit trail")
                     
-                    # Create master_data table (will be modified when catalogue finalized)
+                    # ========================================================================
+                    # Create master_data table (modified when catalogue finalized)
+                    # Will have FULL AUDIT TRAIL added later
+                    # ========================================================================
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS master_data (
                             master_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            
+                            -- Audit fields (will be customized based on field catalogue)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL,
                             updated_at TIMESTAMP,
-                            updated_by VARCHAR(255)
+                            updated_by VARCHAR(255),
+                            deleted_at TIMESTAMP
                         )
                     """)
+                    logger.info(" Created master_data table with audit trail")
                     
-                    # Create sales_data table
+                    # ========================================================================
+                    # Create sales_data table with PARTIAL AUDIT (created only - immutable)
+                    # ========================================================================
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS sales_data (
                             sales_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -73,12 +87,17 @@ class SchemaManager:
                             quantity DECIMAL(18, 2) NOT NULL,
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
+                            
+                            -- Audit fields (created only - transactions are immutable)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL
                         )
                     """)
+                    logger.info(" Created sales_data table with partial audit trail")
                     
-                    # Create users table
+                    # ========================================================================
+                    # Create users table with FULL AUDIT TRAIL
+                    # ========================================================================
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS users (
                             user_id UUID PRIMARY KEY,
@@ -89,15 +108,23 @@ class SchemaManager:
                             last_name VARCHAR(100),
                             role VARCHAR(50) NOT NULL DEFAULT 'user',
                             status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+                            
+                            -- Audit fields
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) DEFAULT 'system',
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_by VARCHAR(255),
                             last_login TIMESTAMP,
+                            
                             CONSTRAINT check_user_role CHECK (role IN ('admin', 'user', 'manager')),
                             CONSTRAINT check_user_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED'))
                         )
                     """)
+                    logger.info(" Created users table with full audit trail")
 
-                    # Create upload_history table
+                    # ========================================================================
+                    # Create upload_history table (created only - immutable)
+                    # ========================================================================
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS upload_history (
                             upload_id UUID PRIMARY KEY,
@@ -107,17 +134,45 @@ class SchemaManager:
                             success_count INT DEFAULT 0,
                             failed_count INT DEFAULT 0,
                             status VARCHAR(50) NOT NULL,
+                            
+                            -- Audit fields (created only - upload records are immutable)
                             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             uploaded_by VARCHAR(255) NOT NULL
                         )
                     """)
+                    logger.info(" Created upload_history table with partial audit trail")
                     
                     # Create indexes
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sales_data_date ON sales_data(date)")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sales_data_master_id ON sales_data(master_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_master_data_deleted ON master_data(deleted_at) WHERE deleted_at IS NULL")
+                    
+                    # ========================================================================
+                    # Create triggers for auto-updating updated_at
+                    # ========================================================================
+                    cursor.execute("""
+                        CREATE OR REPLACE FUNCTION update_updated_at_column()
+                        RETURNS TRIGGER AS $$
+                        BEGIN
+                            NEW.updated_at = CURRENT_TIMESTAMP;
+                            RETURN NEW;
+                        END;
+                        $$ language 'plpgsql';
+                    """)
+                    
+                    cursor.execute("""
+                        DROP TRIGGER IF EXISTS update_users_updated_at ON users;
+                    """)
+                    cursor.execute("""
+                        CREATE TRIGGER update_users_updated_at 
+                            BEFORE UPDATE ON users
+                            FOR EACH ROW
+                            EXECUTE FUNCTION update_updated_at_column();
+                    """)
+                    logger.info(" Created auto-update triggers")
                     
                     conn.commit()
-                    logger.info(f"Database initialized successfully for tenant: {tenant_id}")
+                    logger.info(f" Database initialized successfully for tenant: {tenant_id}")
 
                     # Initialize forecasting tables and seed default data
                     SchemaManager.initialize_forecasting_tables(tenant_id, database_name)
@@ -140,7 +195,7 @@ class SchemaManager:
         fields: List[FieldDefinition]
     ) -> bool:
         """
-        Create dynamic master data table based on field catalogue.
+        Create dynamic master data table based on field catalogue with FULL AUDIT TRAIL.
         Also creates sales_data table with dynamic target and date columns.
         
         Args:
@@ -193,7 +248,9 @@ class SchemaManager:
                     cursor.execute("DROP TABLE IF EXISTS sales_data CASCADE")
                     cursor.execute("DROP TABLE IF EXISTS master_data CASCADE")
                     
-                    # Build master_data table columns
+                    # ====================================================================
+                    # Build master_data table columns with FULL AUDIT TRAIL
+                    # ====================================================================
                     columns = []
                     columns.append("master_id UUID PRIMARY KEY DEFAULT gen_random_uuid()")
                     
@@ -203,28 +260,39 @@ class SchemaManager:
                         columns.append(f'"{field.field_name}" {sql_type}')
                         field_names.append(f'"{field.field_name}"')
                     
-                    # Add audit columns
+                    # Add FULL AUDIT columns
                     columns.extend([
                         "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                         "created_by VARCHAR(255) NOT NULL",
                         "updated_at TIMESTAMP",
-                        "updated_by VARCHAR(255)"
+                        "updated_by VARCHAR(255)",
+                        "deleted_at TIMESTAMP"
                     ])
-                    
-                    # Add composite unique constraint
-                    composite_fields = field_names
-                    unique_constraint = f"UNIQUE NULLS DISTINCT ({', '.join(composite_fields)})"
-                    columns.append(unique_constraint)
-                    
+
                     # Create master_data table
-                    create_table_sql = f"CREATE TABLE master_data ({', '.join(columns)})"
+                    create_table_sql = f"CREATE TABLE master_data ({', '.join(columns)});"
                     cursor.execute(create_table_sql)
-                    
-                    # Create index
+
+                    # Create composite unique index with NULLS DISTINCT
+                    composite_fields = field_names
                     index_columns = ', '.join(composite_fields)
-                    cursor.execute(f"CREATE INDEX idx_master_data_composite ON master_data ({index_columns})")
+                    cursor.execute(f"CREATE UNIQUE INDEX idx_master_data_composite ON master_data ({index_columns}) NULLS DISTINCT")
+                    cursor.execute(f"CREATE INDEX idx_master_data_deleted ON master_data(deleted_at) WHERE deleted_at IS NULL")
                     
-                    # Create sales_data table with dynamic columns
+                    # Create trigger for auto-updating updated_at
+                    cursor.execute("""
+                        DROP TRIGGER IF EXISTS update_master_data_updated_at ON master_data;
+                    """)
+                    cursor.execute("""
+                        CREATE TRIGGER update_master_data_updated_at 
+                            BEFORE UPDATE ON master_data
+                            FOR EACH ROW
+                            EXECUTE FUNCTION update_updated_at_column();
+                    """)
+                    
+                    # ====================================================================
+                    # Create sales_data table with dynamic columns (PARTIAL AUDIT)
+                    # ====================================================================
                     target_sql_type = target_field.get_sql_type()
                     date_sql_type = date_field.get_sql_type()
                     
@@ -236,6 +304,8 @@ class SchemaManager:
                             "{target_field.field_name}" {target_sql_type} NOT NULL,
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
+                            
+                            -- Audit fields (created only - transactions are immutable)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL
                         )
@@ -254,8 +324,7 @@ class SchemaManager:
                         )
                     """)
                     
-                    # Check if metadata exists (since we don't have tenant_id for unique constraint anymore)
-                    # We assume one row per database
+                    # Check if metadata exists
                     cursor.execute("SELECT 1 FROM field_catalogue_metadata LIMIT 1")
                     if cursor.fetchone():
                         cursor.execute("""
@@ -272,7 +341,7 @@ class SchemaManager:
                     
                     conn.commit()
                     logger.info(
-                        f"Created master_data and sales_data tables in {database_name} with "
+                        f" Created master_data and sales_data tables in {database_name} with "
                         f"target: {target_field.field_name}, date: {date_field.field_name}"
                     )
                     return True
@@ -435,7 +504,7 @@ class SchemaManager:
     @staticmethod
     def initialize_forecasting_tables(tenant_id: str, database_name: str) -> bool:
         """
-        Initialize all forecasting tables in tenant database.
+        Initialize all forecasting tables in tenant database with PROPER AUDIT TRAILS.
         
         Args:
             tenant_id: Tenant identifier
@@ -453,30 +522,40 @@ class SchemaManager:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Read and execute forecasting schema
+                    # Read and execute forecasting schema with audit trails
                     forecasting_schema = """
-                    -- Algorithms table (already exists)
+                    -- ========================================================================
+                    -- Algorithms table (MINIMAL AUDIT - system config)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS algorithms (
                         algorithm_id SERIAL PRIMARY KEY,
                         algorithm_name VARCHAR(255) NOT NULL UNIQUE,
                         default_parameters JSONB NOT NULL,
                         algorithm_type VARCHAR(50) NOT NULL,
                         description TEXT,
+                        
+                        -- Audit fields (minimal - system configuration)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
                         CONSTRAINT check_algorithm_type CHECK (algorithm_type IN ('ML', 'Statistic', 'Hybrid'))
                     );
 
-                    -- Forecast Versions table
+                    -- ========================================================================
+                    -- Forecast Versions table (FULL AUDIT TRAIL)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS forecast_versions (
                         version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         version_name VARCHAR(255) NOT NULL,
                         version_type VARCHAR(50) NOT NULL,
                         is_active BOOLEAN DEFAULT FALSE,
+                        
+                        -- Audit fields (full trail - user configuration)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_by VARCHAR(255),
+                        
                         CONSTRAINT check_version_type CHECK (version_type IN ('Baseline', 'Simulation', 'Final')),
                         CONSTRAINT unique_version_name UNIQUE(version_name)
                     );
@@ -484,9 +563,9 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_versions_active ON forecast_versions(is_active);
                     CREATE INDEX IF NOT EXISTS idx_forecast_versions_type ON forecast_versions(version_type);
 
-                    -- ============================================================================
-                    -- UPDATED: External Factors table with UNIQUE CONSTRAINT
-                    -- ============================================================================
+                    -- ========================================================================
+                    -- External Factors table (FULL AUDIT TRAIL + SOFT DELETE)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS external_factors (
                         factor_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         date DATE NOT NULL,
@@ -494,22 +573,25 @@ class SchemaManager:
                         factor_value DECIMAL(18, 4) NOT NULL,
                         unit VARCHAR(50),
                         source VARCHAR(255),
+                        
+                        -- Audit fields (full trail with soft delete)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_by VARCHAR(255),
                         deleted_at TIMESTAMP,
-                        -- NEW: Unique constraint to prevent duplicates
+                        
                         CONSTRAINT unique_factor_per_date UNIQUE (factor_name, date)
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_external_factors_date ON external_factors(date);
                     CREATE INDEX IF NOT EXISTS idx_external_factors_name ON external_factors(factor_name);
                     CREATE INDEX IF NOT EXISTS idx_external_factors_composite ON external_factors(factor_name, date);
-                    -- NEW: Index for active (non-deleted) factors
                     CREATE INDEX IF NOT EXISTS idx_external_factors_active ON external_factors(factor_name, date) WHERE deleted_at IS NULL;
 
-                    -- Forecast Runs table
+                    -- ========================================================================
+                    -- Forecast Runs table (FULL AUDIT TRAIL)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS forecast_runs (
                         forecast_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
@@ -518,17 +600,19 @@ class SchemaManager:
                         forecast_end DATE NOT NULL,
                         run_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
                         run_progress INTEGER DEFAULT 0,
-                        run_percentage_frequency INTEGER DEFAULT 10,
                         total_records INTEGER DEFAULT 0,
                         processed_records INTEGER DEFAULT 0,
                         failed_records INTEGER DEFAULT 0,
                         error_message TEXT,
+                        
+                        -- Audit fields (full trail)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255),
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_by VARCHAR(255),
                         started_at TIMESTAMP,
                         completed_at TIMESTAMP,
-                        created_by VARCHAR(255),
-                        updated_by VARCHAR(255),
+                        
                         CONSTRAINT check_run_status CHECK (run_status IN ('Pending', 'In-Progress', 'Completed', 'Completed with Errors', 'Failed', 'Cancelled')),
                         CONSTRAINT check_run_progress CHECK (run_progress >= 0 AND run_progress <= 100),
                         CONSTRAINT check_forecast_dates CHECK (forecast_end >= forecast_start)
@@ -539,7 +623,9 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_runs_created ON forecast_runs(created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_forecast_runs_composite ON forecast_runs(run_status, created_at DESC);
 
-                    -- Forecast Algorithms Mapping table
+                    -- ========================================================================
+                    -- Forecast Algorithms Mapping table (PARTIAL AUDIT)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS forecast_algorithms_mapping (
                         mapping_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
@@ -551,9 +637,12 @@ class SchemaManager:
                         started_at TIMESTAMP,
                         completed_at TIMESTAMP,
                         error_message TEXT,
+                        
+                        -- Audit fields (created only)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
                         CONSTRAINT check_execution_status CHECK (execution_status IN ('Pending', 'Running', 'Completed', 'Failed')),
                         CONSTRAINT unique_algo_per_run UNIQUE(forecast_run_id, algorithm_id)
                     );
@@ -562,7 +651,9 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_algo ON forecast_algorithms_mapping(algorithm_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_algo_mapping_status ON forecast_algorithms_mapping(forecast_run_id, execution_status);
 
-                    -- Forecast Results table
+                    -- ========================================================================
+                    -- Forecast Results table (CREATED ONLY - immutable forecast outputs)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS forecast_results (
                         result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
@@ -577,9 +668,11 @@ class SchemaManager:
                         accuracy_metric DECIMAL(5, 2),
                         metric_type VARCHAR(50),
                         metadata JSONB,
+                        
+                        -- Audit fields (created only - results are immutable)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        created_by VARCHAR(255)
+                        created_by VARCHAR(255),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_run ON forecast_results(forecast_run_id);
@@ -588,27 +681,53 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(forecast_run_id, forecast_date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_version ON forecast_results(version_id);
 
-                    -- Forecast Audit Log table
+                    -- ========================================================================
+                    -- Forecast Audit Log table (CREATED ONLY - immutable log entries)
+                    -- ========================================================================
                     CREATE TABLE IF NOT EXISTS forecast_audit_log (
                         audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
                         action VARCHAR(50) NOT NULL,
                         entity_type VARCHAR(100),
                         entity_id UUID,
-                        performed_by VARCHAR(255),
-                        performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         details JSONB,
+                        
+                        -- Audit fields (created only - logs are immutable)
+                        performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        performed_by VARCHAR(255),
+                        
                         CONSTRAINT check_action CHECK (action IN ('Created', 'Updated', 'Deleted', 'Executed', 'Cancelled'))
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_run ON forecast_audit_log(forecast_run_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_timestamp ON forecast_audit_log(performed_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_action ON forecast_audit_log(action);
+                    
+                    -- ========================================================================
+                    -- Create triggers for auto-updating updated_at columns
+                    -- ========================================================================
+                    DROP TRIGGER IF EXISTS update_forecast_versions_updated_at ON forecast_versions;
+                    CREATE TRIGGER update_forecast_versions_updated_at 
+                        BEFORE UPDATE ON forecast_versions
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                    
+                    DROP TRIGGER IF EXISTS update_external_factors_updated_at ON external_factors;
+                    CREATE TRIGGER update_external_factors_updated_at 
+                        BEFORE UPDATE ON external_factors
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                    
+                    DROP TRIGGER IF EXISTS update_forecast_runs_updated_at ON forecast_runs;
+                    CREATE TRIGGER update_forecast_runs_updated_at 
+                        BEFORE UPDATE ON forecast_runs
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
                     """
                     
                     cursor.execute(forecasting_schema)
                     conn.commit()
-                    logger.info(f"Forecasting tables initialized successfully for tenant: {tenant_id}")
+                    logger.info(f" Forecasting tables initialized successfully for tenant: {tenant_id} with full audit trails")
                     return True
                     
                 finally:
@@ -639,22 +758,23 @@ class SchemaManager:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Insert default algorithms with specific IDs to match forecast_execution_service routing
+                    # Insert default algorithms with specific IDs
                     algorithms_data = [
-                        (1, 'ARIMA', '{"order": [1, 1, 1]}', 'Statistic', 'AutoRegressive Integrated Moving Average - Statistical time series forecasting'),
-                        (2, 'Linear Regression', '{}', 'Statistic', 'Linear regression with feature engineering and external factors support'),
-                        (3, 'Polynomial Regression', '{"degree": 2}', 'Statistic', 'Polynomial regression with external factors integration'),
+                        (1, 'ARIMA', '{"order": [1, 1, 1]}', 'Statistic', 'AutoRegressive Integrated Moving Average'),
+                        (2, 'Linear Regression', '{}', 'Statistic', 'Linear regression with feature engineering'),
+                        (3, 'Polynomial Regression', '{"degree": 2}', 'Statistic', 'Polynomial regression'),
                         (4, 'Exponential Smoothing', '{"alpha": 0.3}', 'Statistic', 'Simple exponential smoothing'),
-                        (5, 'Enhanced Exponential Smoothing', '{"alphas": [0.1, 0.3, 0.5]}', 'Statistic', 'Multiple alpha values exponential smoothing with external factors'),
-                        (6, 'Holt Winters', '{"season_length": 12}', 'Statistic', 'Triple exponential smoothing for seasonal data'),
-                        (7, 'Prophet', '{"window": 3}', 'Statistic', 'Facebook Prophet algorithm (placeholder implementation)'),
-                        (8, 'LSTM Neural Network', '{"window": 3}', 'ML', 'Long Short-Term Memory neural network (placeholder implementation)'),
-                        (9, 'XGBoost', '{"n_estimators_list": [50, 100], "learning_rate_list": [0.05, 0.1, 0.2], "max_depth_list": [3, 4, 5]}', 'ML', 'XGBoost-like gradient boosting with hyperparameter tuning and external factors support'),
-                        (10, 'SVR', '{"C_list": [1, 10, 100], "epsilon_list": [0.1, 0.2]}', 'ML', 'Support Vector Regression with hyperparameter tuning and external factors'),
-                        (11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression with hyperparameter tuning and external factors'),
-                        (12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression with hyperparameter tuning and scaling'),
-                        (13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]], "alpha_list": [0.001, 0.01]}', 'ML', 'Multi-layer Perceptron Neural Network with hyperparameter tuning and external factors'),
-                        (999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection - runs all algorithms and selects the best performing one')
+                        (5, 'Enhanced Exponential Smoothing', '{"alphas": [0.1, 0.3, 0.5]}', 'Statistic', 'Multiple alpha exponential smoothing'),
+                        (6, 'Holt Winters', '{"season_length": 12}', 'Statistic', 'Triple exponential smoothing'),
+                        (7, 'Prophet', '{"window": 3}', 'Statistic', 'Facebook Prophet algorithm'),
+                        (8, 'LSTM Neural Network', '{"window": 3}', 'ML', 'Long Short-Term Memory neural network'),
+                        (9, 'XGBoost', '{"n_estimators_list": [50, 100]}', 'ML', 'XGBoost gradient boosting'),
+                        (10, 'SVR', '{"C_list": [1, 10, 100]}', 'ML', 'Support Vector Regression'),
+                        (11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression'),
+                        (12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression'),
+                        (13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]]}', 'ML', 'Multi-layer Perceptron'),
+                        (14, 'Random Forest', '{"n_estimators": 100}', 'ML', 'Random Forest Regression'),
+                        (999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection')
                     ]
 
                     for algo_id, algo_name, default_params, algo_type, description in algorithms_data:
@@ -665,7 +785,7 @@ class SchemaManager:
                         """, (algo_id, algo_name, default_params, algo_type, description))
                     
                     conn.commit()
-                    logger.info(f"Default algorithms seeded for tenant: {tenant_id}")
+                    logger.info(f"✅ Default algorithms seeded for tenant: {tenant_id}")
                     return True
                     
                 finally:
@@ -712,7 +832,7 @@ class SchemaManager:
                         """, (version_name, version_type, is_active, created_by_user))
                     
                     conn.commit()
-                    logger.info(f"Default forecast versions seeded for tenant: {tenant_id}")
+                    logger.info(f"✅ Default forecast versions seeded for tenant: {tenant_id}")
                     return True
                     
                 finally:

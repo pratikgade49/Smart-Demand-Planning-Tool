@@ -1,6 +1,7 @@
 """
 Database connection and management module.
 Handles PostgreSQL connections with one database per tenant architecture.
+UPDATED: Automatically creates master.users table on startup with full audit trail.
 """
 
 from psycopg2 import pool, connect
@@ -67,82 +68,11 @@ class DatabaseManager:
 
                     # Create tables in master database
                     logger.info("Creating master database tables...")
-                    master_conn = connect(
-                        host=settings.DB_HOST,
-                        port=settings.DB_PORT,
-                        user=settings.DB_USER,
-                        password=settings.DB_PASSWORD,
-                        database=master_db_name
-                    )
-                    try:
-                        extras.register_uuid(master_conn)
-                    except Exception:
-                        logger.debug("Could not register uuid adapter on master_conn")
-                    master_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-                    master_cursor = master_conn.cursor()
-
-                    try:
-                        # Create tenants table
-                        master_cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS public.tenants (
-                                tenant_id UUID PRIMARY KEY,
-                                tenant_name VARCHAR(255) NOT NULL,
-                                tenant_identifier VARCHAR(100) UNIQUE NOT NULL,
-                                admin_email VARCHAR(255),
-                                admin_password_hash VARCHAR(255),
-                                database_name VARCHAR(100) UNIQUE NOT NULL,
-                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                status VARCHAR(50) DEFAULT 'ACTIVE',
-                                CONSTRAINT check_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED'))
-                            )
-                        """)
-                        logger.info("Created tenants table")
-
-                        # Create indexes
-                        master_cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_tenants_identifier
-                            ON public.tenants(tenant_identifier)
-                        """)
-                        master_cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_tenants_email
-                            ON public.tenants(admin_email)
-                        """)
-                        master_cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_tenants_database_name
-                            ON public.tenants(database_name)
-                        """)
-                        logger.info("Created indexes on tenants table")
-
-                        # Create audit log table
-                        master_cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS public.audit_log (
-                                log_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                                tenant_id UUID REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
-                                action VARCHAR(50) NOT NULL,
-                                entity_type VARCHAR(100),
-                                entity_id UUID,
-                                performed_by VARCHAR(255),
-                                performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                details JSONB
-                            )
-                        """)
-                        master_cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_audit_tenant
-                            ON public.audit_log(tenant_id)
-                        """)
-                        master_cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_audit_timestamp
-                            ON public.audit_log(performed_at DESC)
-                        """)
-                        logger.info("Created audit_log table")
-
-                        logger.info("Master database initialization completed successfully")
-
-                    finally:
-                        master_cursor.close()
-                        master_conn.close()
+                    self._create_master_tables(master_db_name)
                 else:
                     logger.info(f"Master database '{master_db_name}' already exists")
+                    # Ensure all required tables exist
+                    self._create_master_tables(master_db_name)
 
             finally:
                 cursor.close()
@@ -151,6 +81,188 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to ensure master database exists: {str(e)}")
             raise DatabaseException(f"Master database initialization failed: {str(e)}")
+
+    def _create_master_tables(self, master_db_name: str) -> None:
+        """
+        Create all required tables in master database with FULL audit trails.
+        This includes tenants, users (NEW!), and audit_log tables.
+        """
+        try:
+            master_conn = connect(
+                host=settings.DB_HOST,
+                port=settings.DB_PORT,
+                user=settings.DB_USER,
+                password=settings.DB_PASSWORD,
+                database=master_db_name
+            )
+            try:
+                extras.register_uuid(master_conn)
+            except Exception:
+                logger.debug("Could not register uuid adapter on master_conn")
+            master_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            master_cursor = master_conn.cursor()
+
+            try:
+                # ============================================================================
+                # Create tenants table with FULL AUDIT TRAIL
+                # ============================================================================
+                master_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS public.tenants (
+                        tenant_id UUID PRIMARY KEY,
+                        tenant_name VARCHAR(255) NOT NULL,
+                        tenant_identifier VARCHAR(100) UNIQUE NOT NULL,
+                        admin_email VARCHAR(255),
+                        admin_password_hash VARCHAR(255),
+                        database_name VARCHAR(100) UNIQUE NOT NULL,
+                        status VARCHAR(50) DEFAULT 'ACTIVE',
+                        
+                        -- Audit fields
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255) DEFAULT 'system',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_by VARCHAR(255),
+                        deleted_at TIMESTAMP,
+                        
+                        CONSTRAINT check_status CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED'))
+                    )
+                """)
+                logger.info("Created/verified tenants table with full audit trail")
+
+                # Create indexes on tenants
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tenants_identifier
+                    ON public.tenants(tenant_identifier)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tenants_email
+                    ON public.tenants(admin_email)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tenants_database_name
+                    ON public.tenants(database_name)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tenants_deleted
+                    ON public.tenants(deleted_at) WHERE deleted_at IS NULL
+                """)
+                logger.info("Created indexes on tenants table")
+
+                # ============================================================================
+                # Create users table in master database with FULL AUDIT TRAIL
+                # (metadata/lookup cache - no passwords!)
+                # ============================================================================
+                master_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS public.users (
+                        user_id UUID PRIMARY KEY,
+                        tenant_id UUID NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+                        email VARCHAR(255) NOT NULL,
+                        database_name VARCHAR(100) NOT NULL,
+                        role VARCHAR(50) DEFAULT 'user',
+                        is_active BOOLEAN DEFAULT TRUE,
+                        
+                        -- Audit fields
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255) DEFAULT 'system',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_by VARCHAR(255),
+                        last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
+                        -- Email unique PER TENANT (not globally)
+                        CONSTRAINT unique_email_per_tenant UNIQUE (tenant_id, email),
+                        CONSTRAINT check_master_user_role CHECK (role IN ('admin', 'user', 'manager'))
+                    )
+                """)
+                logger.info(" Created/verified users table in master database with full audit trail")
+
+                # Create indexes on master.users for fast lookups
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_master_users_tenant_email 
+                    ON public.users(tenant_id, email)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_master_users_email 
+                    ON public.users(email)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_master_users_tenant 
+                    ON public.users(tenant_id)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_master_users_active 
+                    ON public.users(is_active) WHERE is_active = TRUE
+                """)
+                logger.info(" Created indexes on master.users table")
+
+                # ============================================================================
+                # Create audit_log table (append-only, created_at + created_by only)
+                # ============================================================================
+                master_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS public.audit_log (
+                        log_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        tenant_id UUID REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+                        action VARCHAR(50) NOT NULL,
+                        entity_type VARCHAR(100),
+                        entity_id UUID,
+                        details JSONB,
+                        
+                        -- Audit fields (created only - immutable logs)
+                        performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        performed_by VARCHAR(255)
+                    )
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_tenant
+                    ON public.audit_log(tenant_id)
+                """)
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+                    ON public.audit_log(performed_at DESC)
+                """)
+                logger.info(" Created/verified audit_log table")
+
+                # ============================================================================
+                # Create trigger for auto-updating updated_at on tenants
+                # ============================================================================
+                master_cursor.execute("""
+                    CREATE OR REPLACE FUNCTION update_updated_at_column()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        NEW.updated_at = CURRENT_TIMESTAMP;
+                        RETURN NEW;
+                    END;
+                    $$ language 'plpgsql';
+                """)
+                
+                master_cursor.execute("""
+                    DROP TRIGGER IF EXISTS update_tenants_updated_at ON public.tenants;
+                """)
+                master_cursor.execute("""
+                    CREATE TRIGGER update_tenants_updated_at 
+                        BEFORE UPDATE ON public.tenants
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                """)
+                
+                master_cursor.execute("""
+                    DROP TRIGGER IF EXISTS update_users_updated_at ON public.users;
+                """)
+                master_cursor.execute("""
+                    CREATE TRIGGER update_users_updated_at 
+                        BEFORE UPDATE ON public.users
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                """)
+                logger.info(" Created auto-update triggers for updated_at columns")
+
+                logger.info(" Master database initialization completed successfully")
+
+            finally:
+                master_cursor.close()
+                master_conn.close()
+
+        except Exception as e:
+            logger.error(f"Failed to create master tables: {str(e)}")
+            raise DatabaseException(f"Failed to create master tables: {str(e)}")
 
     def _initialize_master_pool(self) -> None:
         """Initialize master database connection pool."""
@@ -163,7 +275,7 @@ class DatabaseManager:
                 maxconn=10,
                 dsn=settings.MASTER_DATABASE_URL
             )
-            logger.info("Master database connection pool initialized successfully")
+            logger.info(" Master database connection pool initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize master database pool: {str(e)}")
             raise DatabaseException(f"Master database pool initialization failed: {str(e)}")

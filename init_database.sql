@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
     forecast_end DATE NOT NULL,
     run_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
     run_progress INTEGER DEFAULT 0,
-    run_percentage_frequency INTEGER DEFAULT 10,
+
     total_records INTEGER DEFAULT 0,
     processed_records INTEGER DEFAULT 0,
     failed_records INTEGER DEFAULT 0,

@@ -44,7 +44,7 @@ class DirectForecastExecutionRequest(BaseModel):
     algorithm_id: Optional[int] = Field(default=999, description="Single algorithm ID")
     custom_parameters: Optional[Dict[str, Any]] = None
     algorithms: Optional[List[Dict[str, Any]]] = None
-    run_percentage_frequency: Optional[int] = None
+
 
 
 @router.post("/execute-forecast-async", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
