@@ -398,7 +398,7 @@ class SapIbpIngestionService:
         master_data_mappings: Dict[str, str]
     ) -> int:
         """
-        Insert normalized master data records.
+        Insert normalized master data records with UPSERT logic to prevent duplicates.
 
         Args:
             master_records: List of master data records
@@ -406,12 +406,12 @@ class SapIbpIngestionService:
             master_data_mappings: Mapping from SAP field names to internal field names
 
         Returns:
-            Number of records inserted
+            Number of records inserted/updated
         """
         if not master_records:
             return 0
 
-        inserted_count = 0
+        upserted_count = 0
 
         with self.db_manager.get_tenant_connection(database_name) as conn:
             cursor = conn.cursor()
@@ -424,10 +424,24 @@ class SapIbpIngestionService:
                 # Build placeholders
                 placeholders = ', '.join(['%s'] * len(column_names))
 
-                # Simple insert without ON CONFLICT (no unique constraints on SAP fields)
-                insert_query = f"""
+                # Build conflict target (all mapped SAP fields)
+                conflict_target = ', '.join(f'"{col}"' for col in sap_columns)
+
+                # Build update clause for UPSERT
+                update_fields = []
+                for col in sap_columns:
+                    update_fields.append(f'"{col}" = EXCLUDED."{col}"')
+                update_fields.extend([
+                    'updated_at = EXCLUDED.updated_at',
+                    'updated_by = EXCLUDED.updated_by'
+                ])
+
+                # UPSERT query to handle duplicates based on mapped fields
+                upsert_query = f"""
                     INSERT INTO master_data ({', '.join(f'"{col}"' for col in column_names)})
                     VALUES ({placeholders})
+                    ON CONFLICT ({conflict_target})
+                    DO UPDATE SET {', '.join(update_fields)}
                 """
 
                 now = datetime.now()
@@ -440,22 +454,25 @@ class SapIbpIngestionService:
                             internal_field = master_data_mappings[sap_field]
                             values.append(record[internal_field])
                         values.extend([
-                            now,
-                            record.get('tenant_id', 'system')
+                            record.get('tenant_id', 'system'),  # tenant_id
+                            now,  # created_at
+                            record.get('tenant_id', 'system'),  # created_by
+                            now,  # updated_at
+                            record.get('tenant_id', 'system')   # updated_by
                         ])
 
-                        cursor.execute(insert_query, values)
-                        inserted_count += 1
+                        cursor.execute(upsert_query, values)
+                        upserted_count += 1
 
                     except Exception as e:
-                        logger.warning(f"Failed to insert master data record: {str(e)}", extra={
+                        logger.warning(f"Failed to upsert master data record: {str(e)}", extra={
                             "record": record,
                             "error": str(e)
                         })
                         continue  # Skip this record and continue with next
 
                 conn.commit()
-                logger.info(f"Inserted {inserted_count} records into master_data")
+                logger.info(f"Upserted {upserted_count} records into master_data")
 
             except Exception as e:
                 conn.rollback()
@@ -463,7 +480,7 @@ class SapIbpIngestionService:
             finally:
                 cursor.close()
 
-        return inserted_count
+        return upserted_count
 
     async def _get_field_catalogue_metadata(self, database_name: str) -> tuple[str, str]:
         """
@@ -500,7 +517,7 @@ class SapIbpIngestionService:
         date_field_name: str
     ) -> int:
         """
-        Insert normalized sales data records with master_id references.
+        Insert normalized sales data records with master_id references using UPSERT logic.
 
         Args:
             sales_records: List of sales data records
@@ -509,7 +526,7 @@ class SapIbpIngestionService:
             date_field_name: Name of the date field column
 
         Returns:
-            Number of records inserted
+            Number of records inserted/updated
         """
         if not sales_records:
             return 0
@@ -520,10 +537,17 @@ class SapIbpIngestionService:
             cursor = conn.cursor()
 
             try:
-                # Use dynamic column names for target and date fields
-                insert_query = f"""
+                # Use UPSERT logic to handle duplicates based on unique constraint (master_id, date_field)
+                upsert_query = f"""
                     INSERT INTO sales_data (master_id, "{target_field_name}", "{date_field_name}", uom, unit_price, created_at, created_by)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (master_id, "{date_field_name}")
+                    DO UPDATE SET
+                        "{target_field_name}" = EXCLUDED."{target_field_name}",
+                        uom = EXCLUDED.uom,
+                        unit_price = EXCLUDED.unit_price,
+                        created_at = EXCLUDED.created_at,
+                        created_by = EXCLUDED.created_by
                 """
 
                 now = datetime.now()
@@ -552,7 +576,7 @@ class SapIbpIngestionService:
                             except (ValueError, TypeError):
                                 unit_price = 0.0
 
-                        cursor.execute(insert_query, (
+                        cursor.execute(upsert_query, (
                             record['master_id'],
                             quantity,  # target field value
                             date_value,  # date field value
@@ -564,14 +588,14 @@ class SapIbpIngestionService:
                         inserted_count += 1
 
                     except Exception as e:
-                        logger.warning(f"Failed to insert sales data record: {str(e)}", extra={
+                        logger.warning(f"Failed to upsert sales data record: {str(e)}", extra={
                             "record": record,
                             "error": str(e)
                         })
                         continue  # Skip this record and continue with next
 
                 conn.commit()
-                logger.info(f"Inserted {inserted_count} records into sales_data")
+                logger.info(f"Upserted {inserted_count} records into sales_data")
 
             except Exception as e:
                 conn.rollback()

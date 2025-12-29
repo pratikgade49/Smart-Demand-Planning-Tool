@@ -256,6 +256,60 @@ async def _perform_ingestion(
         })
 
 
+async def _find_existing_master_data(
+    cursor,
+    field_mappings: Dict[str, str],
+    record: Dict[str, Any]
+) -> Optional[str]:
+    """
+    Find existing master_data record by the mapped fields.
+
+    Args:
+        cursor: Database cursor
+        field_mappings: Mapping from SAP fields to DB fields
+        record: SAP record data
+
+    Returns:
+        master_id if found, None otherwise
+    """
+    try:
+        # Build WHERE clause for finding existing record
+        where_conditions = []
+        params = []
+
+        for sap_field, db_field in field_mappings.items():
+            value = record.get(sap_field)
+
+            # Parse dates if needed
+            if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+                if value:
+                    from app.core.sap_ibp_client import parse_ibp_date
+                    parsed_date = parse_ibp_date(value)
+                    if parsed_date:
+                        value = parsed_date.isoformat()
+
+            if value is None:
+                where_conditions.append(f'"{db_field}" IS NULL')
+            else:
+                where_conditions.append(f'"{db_field}" = %s')
+                params.append(value)
+
+        if not where_conditions:
+            return None
+
+        where_clause = ' AND '.join(where_conditions)
+        query = f'SELECT master_id FROM master_data WHERE {where_clause}'
+
+        cursor.execute(query, params)
+        result = cursor.fetchone()
+
+        return result[0] if result else None
+
+    except Exception as e:
+        logger.warning(f"Failed to find existing master data: {str(e)}")
+        return None
+
+
 async def _insert_master_data_with_mapping(
     raw_data: List[Dict[str, Any]],
     field_mappings: Dict[str, str],
@@ -263,8 +317,8 @@ async def _insert_master_data_with_mapping(
     tenant_id: str
 ) -> tuple[int, Dict[tuple, str]]:
     """
-    Insert data into master_data table using field mappings.
-    Returns count of inserted records and a mapping of (sap_field_values) -> master_id.
+    Insert data into master_data table using field mappings with UPSERT logic.
+    Returns count of inserted/updated records and a mapping of (sap_field_values) -> master_id.
 
     Args:
         raw_data: Raw data from SAP IBP
@@ -273,7 +327,7 @@ async def _insert_master_data_with_mapping(
         tenant_id: Tenant identifier
 
     Returns:
-        Tuple of (number of records inserted, dict mapping dimension values to master_id)
+        Tuple of (number of records inserted/updated, dict mapping dimension values to master_id)
     """
     if not raw_data or not field_mappings:
         return 0, {}
@@ -283,7 +337,7 @@ async def _insert_master_data_with_mapping(
     import uuid
 
     db_manager = get_db_manager()
-    inserted_count = 0
+    upserted_count = 0
     master_id_map = {}  # Maps tuple of dimension values to master_id
 
     # Build dynamic insert query based on mappings
@@ -291,7 +345,7 @@ async def _insert_master_data_with_mapping(
     sap_fields = list(field_mappings.keys())
 
     # Add required fields for master_data
-    db_fields.extend(['created_at', 'created_by'])
+    db_fields.extend(['created_at', 'created_by', 'updated_at', 'updated_by'])
     placeholders = ', '.join(['%s'] * len(db_fields))
 
     insert_query = f"""
@@ -304,43 +358,102 @@ async def _insert_master_data_with_mapping(
 
         try:
             now = datetime.now()
-            seen_dimensions = set()  # Track unique dimension combinations to avoid duplicates
 
             for record in raw_data:
                 try:
-                    # Map SAP fields to DB fields
-                    values = []
+                    # Check if record already exists
+                    existing_master_id = await _find_existing_master_data(cursor, field_mappings, record)
+
+                    if existing_master_id:
+                        # Update existing record
+                        update_fields = []
+                        update_values = []
+
+                        for sap_field, db_field in field_mappings.items():
+                            value = record.get(sap_field)
+
+                            # Parse dates if needed
+                            if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+                                if value:
+                                    parsed_date = parse_ibp_date(value)
+                                    if parsed_date:
+                                        value = parsed_date.isoformat()
+
+                            update_fields.append(f'"{db_field}" = %s')
+                            update_values.append(value)
+
+                        # Add audit fields for update
+                        update_fields.extend(['updated_at = %s', 'updated_by = %s'])
+                        update_values.extend([now, tenant_id or 'system'])
+
+                        # Build WHERE clause for update
+                        where_conditions = []
+                        where_values = []
+
+                        for sap_field, db_field in field_mappings.items():
+                            value = record.get(sap_field)
+
+                            # Parse dates if needed
+                            if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+                                if value:
+                                    parsed_date = parse_ibp_date(value)
+                                    if parsed_date:
+                                        value = parsed_date.isoformat()
+
+                            if value is None:
+                                where_conditions.append(f'"{db_field}" IS NULL')
+                            else:
+                                where_conditions.append(f'"{db_field}" = %s')
+                                where_values.append(value)
+
+                        where_clause = ' AND '.join(where_conditions)
+                        update_query = f'UPDATE master_data SET {", ".join(update_fields)} WHERE {where_clause}'
+
+                        cursor.execute(update_query, update_values + where_values)
+
+                        # Use existing master_id for mapping
+                        master_id = existing_master_id
+                    else:
+                        # Insert new record
+                        values = []
+
+                        for sap_field in sap_fields:
+                            value = record.get(sap_field)
+
+                            # Parse dates if needed
+                            if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+                                if value:
+                                    parsed_date = parse_ibp_date(value)
+                                    if parsed_date:
+                                        value = parsed_date.isoformat()
+
+                            values.append(value)
+
+                        # Add audit fields
+                        values.extend([now, tenant_id or 'system', now, tenant_id or 'system'])
+
+                        cursor.execute(insert_query, values)
+
+                        # Get the master_id of the newly inserted record
+                        master_id = await _find_existing_master_data(cursor, field_mappings, record)
+
+                    upserted_count += 1
+
+                    # Build dimension tuple for mapping
                     dimension_tuple = []
-                    
                     for sap_field in sap_fields:
                         value = record.get(sap_field)
-
-                        # Parse dates if needed
                         if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
                             if value:
                                 parsed_date = parse_ibp_date(value)
                                 if parsed_date:
                                     value = parsed_date.isoformat()
-
-                        values.append(value)
                         dimension_tuple.append(value)
 
-                    # Create unique key for this dimension combination
-                    dimension_key = tuple(dimension_tuple)
-
-                    # Only insert if we haven't seen this dimension combination before
-                    if dimension_key not in seen_dimensions:
-                        # Add audit fields
-                        values.extend([now, tenant_id or 'system'])
-
-                        cursor.execute(insert_query, values)
-                        inserted_count += 1
-                        
-                        # Store the mapping - will retrieve after commit
-                        seen_dimensions.add(dimension_key)
+                    master_id_map[tuple(dimension_tuple)] = master_id
 
                 except Exception as e:
-                    logger.warning(f"Failed to insert master data record: {str(e)}", extra={
+                    logger.warning(f"Failed to upsert master data record: {str(e)}", extra={
                         "record": record,
                         "error": str(e),
                         "tenant_id": tenant_id
@@ -348,21 +461,48 @@ async def _insert_master_data_with_mapping(
                     continue  # Skip this record and continue with next
 
             conn.commit()
-            logger.info(f"Inserted {inserted_count} records into master_data")
+            logger.info(f"Upserted {upserted_count} records into master_data")
 
-            # Now fetch the master_id values for all inserted dimensions
-            cursor.execute(f"""
-                SELECT {', '.join(db_fields[:-2])}, master_id 
-                FROM master_data 
-                ORDER BY created_at DESC 
-                LIMIT %s
-            """, (inserted_count,))
-            
-            for row in cursor.fetchall():
-                # Map dimension values to master_id
-                dimension_values = row[:-1]  # All but last column
-                master_id = row[-1]  # Last column is master_id
-                master_id_map[tuple(dimension_values)] = master_id
+            # Now fetch all master_id values for the processed dimensions
+            # Build WHERE clause to get master_ids for all processed records
+            where_conditions = []
+            all_dimension_values = []
+
+            for record in raw_data:
+                dimension_values = []
+                for sap_field in sap_fields:
+                    value = record.get(sap_field)
+                    if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+                        if value:
+                            parsed_date = parse_ibp_date(value)
+                            if parsed_date:
+                                value = parsed_date.isoformat()
+                    dimension_values.append(value)
+
+                # Build WHERE condition for this record
+                record_conditions = []
+                record_params = []
+                for i, field in enumerate(field_mappings.values()):
+                    if dimension_values[i] is None:
+                        record_conditions.append(f'"{field}" IS NULL')
+                    else:
+                        record_conditions.append(f'"{field}" = %s')
+                        record_params.append(dimension_values[i])
+
+                where_conditions.append(f"({' AND '.join(record_conditions)})")
+                all_dimension_values.extend(record_params)
+
+            if where_conditions:
+                where_clause = ' OR '.join(where_conditions)
+                select_fields = ', '.join(f'"{field}"' for field in field_mappings.values())
+                query = f'SELECT {select_fields}, master_id FROM master_data WHERE {where_clause}'
+
+                cursor.execute(query, all_dimension_values)
+
+                for row in cursor.fetchall():
+                    dimension_values = row[:-1]  # All but last column
+                    master_id = row[-1]  # Last column is master_id
+                    master_id_map[tuple(dimension_values)] = master_id
 
         except Exception as e:
             conn.rollback()
@@ -370,7 +510,7 @@ async def _insert_master_data_with_mapping(
         finally:
             cursor.close()
 
-    return inserted_count, master_id_map
+    return upserted_count, master_id_map
 
 
 async def _insert_sales_data_with_mapping(
@@ -382,7 +522,7 @@ async def _insert_sales_data_with_mapping(
     master_id_map: Dict[tuple, str]
 ) -> int:
     """
-    Insert data into sales_data table using field mappings and master_id references.
+    Insert data into sales_data table using field mappings and master_id references with batch upsert.
 
     Args:
         raw_data: Raw data from SAP IBP
@@ -407,19 +547,34 @@ async def _insert_sales_data_with_mapping(
     # Build dynamic insert query based on mappings
     db_fields = list(field_mappings.values())
     sap_fields = list(field_mappings.keys())
-    
+
     # Get master dimension SAP fields for lookup
     master_sap_fields = list(master_mappings.keys())
 
     # Add required fields for sales_data (master_id, date, quantity, uom, created_at, created_by)
     # Insert fields include: master_id, mapped fields, uom, created_at, created_by
     insert_fields = ['master_id'] + db_fields + ['uom', 'created_at', 'created_by']
-    placeholders = ', '.join(['%s'] * len(insert_fields))
 
-    insert_query = f"""
-        INSERT INTO sales_data ({', '.join(insert_fields)})
-        VALUES ({placeholders})
-    """
+    # Identify date and quantity field names for UPSERT conflict resolution
+    date_field = None
+    quantity_field = None
+    for sap_field, db_field in field_mappings.items():
+        if sap_field.lower().endswith('_tstamp') or 'date' in sap_field.lower():
+            date_field = db_field
+        elif sap_field.lower().endswith('qty') or 'quantity' in sap_field.lower():
+            quantity_field = db_field
+
+    # Build UPSERT query to prevent duplicates
+    conflict_target = f"(master_id, {date_field})" if date_field else "(master_id)"
+    update_fields = []
+    if quantity_field:
+        update_fields.append(f'"{quantity_field}" = EXCLUDED."{quantity_field}"')
+    update_fields.extend([
+        'uom = EXCLUDED.uom',
+        'unit_price = EXCLUDED.unit_price',
+        'created_at = EXCLUDED.created_at',
+        'created_by = EXCLUDED.created_by'
+    ])
 
     with db_manager.get_tenant_connection(database_name) as conn:
         cursor = conn.cursor()
@@ -427,34 +582,43 @@ async def _insert_sales_data_with_mapping(
         try:
             now = datetime.now()
 
-            for record in raw_data:
-                try:
-                    # Extract dimension values using master_mappings to lookup master_id
-                    dimension_values = []
-                    for master_sap_field in master_sap_fields:
-                        value = record.get(master_sap_field)
-                        dimension_values.append(value)
-                    
-                    dimension_key = tuple(dimension_values)
-                    
-                    # Look up the master_id for this dimension combination
-                    master_id = master_id_map.get(dimension_key)
-                    
-                    if not master_id:
-                        logger.warning(f"No master_id found for dimensions: {dimension_key}", extra={
-                            "record": record,
-                            "master_sap_fields": master_sap_fields,
-                            "tenant_id": tenant_id
-                        })
-                        continue
+            # Process in batches for better performance
+            batch_size = 1000
+            total_records = len(raw_data)
 
-                    # Create savepoint for this record to handle individual record errors
-                    cursor.execute("SAVEPOINT sp_sales_record")
-                    
+            for batch_start in range(0, total_records, batch_size):
+                batch_end = min(batch_start + batch_size, total_records)
+                batch_data = raw_data[batch_start:batch_end]
+
+                logger.info(f"Processing SAP IBP sales data batch: {batch_start}-{batch_end-1} of {total_records}")
+
+                # Prepare batch data
+                values_list = []
+
+                for record in batch_data:
                     try:
-                        # Now insert sales data with the master_id
+                        # Extract dimension values using master_mappings to lookup master_id
+                        dimension_values = []
+                        for master_sap_field in master_sap_fields:
+                            value = record.get(master_sap_field)
+                            dimension_values.append(value)
+
+                        dimension_key = tuple(dimension_values)
+
+                        # Look up the master_id for this dimension combination
+                        master_id = master_id_map.get(dimension_key)
+
+                        if not master_id:
+                            logger.warning(f"No master_id found for dimensions: {dimension_key}", extra={
+                                "record": record,
+                                "master_sap_fields": master_sap_fields,
+                                "tenant_id": tenant_id
+                            })
+                            continue
+
+                        # Now prepare sales data values
                         values = [master_id]  # Start with master_id
-                        
+
                         for sap_field in sap_fields:
                             value = record.get(sap_field)
 
@@ -480,31 +644,68 @@ async def _insert_sales_data_with_mapping(
                         if not uom_value:
                             uom_value = 'EA'  # Default UOM if UOMTOID is missing or null
                         values.append(uom_value)
-                        
+
                         # Add audit fields
                         values.extend([now, tenant_id or 'system'])
 
-                        cursor.execute(insert_query, values)
-                        cursor.execute("RELEASE SAVEPOINT sp_sales_record")
-                        inserted_count += 1
-                        
-                    except Exception as inner_e:
-                        # Rollback savepoint on individual record error
-                        cursor.execute("ROLLBACK TO SAVEPOINT sp_sales_record")
-                        logger.warning(f"Failed to insert sales data record: {str(inner_e)}", extra={
+                        values_list.append(values)
+
+                    except Exception as e:
+                        logger.warning(f"Failed to prepare sales data record: {str(e)}", extra={
                             "record": record,
-                            "error": str(inner_e),
+                            "error": str(e),
                             "tenant_id": tenant_id
                         })
                         continue
 
-                except Exception as e:
-                    logger.warning(f"Failed to process sales data record: {str(e)}", extra={
-                        "record": record,
-                        "error": str(e),
-                        "tenant_id": tenant_id
-                    })
-                    continue  # Skip this record and continue with next
+                # Execute batch upsert if we have data
+                if values_list:
+                    try:
+                        # Create batch upsert query
+                        placeholders = ', '.join(['%s'] * len(insert_fields))
+                        value_placeholders = ', '.join([f"({placeholders})"] * len(values_list))
+
+                        batch_upsert_query = f"""
+                            INSERT INTO sales_data ({', '.join(insert_fields)})
+                            VALUES {value_placeholders}
+                            ON CONFLICT {conflict_target}
+                            DO UPDATE SET {', '.join(update_fields)}
+                        """
+
+                        # Flatten the values list
+                        flattened_values = [item for sublist in values_list for item in sublist]
+
+                        cursor.execute(batch_upsert_query, flattened_values)
+                        inserted_count += len(values_list)
+
+                        logger.debug(f"Batch upsert successful: {len(values_list)} records")
+
+                    except Exception as batch_e:
+                        logger.warning(f"Batch upsert failed, falling back to individual inserts: {str(batch_e)}")
+
+                        # Fall back to individual upserts
+                        for values in values_list:
+                            try:
+                                cursor.execute("SAVEPOINT sp_sales_record")
+
+                                single_query = f"""
+                                    INSERT INTO sales_data ({', '.join(insert_fields)})
+                                    VALUES ({placeholders})
+                                    ON CONFLICT {conflict_target}
+                                    DO UPDATE SET {', '.join(update_fields)}
+                                """
+
+                                cursor.execute(single_query, values)
+                                cursor.execute("RELEASE SAVEPOINT sp_sales_record")
+                                inserted_count += 1
+
+                            except Exception as single_e:
+                                cursor.execute("ROLLBACK TO SAVEPOINT sp_sales_record")
+                                logger.warning(f"Failed to insert individual sales data record: {str(single_e)}", extra={
+                                    "error": str(single_e),
+                                    "tenant_id": tenant_id
+                                })
+                                continue
 
             conn.commit()
             logger.info(f"Inserted {inserted_count} records into sales_data")

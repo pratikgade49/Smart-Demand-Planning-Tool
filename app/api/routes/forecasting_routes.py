@@ -71,12 +71,35 @@ async def execute_forecast_async(
     try:
         # Get current resources for logging
         current_resources = ResourceMonitor.get_system_resources()
-        
+
         logger.info(
             f"Async forecast execution requested for tenant {tenant_data['tenant_id']}",
             extra={'start_resources': current_resources}
         )
-        
+
+        # Validate algorithm parameters before creating job
+        algorithms_to_validate = []
+        if request_data.get('algorithms') and len(request_data.get('algorithms', [])) > 0:
+            algorithms_to_validate = request_data['algorithms']
+        elif request_data.get('algorithm_id') is not None:
+            algorithms_to_validate = [{
+                'algorithm_id': request_data['algorithm_id'],
+                'custom_parameters': request_data.get('custom_parameters')
+            }]
+        else:
+            algorithms_to_validate = [{'algorithm_id': 999}]  # Best Fit
+
+        for algo in algorithms_to_validate:
+            if algo['algorithm_id'] != 999:  # Skip validation for Best Fit
+                validation_result = AlgorithmParametersService.validate_parameters(
+                    algorithm_id=algo['algorithm_id'],
+                    custom_parameters=algo.get('custom_parameters')
+                )
+                if not validation_result.is_valid:
+                    error_msg = f"Invalid parameters for algorithm {algo['algorithm_id']}: {'; '.join(validation_result.errors)}"
+                    logger.error(f"Parameter validation failed: {error_msg}")
+                    raise ValidationException(error_msg)
+
         # Create forecast job record
         job_result = ForecastJobService.create_job(
             tenant_id=tenant_data['tenant_id'],

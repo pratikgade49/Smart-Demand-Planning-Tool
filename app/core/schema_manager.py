@@ -273,10 +273,10 @@ class SchemaManager:
                     create_table_sql = f"CREATE TABLE master_data ({', '.join(columns)});"
                     cursor.execute(create_table_sql)
 
-                    # Create composite unique index with NULLS DISTINCT
+                    # Create composite unique constraint for ON CONFLICT support
                     composite_fields = field_names
-                    index_columns = ', '.join(composite_fields)
-                    cursor.execute(f"CREATE UNIQUE INDEX idx_master_data_composite ON master_data ({index_columns}) NULLS DISTINCT")
+                    constraint_columns = ', '.join(composite_fields)
+                    cursor.execute(f'ALTER TABLE master_data ADD CONSTRAINT master_data_composite_unique UNIQUE ({constraint_columns})')
                     cursor.execute(f"CREATE INDEX idx_master_data_deleted ON master_data(deleted_at) WHERE deleted_at IS NULL")
                     
                     # Create trigger for auto-updating updated_at
@@ -304,13 +304,16 @@ class SchemaManager:
                             "{target_field.field_name}" {target_sql_type} NOT NULL,
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
-                            
+
                             -- Audit fields (created only - transactions are immutable)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL
                         )
                     """)
-                    
+
+                    # Add unique constraint for batch upsert functionality
+                    cursor.execute(f'ALTER TABLE sales_data ADD CONSTRAINT sales_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
+
                     # Create indexes on sales_data
                     cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_sales_data_master_id ON sales_data(master_id)')

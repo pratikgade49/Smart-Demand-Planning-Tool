@@ -62,7 +62,18 @@ class ForecastExecutionService:
                     order = validated_params['order']
                     if not isinstance(order, list) or len(order) != 3:
                         raise ValidationException("ARIMA order must be a list of 3 integers")
-                    validated_params['order'] = [max(0, int(x)) for x in order]
+                    validated_params['order'] = [max(0, min(10, int(x))) for x in order]
+                
+                # seasonal_order: [P, D, Q, s]
+                if 'seasonal_order' in validated_params:
+                    s_order = validated_params['seasonal_order']
+                    if not isinstance(s_order, list) or len(s_order) != 4:
+                        raise ValidationException("ARIMA seasonal_order must be a list of 4 integers")
+                    validated_params['seasonal_order'] = [max(0, min(12, int(x))) for x in s_order]
+
+            elif algorithm_id == 2:  # Linear Regression
+                if 'fit_intercept' in validated_params:
+                    validated_params['fit_intercept'] = bool(validated_params['fit_intercept'])
 
             elif algorithm_id == 3:  # Polynomial Regression
                 # degree: 1-5
@@ -70,6 +81,32 @@ class ForecastExecutionService:
                     degree = validated_params['degree']
                     validated_params['degree'] = max(1, min(5, int(degree)))
                     logger.info(f"Validated polynomial degree: {validated_params['degree']}")
+
+            elif algorithm_id == 7:  # Prophet
+                if 'window' in validated_params:
+                    validated_params['window'] = max(1, min(30, int(validated_params['window'])))
+                if 'changepoint_prior_scale' in validated_params:
+                    validated_params['changepoint_prior_scale'] = max(0.001, min(0.5, float(validated_params['changepoint_prior_scale'])))
+
+            elif algorithm_id == 12:  # Gaussian Process
+                if 'alpha' in validated_params:
+                    validated_params['alpha'] = max(1e-15, min(1.0, float(validated_params['alpha'])))
+
+            elif algorithm_id == 13:  # MLP Neural Network
+                if 'alpha_list' in validated_params:
+                    alphas = validated_params['alpha_list']
+                    if isinstance(alphas, list):
+                        validated_params['alpha_list'] = [max(0.0001, min(1.0, float(a))) for a in alphas]
+                if 'hidden_layer_sizes_list' in validated_params:
+                    configs = validated_params['hidden_layer_sizes_list']
+                    if isinstance(configs, list):
+                        new_configs = []
+                        for config in configs:
+                            if isinstance(config, list):
+                                new_configs.append([max(1, min(100, int(x))) for x in config])
+                            else:
+                                new_configs.append([max(1, min(100, int(config)))] if isinstance(config, (int, float)) else [10])
+                        validated_params['hidden_layer_sizes_list'] = new_configs
 
             elif algorithm_id == 4:  # Exponential Smoothing
                 # alphas: list of floats 0.0-1.0
@@ -107,7 +144,11 @@ class ForecastExecutionService:
                 if 'gamma' in validated_params:
                     validated_params['gamma'] = max(0.0, min(1.0, float(validated_params['gamma'])))
                 if 'season_length' in validated_params:
-                    validated_params['season_length'] = max(2, int(validated_params['season_length']))
+                    validated_params['season_length'] = max(2, min(365, int(validated_params['season_length'])))
+
+            elif algorithm_id == 8:  # LSTM
+                if 'window' in validated_params:
+                    validated_params['window'] = max(1, min(50, int(validated_params['window'])))
 
             elif algorithm_id == 9:  # XGBoost
                 # n_estimators: 10-1000
@@ -136,7 +177,7 @@ class ForecastExecutionService:
             elif algorithm_id == 11:  # KNN
                 # n_neighbors: positive integer
                 if 'n_neighbors' in validated_params:
-                    validated_params['n_neighbors'] = max(1, int(validated_params['n_neighbors']))
+                    validated_params['n_neighbors'] = max(1, min(50, int(validated_params['n_neighbors'])))
 
             elif algorithm_id == 14:  # Random Forest
                 # n_estimators: 10-500

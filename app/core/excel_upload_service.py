@@ -226,11 +226,11 @@ class ExcelUploadService:
         field_catalogue: Dict[str, Any],
         user_email: str
     ) -> Tuple[int, int, List[Dict[str, Any]]]:
-        """Process mixed data upload with comprehensive logging."""
+        """Process mixed data upload with comprehensive logging and batch upsert."""
         log_operation_start(logger, "process_mixed_data_upload", tenant_id=tenant_id, total_rows=len(df))
-        
+
         logger.perf.log_performance_snapshot("Before processing upload")
-        
+
         start_time = time.time()
         db_manager = get_db_manager()
         success_count = 0
@@ -252,53 +252,78 @@ class ExcelUploadService:
         with db_manager.get_tenant_connection(database_name) as conn:
             cursor = conn.cursor()
             try:
-                for idx, row in df.iterrows():
-                    savepoint_name = f"row_{idx}"
-                    
+                # Process in batches for better performance
+                batch_size = 1000
+                total_rows = len(df)
+
+                for batch_start in range(0, total_rows, batch_size):
+                    batch_end = min(batch_start + batch_size, total_rows)
+                    batch_df = df.iloc[batch_start:batch_end]
+
+                    logger.info(f"Processing batch {batch_start//batch_size + 1}: rows {batch_start}-{batch_end-1}")
+
                     try:
-                        cursor.execute(f"SAVEPOINT {savepoint_name}")
-                        
-                        row_dict = row.to_dict()
-                        
-                        # ✅ FIXED: Pass field_names_mapping
-                        ExcelUploadService.process_single_row(
+                        batch_success, batch_errors = ExcelUploadService.process_batch_upsert(
                             cursor=cursor,
                             tenant_id=tenant_id,
-                            row_dict=row_dict,
+                            batch_df=batch_df,
                             master_data_mapping=master_data_mapping,
                             sales_mapping=sales_mapping,
-                            field_names_mapping=field_names_mapping,  # ✅ NEW PARAMETER
+                            field_names_mapping=field_names_mapping,
                             field_catalogue=field_catalogue,
-                            user_email=user_email
+                            user_email=user_email,
+                            batch_start=batch_start
                         )
-                        
-                        cursor.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-                        success_count += 1
-                        
-                        if success_count % 500 == 0:
-                            logger.info(f"Progress: {success_count}/{len(df)} rows processed")
+
+                        success_count += batch_success
+                        failed_count += len(batch_errors)
+                        errors.extend(batch_errors)
+
+                        if success_count % 5000 == 0:
+                            logger.info(f"Progress: {success_count}/{total_rows} rows processed")
                             logger.perf.log_memory_usage(f"After {success_count} rows")
 
                     except Exception as e:
-                        cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
-                        cursor.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-                        
-                        failed_count += 1
-                        error_msg = str(e)
-                        errors.append({'row': idx + 2, 'error': error_msg})
-                        
-                        if failed_count <= 10:
-                            logger.error(f"Error processing row {idx + 2}: {error_msg}")
-                        elif failed_count == 11:
-                            logger.warning("More than 10 errors encountered, suppressing detailed error logs")
+                        logger.error(f"Batch processing failed for rows {batch_start}-{batch_end-1}: {str(e)}")
+                        # Fall back to individual processing for this batch
+                        for idx, row in batch_df.iterrows():
+                            try:
+                                cursor.execute(f"SAVEPOINT row_{idx}")
+
+                                row_dict = row.to_dict()
+
+                                ExcelUploadService.process_single_row(
+                                    cursor=cursor,
+                                    tenant_id=tenant_id,
+                                    row_dict=row_dict,
+                                    master_data_mapping=master_data_mapping,
+                                    sales_mapping=sales_mapping,
+                                    field_names_mapping=field_names_mapping,
+                                    field_catalogue=field_catalogue,
+                                    user_email=user_email
+                                )
+
+                                cursor.execute(f"RELEASE SAVEPOINT row_{idx}")
+                                success_count += 1
+
+                            except Exception as row_e:
+                                cursor.execute(f"ROLLBACK TO SAVEPOINT row_{idx}")
+                                cursor.execute(f"RELEASE SAVEPOINT row_{idx}")
+
+                                failed_count += 1
+                                error_msg = str(row_e)
+                                errors.append({'row': idx + 2, 'error': error_msg})
+
+                                if failed_count <= 10:
+                                    logger.error(f"Error processing row {idx + 2}: {error_msg}")
 
                 conn.commit()
-                
+
                 duration_ms = (time.time() - start_time) * 1000
                 logger.info(f"Upload processing complete: {success_count} success, {failed_count} failed, {duration_ms:.2f}ms")
                 logger.perf.log_performance_snapshot("After processing upload")
-                
-                log_operation_end(logger, "process_mixed_data_upload", success=True, 
+
+                log_operation_end(logger, "process_mixed_data_upload", success=True,
                                 success_count=success_count, failed_count=failed_count)
 
             except Exception as e:
@@ -346,11 +371,18 @@ class ExcelUploadService:
         
         sales_id = str(uuid.uuid4())
         
-        # ✅ FIXED: Build dynamic INSERT query
+        # ✅ FIXED: Build dynamic UPSERT query to replace existing records
         cursor.execute(f"""
             INSERT INTO sales_data
             (sales_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (master_id, "{date_field}")
+            DO UPDATE SET
+                "{target_field}" = EXCLUDED."{target_field}",
+                uom = EXCLUDED.uom,
+                unit_price = EXCLUDED.unit_price,
+                created_at = EXCLUDED.created_at,
+                created_by = EXCLUDED.created_by
         """, (
             sales_id,
             master_id,
@@ -540,6 +572,141 @@ class ExcelUploadService:
         new_master_id = cursor.fetchone()[0]
         logger.debug(f"Created new master record: {new_master_id} with {len(master_data)} fields")
         return new_master_id
+
+    @staticmethod
+    def process_batch_upsert(
+        cursor,
+        tenant_id: str,
+        batch_df: pd.DataFrame,
+        master_data_mapping: Dict[str, str],
+        sales_mapping: Dict[str, str],
+        field_names_mapping: Dict[str, str],
+        field_catalogue: Dict[str, Any],
+        user_email: str,
+        batch_start: int
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        """Process a batch of rows using batch upsert operations for better performance."""
+        success_count = 0
+        errors = []
+
+        # Get dynamic field names
+        target_field = field_names_mapping['target_field']
+        date_field = field_names_mapping['date_field']
+
+        # Prepare batch data structures
+        master_records = []
+        sales_records = []
+        master_id_map = {}  # Maps dimension tuples to master_ids
+
+        # Process each row in the batch
+        for idx, row in batch_df.iterrows():
+            try:
+                row_dict = row.to_dict()
+
+                # Extract master data
+                master_data = ExcelUploadService.extract_master_data(
+                    row_dict, master_data_mapping, field_catalogue
+                )
+
+                # Extract sales data
+                sales_data = ExcelUploadService.extract_sales_data(
+                    row_dict, sales_mapping
+                )
+
+                # Create dimension key for master record lookup
+                unique_key_fields = set()
+                for field in field_catalogue.get('fields', []):
+                    if field.get('is_unique_key'):
+                        unique_key_fields.add(field['field_name'])
+
+                dimension_values = tuple(master_data.get(field) for field in sorted(unique_key_fields))
+                master_records.append((dimension_values, master_data))
+                sales_records.append((dimension_values, sales_data, idx))
+
+            except Exception as e:
+                errors.append({'row': batch_start + idx + 2, 'error': str(e)})
+                continue
+
+        # Batch process master data first
+        for dimension_key, master_data in master_records:
+            if dimension_key not in master_id_map:
+                master_id = ExcelUploadService.find_or_create_master_record(
+                    cursor, tenant_id, master_data, user_email, field_catalogue
+                )
+                master_id_map[dimension_key] = master_id
+
+        # Now batch upsert sales data
+        if sales_records:
+            # Build batch upsert query for sales_data
+            values_list = []
+            now = datetime.utcnow()
+
+            for dimension_key, sales_data, idx in sales_records:
+                master_id = master_id_map.get(dimension_key)
+                if not master_id:
+                    errors.append({'row': batch_start + idx + 2, 'error': 'Master record not found'})
+                    continue
+
+                sales_id = str(uuid.uuid4())
+                values_list.append((
+                    sales_id,
+                    master_id,
+                    sales_data['date'],
+                    sales_data['quantity'],
+                    sales_data['uom'],
+                    sales_data.get('unit_price'),
+                    now,
+                    user_email
+                ))
+
+            if values_list:
+                # Create batch upsert query
+                placeholders = ', '.join(['%s'] * 8)
+                value_placeholders = ', '.join([f"({placeholders})"] * len(values_list))
+
+                batch_upsert_query = f"""
+                    INSERT INTO sales_data
+                    (sales_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
+                    VALUES {value_placeholders}
+                    ON CONFLICT (master_id, "{date_field}")
+                    DO UPDATE SET
+                        "{target_field}" = EXCLUDED."{target_field}",
+                        uom = EXCLUDED.uom,
+                        unit_price = EXCLUDED.unit_price,
+                        created_at = EXCLUDED.created_at,
+                        created_by = EXCLUDED.created_by
+                """
+
+                # Flatten the values list
+                flattened_values = [item for sublist in values_list for item in sublist]
+
+                try:
+                    cursor.execute(batch_upsert_query, flattened_values)
+                    success_count = len(values_list)
+                except Exception as e:
+                    logger.error(f"Batch upsert failed: {str(e)}")
+                    # Fall back to individual upserts for this batch
+                    for values in values_list:
+                        try:
+                            single_query = f"""
+                                INSERT INTO sales_data
+                                (sales_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (master_id, "{date_field}")
+                                DO UPDATE SET
+                                    "{target_field}" = EXCLUDED."{target_field}",
+                                    uom = EXCLUDED.uom,
+                                    unit_price = EXCLUDED.unit_price,
+                                    created_at = EXCLUDED.created_at,
+                                    created_by = EXCLUDED.created_by
+                            """
+                            cursor.execute(single_query, values)
+                            success_count += 1
+                        except Exception as single_e:
+                            errors.append({'row': batch_start + idx + 2, 'error': str(single_e)})
+
+        return success_count, errors
+
     @staticmethod
     def upload_excel_file(
         tenant_id: str,

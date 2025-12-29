@@ -232,6 +232,8 @@ from app.core.forecast_utils import (
 from app.core.forecasting_service import ForecastingService
 from app.core.forecast_execution_service import ForecastExecutionService
 from app.core.resource_monitor import ResourceMonitor, performance_tracker
+from app.core.algorithm_parameters import AlgorithmParametersService
+from app.core.exceptions import ValidationException
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -342,7 +344,19 @@ class BackgroundForecastExecutor:
                     ]
                 else:
                     algorithms_to_execute = [AlgorithmConfig(algorithm_id=999, execution_order=1)]
-                
+
+                # Validate algorithm parameters
+                for algo_config in algorithms_to_execute:
+                    if algo_config.algorithm_id != 999:  # Skip validation for Best Fit
+                        validation_result = AlgorithmParametersService.validate_parameters(
+                            algorithm_id=algo_config.algorithm_id,
+                            custom_parameters=algo_config.custom_parameters
+                        )
+                        if not validation_result.is_valid:
+                            error_msg = f"Invalid parameters for algorithm {algo_config.algorithm_id}: {'; '.join(validation_result.errors)}"
+                            logger.error(f"Job {job_id}: {error_msg}")
+                            raise ValidationException(error_msg)
+
                 logger.info(f"Job {job_id}: Executing {len(algorithms_to_execute)} algorithm(s)")
                 
                 # Create a modified request object for processing

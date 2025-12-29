@@ -32,13 +32,31 @@ class AlgorithmParametersService:
                     list_item_type="int",
                     min_value=0,
                     max_value=10
+                ),
+                ParameterDefinition(
+                    name="seasonal_order",
+                    type="list",
+                    description="ARIMA seasonal order (P, D, Q, s)",
+                    required=False,
+                    default_value=[0, 0, 0, 0],
+                    list_item_type="int",
+                    min_value=0,
+                    max_value=12
                 )
             ]
         },
         2: {  # Linear Regression
             "algorithm_name": "Linear Regression",
             "description": "Simple linear regression forecasting",
-            "parameters": []
+            "parameters": [
+                ParameterDefinition(
+                    name="fit_intercept",
+                    type="bool",
+                    description="Whether to calculate the intercept for this model",
+                    required=False,
+                    default_value=True
+                )
+            ]
         },
         3: {  # Polynomial Regression
             "algorithm_name": "Polynomial Regression",
@@ -113,6 +131,15 @@ class AlgorithmParametersService:
                     default_value=3,
                     min_value=1,
                     max_value=30
+                ),
+                ParameterDefinition(
+                    name="changepoint_prior_scale",
+                    type="float",
+                    description="Flexibility of the automatic changepoint selection",
+                    required=False,
+                    default_value=0.05,
+                    min_value=0.001,
+                    max_value=0.5
                 )
             ]
         },
@@ -212,7 +239,17 @@ class AlgorithmParametersService:
         12: {  # Gaussian Process
             "algorithm_name": "Gaussian Process",
             "description": "Gaussian Process regression",
-            "parameters": []
+            "parameters": [
+                ParameterDefinition(
+                    name="alpha",
+                    type="float",
+                    description="Value added to the diagonal of the kernel matrix during fitting",
+                    required=False,
+                    default_value=1e-10,
+                    min_value=1e-15,
+                    max_value=1.0
+                )
+            ]
         },
         13: {  # Neural Network
             "algorithm_name": "Neural Network",
@@ -365,6 +402,17 @@ class AlgorithmParametersService:
                         if param.max_value is not None and item > param.max_value:
                             result.is_valid = False
                             result.errors.append(f"List item {i} in '{param_name}' must be <= {param.max_value}")
+                elif param.list_item_type == 'list':
+                    for i, sublist in enumerate(param_value):
+                        if isinstance(sublist, list):
+                            for j, item in enumerate(sublist):
+                                if isinstance(item, (int, float)):
+                                    if param.min_value is not None and item < param.min_value:
+                                        result.is_valid = False
+                                        result.errors.append(f"Item {j} in list {i} of '{param_name}' must be >= {param.min_value}")
+                                    if param.max_value is not None and item > param.max_value:
+                                        result.is_valid = False
+                                        result.errors.append(f"Item {j} in list {i} of '{param_name}' must be <= {param.max_value}")
 
             # Allowed values validation
             if param.allowed_values is not None:
