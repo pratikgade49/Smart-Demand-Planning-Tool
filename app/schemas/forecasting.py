@@ -56,8 +56,11 @@ class ForecastRunCreate(BaseModel):
     forecast_filters: Optional[Dict[str, Any]] = None
     forecast_start: str = Field(..., description="Start date in YYYY-MM-DD format")
     forecast_end: str = Field(..., description="End date in YYYY-MM-DD format")
+    history_start: Optional[str] = Field(None, description="Start date of historic data to use (YYYY-MM-DD)")
+    history_end: Optional[str] = Field(None, description="End date of historic data to use (YYYY-MM-DD)")
 
     algorithms: List[AlgorithmMapping] = Field(..., min_items=1)
+
 
 class ForecastRunResponse(BaseModel):
     forecast_run_id: str
@@ -66,6 +69,8 @@ class ForecastRunResponse(BaseModel):
     forecast_filters: Optional[Dict[str, Any]] = None
     forecast_start: str
     forecast_end: str
+    history_start: Optional[str] = None
+    history_end: Optional[str] = None
     run_status: str
     run_progress: int
     total_records: Optional[int] = None

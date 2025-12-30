@@ -89,7 +89,9 @@ def _process_entity_forecast(
             aggregation_level=aggregation_level,
             interval=interval,
             filters=base_filters,
-            specific_combination=entity_filter if entity_filter else None
+            specific_combination=entity_filter if entity_filter else None,
+            history_start=getattr(request_data, 'history_start', None),
+            history_end=getattr(request_data, 'history_end', None)
         )
 
         logger.info(f"Entity {entity_name}: {len(historical_data)} historical records")

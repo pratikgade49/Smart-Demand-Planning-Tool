@@ -364,6 +364,8 @@ class BackgroundForecastExecutor:
                     def __init__(self, data):
                         self.forecast_filters = data.get('forecast_filters', {})
                         self.version_id = data.get('version_id')
+                        self.history_start = data.get('history_start')
+                        self.history_end = data.get('history_end')
                 
                 modified_request = ModifiedRequest(request_data)
                 

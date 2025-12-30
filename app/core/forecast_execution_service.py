@@ -1507,7 +1507,6 @@ class ForecastExecutionService:
             'period', 'total_quantity', 'quantity', 'date',
             'transaction_count', 'avg_price', 'uom'
         }
-        
         # Exclude any column that could be a master data aggregation field
         # These would typically be string/categorical columns used for grouping
         external_factors = []

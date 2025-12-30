@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
     forecast_filters JSONB,
     forecast_start DATE NOT NULL,
     forecast_end DATE NOT NULL,
+    history_start DATE,
+    history_end DATE,
     run_status VARCHAR(50) NOT NULL DEFAULT 'Pending',
     run_progress INTEGER DEFAULT 0,
 

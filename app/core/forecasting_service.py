@@ -197,15 +197,17 @@ class ForecastingService:
                     cursor.execute("""
                         INSERT INTO forecast_runs
                         (forecast_run_id, version_id, forecast_filters,
-                         forecast_start, forecast_end, run_status,
-                         created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         forecast_start, forecast_end, history_start, history_end,
+                         run_status, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         forecast_run_id,
                         str(request.version_id),
                         Json(request.forecast_filters) if request.forecast_filters is not None else None,
                         request.forecast_start,
                         request.forecast_end,
+                        request.history_start,
+                        request.history_end,
                         "Pending",
                         user_email
                     ))
@@ -286,7 +288,8 @@ class ForecastingService:
                     # Get forecast run
                     cursor.execute("""
                         SELECT forecast_run_id, tenant_id, version_id, forecast_filters,
-                               forecast_start, forecast_end, run_status, run_progress,
+                               forecast_start, forecast_end, history_start, history_end,
+                               run_status, run_progress,
                                total_records, processed_records,
                                failed_records, error_message, created_at, updated_at,
                                started_at, completed_at, created_by
@@ -298,8 +301,8 @@ class ForecastingService:
                     if not result:
                         raise NotFoundException("Forecast Run", forecast_run_id)
 
-                    (run_id, ten_id, version_id, filters, start, end, status,
-                     progress, total, processed, failed, error_msg,
+                    (run_id, ten_id, version_id, filters, start, end, hist_start, hist_end,
+                     status, progress, total, processed, failed, error_msg,
                      created_at, updated_at, started_at, completed_at, created_by) = result
 
                     # Get algorithm mappings
@@ -336,6 +339,8 @@ class ForecastingService:
                         "forecast_filters": filters,
                         "forecast_start": start.isoformat() if start else None,
                         "forecast_end": end.isoformat() if end else None,
+                        "history_start": hist_start.isoformat() if hist_start else None,
+                        "history_end": hist_end.isoformat() if hist_end else None,
                         "run_status": status,
                         "run_progress": progress,
                         "total_records": total,
@@ -514,7 +519,9 @@ class ForecastingService:
         aggregation_level: str,
         interval: str,
         filters: Optional[Dict[str, Any]] = None,
-        specific_combination: Optional[Dict[str, Any]] = None
+        specific_combination: Optional[Dict[str, Any]] = None,
+        history_start: Optional[str] = None,
+        history_end: Optional[str] = None
     ) -> Tuple[pd.DataFrame, str]:
         """
         Prepare aggregated historical data for forecasting.
@@ -527,6 +534,8 @@ class ForecastingService:
             filters: Base filters to apply
             specific_combination: If provided, filter to this specific aggregation combination
                                  (e.g., {"customer": "CUST001", "location": "LOC001"})
+            history_start: Start date for historical data
+            history_end: End date for historical data
         
         Returns:
             Tuple of (DataFrame with aggregated data, date_field_name)
@@ -569,6 +578,15 @@ class ForecastingService:
                 for col, val in specific_combination.items():
                     filter_clause += f' AND m."{col}" = %s'
                     filter_params.append(val)
+
+            # ✅ NEW: Add history date range filters if provided
+            if history_start:
+                filter_clause += f' AND s."{date_field_name}" >= %s'
+                filter_params.append(history_start)
+            
+            if history_end:
+                filter_clause += f' AND s."{date_field_name}" <= %s'
+                filter_params.append(history_end)
 
             with db_manager.get_tenant_connection(database_name) as conn:
                 # Build SQL based on interval - using DYNAMIC field names

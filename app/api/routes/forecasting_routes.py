@@ -41,6 +41,8 @@ class DirectForecastExecutionRequest(BaseModel):
     forecast_filters: Dict[str, Any]
     forecast_start: str = Field(..., description="Start date in YYYY-MM-DD format")
     forecast_end: str = Field(..., description="End date in YYYY-MM-DD format")
+    history_start: Optional[str] = Field(None, description="Start date of historic data to use (YYYY-MM-DD)")
+    history_end: Optional[str] = Field(None, description="End date of historic data to use (YYYY-MM-DD)")
     algorithm_id: Optional[int] = Field(default=999, description="Single algorithm ID")
     custom_parameters: Optional[Dict[str, Any]] = None
     algorithms: Optional[List[Dict[str, Any]]] = None
