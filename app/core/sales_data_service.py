@@ -379,14 +379,11 @@ class SalesDataService:
     @staticmethod
     def get_sales_records_ui(
         database_name: str,
-        from_date: Optional[date] = None,
-        to_date: Optional[date] = None,
-        page: int = 1,
-        page_size: int = 100
-    ) -> List[Dict[str, Any]]:
+        request: SalesDataQueryRequest
+    ) -> Dict[str, Any]:
         """
-        Specialized method for UI to retrieve sales records with a specific query.
-        Defaults to requested filters but allows override.
+        Specialized method for UI to retrieve sales records with pagination based on master_id.
+        Supports filtering on master data and date range on sales data.
         """
         db_manager = get_db_manager()
         try:
@@ -396,48 +393,105 @@ class SalesDataService:
                 # Get dynamic field names from field catalogue metadata
                 date_field, target_field = SalesDataService._get_field_names(cursor)
 
-                # Use provided dates or defaults from requested query
-                start_date = from_date if from_date else '2025-01-01'
-                end_date = to_date if to_date else '2026-03-31'
+                # Use provided dates or defaults
+                start_date = request.from_date if request.from_date else '2025-01-01'
+                end_date = request.to_date if request.to_date else '2026-03-31'
                 
-                # Calculate offset based on requested query (OFFSET 1) and pagination
-                # If page is 1, we use OFFSET 1 as requested. If page > 1, we continue from there.
-                requested_offset = 1
-                offset = requested_offset + (page - 1) * page_size
+                # Build master_data query with filters
+                master_where = "WHERE 1=1"
+                master_params = []
+                if request.filters:
+                    for f in request.filters:
+                        if f.values:
+                            placeholders = ",".join(["%s"] * len(f.values))
+                            master_where += f' AND "{f.field_name}" IN ({placeholders})'
+                            master_params.extend(f.values)
 
-                query = f"""
+                # Get total master records count for pagination
+                count_query = f"SELECT COUNT(*) FROM public.master_data {master_where}"
+                cursor.execute(count_query, master_params)
+                total_master_count = cursor.fetchone()[0]
+
+                # Calculate offset
+                offset = (request.page - 1) * request.page_size
+
+                # Get paginated master_ids
+                order_by = "master_id ASC"
+                try:
+                    cursor.execute("""
+                        SELECT column_name FROM information_schema.columns 
+                        WHERE table_name = 'master_data' AND column_name IN ('product', 'customer')
+                    """)
+                    existing_cols = [r[0] for r in cursor.fetchall()]
+                    if 'product' in existing_cols and 'customer' in existing_cols:
+                        order_by = "product, customer ASC"
+                    elif 'product' in existing_cols:
+                        order_by = "product ASC"
+                except:
+                    pass
+
+                master_id_query = f"""
+                    SELECT master_id 
+                    FROM public.master_data 
+                    {master_where}
+                    ORDER BY {order_by}
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(master_id_query, master_params + [request.page_size, offset])
+                master_ids = [row[0] for row in cursor.fetchall()]
+
+                if not master_ids:
+                    return {
+                        "records": [],
+                        "total_count": total_master_count
+                    }
+
+                # Get sales data for these master_ids within date range
+                placeholders = ",".join(["%s"] * len(master_ids))
+                sales_query = f"""
                     SELECT sales_id, master_id, "{date_field}", "{target_field}", uom 
                     FROM public.sales_data 
-                    WHERE master_id IN (
-                        SELECT master_id 
-                        FROM public.master_data 
-                        ORDER BY product, customer ASC 
-                        OFFSET %s LIMIT %s
-                    ) 
+                    WHERE master_id IN ({placeholders})
                     AND "{date_field}" BETWEEN %s AND %s
+                    ORDER BY master_id, "{date_field}" ASC
                 """
-
-                cursor.execute(query, (offset, page_size, start_date, end_date))
+                cursor.execute(sales_query, master_ids + [start_date, end_date])
                 rows = cursor.fetchall()
+
+                # Pre-fetch master data for all master_ids in this page
+                master_data_map = {}
+                if master_ids:
+                    placeholders = ",".join(["%s"] * len(master_ids))
+                    cursor.execute(f'SELECT * FROM public.master_data WHERE master_id IN ({placeholders})', master_ids)
+                    col_names = [desc[0] for desc in cursor.description]
+                    exclude_fields = {"master_id", "tenant_id", "created_at", "created_by", "updated_at", "updated_by"}
+                    
+                    master_id_idx = col_names.index("master_id")
+                    for row in cursor.fetchall():
+                        m_id = row[master_id_idx]
+                        m_data = {
+                            col_names[i]: row[i]
+                            for i in range(len(col_names))
+                            if col_names[i] not in exclude_fields
+                        }
+                        master_data_map[m_id] = m_data
 
                 results = []
                 for row in rows:
                     sales_id, master_id, sales_date, quantity, uom = row
-
-                    # Get master data for this record
-                    master_data = SalesDataService._get_master_data_for_id(
-                        cursor, master_id
-                    )
-
                     results.append({
                         "sales_id": str(sales_id),
-                        "master_data": master_data,
+                        "master_data": master_data_map.get(master_id, {}),
                         "date": str(sales_date),
                         "UOM": uom,
                         "Quantity": float(quantity) if quantity is not None else 0.0
                     })
 
-                return results
+                return {
+                    "records": results,
+                    "total_count": total_master_count
+                }
+
         except Exception as e:
             logger.error(f"Error in get_sales_records_ui: {str(e)}")
             raise DatabaseException(f"Failed to retrieve sales records for UI: {str(e)}")

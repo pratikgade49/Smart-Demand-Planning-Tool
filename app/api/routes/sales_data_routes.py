@@ -37,13 +37,15 @@ async def get_sales_data_records(
     try:
         result = SalesDataService.get_sales_records_ui(
             database_name=tenant_data["database_name"],
-            from_date=request.from_date,
-            to_date=request.to_date,
-            page=request.page,
-            page_size=request.page_size
+            request=request
         )
 
-        return ResponseHandler.success(data=result)
+        return ResponseHandler.list_response(
+            data=result["records"],
+            page=request.page,
+            page_size=request.page_size,
+            total_count=result["total_count"]
+        )
 
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
