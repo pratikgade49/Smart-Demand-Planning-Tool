@@ -71,59 +71,7 @@ class AuthService:
         """Verify and decode user JWT token."""
         return AuthService.verify_tenant_token(token)
 
-    @staticmethod
-    def register_tenant(request) -> Dict[str, Any]:
-        """
-        Register a new tenant (backward compatible).
-        Creates tenant database and admin user in tenants table.
-        """
-        db_manager = get_db_manager()
-        tenant_id = str(uuid.uuid4())
-        
-        # Generate database name
-        database_name = f"tenant_{request.tenant_identifier.lower()}_db"
-        
-        # Hash admin password
-        password_hash = AuthService.hash_password(request.admin_password)
-        
-        try:
-            # Insert tenant into master database
-            with db_manager.get_master_connection() as conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("""
-                        INSERT INTO public.tenants
-                        (tenant_id, tenant_name, tenant_identifier, admin_email,
-                         admin_password_hash, database_name, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        tenant_id,
-                        request.tenant_name,
-                        request.tenant_identifier,
-                        request.admin_email,
-                        password_hash,
-                        database_name,
-                        'ACTIVE'
-                    ))
-                    conn.commit()
-                finally:
-                    cursor.close()
-            
-            # Create tenant database
-            SchemaManager.create_tenant_database(tenant_id, database_name)
-            
-            logger.info(f"Tenant registered successfully: {request.tenant_identifier}")
-            
-            return {
-                "tenant_id": tenant_id,
-                "tenant_name": request.tenant_name,
-                "tenant_identifier": request.tenant_identifier,
-                "database_name": database_name
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to register tenant: {str(e)}")
-            raise DatabaseException(f"Failed to register tenant: {str(e)}")
+
 
     @staticmethod
     def login_tenant(request) -> Dict[str, Any]:

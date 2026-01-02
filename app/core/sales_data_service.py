@@ -375,3 +375,69 @@ class SalesDataService:
         except Exception as e:
             logger.warning(f"Could not retrieve master data for master_id {master_id}: {str(e)}")
             return {}
+
+    @staticmethod
+    def get_sales_records_ui(
+        database_name: str,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+        page: int = 1,
+        page_size: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Specialized method for UI to retrieve sales records with a specific query.
+        Defaults to requested filters but allows override.
+        """
+        db_manager = get_db_manager()
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+
+                # Get dynamic field names from field catalogue metadata
+                date_field, target_field = SalesDataService._get_field_names(cursor)
+
+                # Use provided dates or defaults from requested query
+                start_date = from_date if from_date else '2025-01-01'
+                end_date = to_date if to_date else '2026-03-31'
+                
+                # Calculate offset based on requested query (OFFSET 1) and pagination
+                # If page is 1, we use OFFSET 1 as requested. If page > 1, we continue from there.
+                requested_offset = 1
+                offset = requested_offset + (page - 1) * page_size
+
+                query = f"""
+                    SELECT sales_id, master_id, "{date_field}", "{target_field}", uom 
+                    FROM public.sales_data 
+                    WHERE master_id IN (
+                        SELECT master_id 
+                        FROM public.master_data 
+                        ORDER BY product, customer ASC 
+                        OFFSET %s LIMIT %s
+                    ) 
+                    AND "{date_field}" BETWEEN %s AND %s
+                """
+
+                cursor.execute(query, (offset, page_size, start_date, end_date))
+                rows = cursor.fetchall()
+
+                results = []
+                for row in rows:
+                    sales_id, master_id, sales_date, quantity, uom = row
+
+                    # Get master data for this record
+                    master_data = SalesDataService._get_master_data_for_id(
+                        cursor, master_id
+                    )
+
+                    results.append({
+                        "sales_id": str(sales_id),
+                        "master_data": master_data,
+                        "date": str(sales_date),
+                        "UOM": uom,
+                        "Quantity": float(quantity) if quantity is not None else 0.0
+                    })
+
+                return results
+        except Exception as e:
+            logger.error(f"Error in get_sales_records_ui: {str(e)}")
+            raise DatabaseException(f"Failed to retrieve sales records for UI: {str(e)}")

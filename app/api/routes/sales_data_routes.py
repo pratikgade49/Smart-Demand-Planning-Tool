@@ -35,13 +35,15 @@ async def get_sales_data_records(
     Returns sales records joined with their associated master data.
     """
     try:
-        result = SalesDataService.get_sales_data(
-            tenant_id=tenant_data["tenant_id"],
+        result = SalesDataService.get_sales_records_ui(
             database_name=tenant_data["database_name"],
-            request=request
+            from_date=request.from_date,
+            to_date=request.to_date,
+            page=request.page,
+            page_size=request.page_size
         )
 
-        return ResponseHandler.success(data=result.dict())
+        return ResponseHandler.success(data=result)
 
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -152,3 +154,4 @@ async def get_sales_data_records_simple(
     except Exception as e:
         logger.error(f"Unexpected error in get_sales_data_records_simple: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+

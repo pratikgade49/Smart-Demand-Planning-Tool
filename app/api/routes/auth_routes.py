@@ -6,8 +6,6 @@ Tenant registration and login endpoints.
 from fastapi import APIRouter, HTTPException, status, Depends
 from typing import Dict, Any
 from app.schemas.auth import (
-    TenantRegisterRequest,
-    TenantRegisterResponse,
     TenantLoginRequest,
     TenantLoginResponse,
     TenantOnboardRequest,
@@ -27,30 +25,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
-
-
-@router.post("/register", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
-async def register_tenant(request: TenantRegisterRequest):
-    """
-    Register a new tenant.
-    Creates tenant schema and admin account.
-    """
-    try:
-        result = AuthService.register_tenant(request)
-        
-        response_data = {
-            "tenant_id": result["tenant_id"],
-            "tenant_name": result["tenant_name"],
-            "message": "Tenant registered successfully. Please login to continue."
-        }
-        
-        return ResponseHandler.success(data=response_data, status_code=201)
-        
-    except AppException as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except Exception as e:
-        logger.error(f"Unexpected error in register_tenant: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/login", response_model=Dict[str, Any])
