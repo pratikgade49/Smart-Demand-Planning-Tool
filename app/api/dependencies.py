@@ -33,12 +33,23 @@ async def get_current_tenant(
     try:
         token = credentials.credentials
         payload = AuthService.verify_tenant_token(token)
-        
+
+        tenant_id = payload.get("tenant_id")
+        database_name = payload.get("database_name")
+
+        if not tenant_id or not database_name:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing tenant_id or database_name",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
         return {
-            "tenant_id": payload.get("tenant_id"),
+            "tenant_id": tenant_id,
             "tenant_identifier": payload.get("tenant_identifier"),
             "email": payload.get("email"),
-            "database_name": payload.get("database_name")  # Database name for this tenant
+            "database_name": database_name,
+            "role": payload.get("role", "admin")  # Default to admin for tenant tokens
         }
         
     except AuthenticationException as e:

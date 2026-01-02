@@ -271,7 +271,7 @@ class AuthService:
                     ))
                     
                     conn.commit()
-                    logger.info(f"✅ User {request.email} created in tenant database: {database_name}")
+                    logger.info(f"User {request.email} created in tenant database: {database_name}")
                     
                 finally:
                     cursor.close()
@@ -293,7 +293,7 @@ class AuthService:
                     f"Background job will retry sync."
                 )
             else:
-                logger.info(f"✅ User {request.email} synced to master database")
+                logger.info(f"User {request.email} synced to master database")
             
             return {
                 "user_id": user_id,
@@ -372,7 +372,7 @@ class AuthService:
                 finally:
                     cursor.close()
             
-            logger.info(f"✅ Fast lookup: Found user {email} in tenant {tenant_identifier} (master query)")
+            logger.info(f"Fast lookup: Found user {email} in tenant {tenant_identifier} (master query)")
             
             # Step 2: Verify password in TENANT database (source of truth)
             with db_manager.get_tenant_connection(database_name) as conn:
@@ -417,7 +417,7 @@ class AuthService:
                 finally:
                     cursor.close()
             
-            logger.info(f"✅ Password verified for user {email} in tenant database")
+            logger.info(f"Password verified for user {email} in tenant database")
             
             # Step 4: Generate JWT token
             token_payload = {
@@ -431,7 +431,7 @@ class AuthService:
             
             token = AuthService.generate_token(token_payload)
             
-            logger.info(f"✅ User {email} logged in successfully")
+            logger.info(f"User {email} logged in successfully")
             
             return {
                 "access_token": token,
