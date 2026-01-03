@@ -15,6 +15,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_db_manager
+from app.core.resource_monitor import performance_tracker
 from app.config import settings
 from app.core.exceptions import (
     DatabaseException,
@@ -169,7 +170,7 @@ class ForecastingService:
                 tenant_id, database_name, request.version_id
             )
 
-            # Validate algorithms
+            # Validate algorithms exist
             algorithm_ids = [algo.algorithm_id for algo in request.algorithms]
             ForecastingService._validate_algorithms_exist(
                 database_name, algorithm_ids
@@ -225,12 +226,11 @@ class ForecastingService:
 
                         cursor.execute("""
                             INSERT INTO forecast_algorithms_mapping
-                            (mapping_id, tenant_id, forecast_run_id, algorithm_id, 
+                            (mapping_id, forecast_run_id, algorithm_id, 
                              algorithm_name, custom_parameters, execution_order, created_by)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             mapping_id,
-                            tenant_id,
                             forecast_run_id,
                             algo.algorithm_id,
                             algo_name,
@@ -242,11 +242,10 @@ class ForecastingService:
                     # Log audit entry
                     cursor.execute("""
                         INSERT INTO forecast_audit_log
-                        (tenant_id, forecast_run_id, action, entity_type, 
+                        (forecast_run_id, action, entity_type, 
                          entity_id, performed_by, details)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                     """, (
-                        tenant_id,
                         forecast_run_id,
                         "Created",
                         "ForecastRun",
@@ -287,7 +286,7 @@ class ForecastingService:
                 try:
                     # Get forecast run
                     cursor.execute("""
-                        SELECT forecast_run_id, tenant_id, version_id, forecast_filters,
+                        SELECT forecast_run_id, version_id, forecast_filters,
                                forecast_start, forecast_end, history_start, history_end,
                                run_status, run_progress,
                                total_records, processed_records,
@@ -301,7 +300,7 @@ class ForecastingService:
                     if not result:
                         raise NotFoundException("Forecast Run", forecast_run_id)
 
-                    (run_id, ten_id, version_id, filters, start, end, hist_start, hist_end,
+                    (run_id, version_id, filters, start, end, hist_start, hist_end,
                      status, progress, total, processed, failed, error_msg,
                      created_at, updated_at, started_at, completed_at, created_by) = result
 
@@ -334,7 +333,6 @@ class ForecastingService:
 
                     return {
                         "forecast_run_id": str(run_id),
-                        "tenant_id": str(ten_id),
                         "version_id": str(version_id),
                         "forecast_filters": filters,
                         "forecast_start": start.isoformat() if start else None,
@@ -377,28 +375,24 @@ class ForecastingService:
         db_manager = get_db_manager()
 
         try:
+            where_clauses = ["1=1"]
+            params = []
+
+            if version_id:
+                where_clauses.append("version_id = %s")
+                params.append(version_id)
+            
+            if status:
+                where_clauses.append("run_status = %s")
+                params.append(status)
+
+            where_sql = " AND ".join(where_clauses)
+
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Build WHERE clause
-                    where_clauses = []
-                    params = []
-
-                    if version_id:
-                        where_clauses.append("version_id = %s")
-                        params.append(version_id)
-
-                    if status:
-                        where_clauses.append("run_status = %s")
-                        params.append(status)
-
-                    where_sql = " AND ".join(where_clauses)
-
                     # Get total count
-                    cursor.execute(
-                        f"SELECT COUNT(*) FROM forecast_runs WHERE {where_sql}",
-                        params
-                    )
+                    cursor.execute(f"SELECT COUNT(*) FROM forecast_runs WHERE {where_sql}", params)
                     total_count = cursor.fetchone()[0]
 
                     # Get paginated results
@@ -690,9 +684,7 @@ class ForecastingService:
     def _get_date_trunc_expr(interval: str, date_field_name: str = "date") -> str:
         """
         Get SQL date truncation expression for interval.
-        FIXED: Now accepts dynamic date field name.
         """
-        # ✅ FIXED: Use dynamic date field name
         interval_map = {
             "WEEKLY": f"DATE_TRUNC('week', s.\"{date_field_name}\"::timestamp)::date",
             "MONTHLY": f"DATE_TRUNC('month', s.\"{date_field_name}\"::timestamp)::date",
@@ -749,7 +741,6 @@ class ForecastingService:
             finally:
                 cursor.close()
 
-
     @staticmethod
     def _get_field_names(tenant_id: str, database_name: str) -> Tuple[str, str]:
         """
@@ -774,7 +765,6 @@ class ForecastingService:
                 
                 result = cursor.fetchone()
                 if not result:
-                    # ✅ IMPROVED: Better error message
                     logger.error(f"No field catalogue metadata found for tenant {tenant_id}")
                     raise ValidationException(
                         "Field catalogue not finalized. Please finalize your field catalogue first."
@@ -786,3 +776,145 @@ class ForecastingService:
                 
             finally:
                 cursor.close()
+
+    @staticmethod
+    def save_forecast_results(
+        tenant_id: str,
+        database_name: str,
+        forecast_run_id: str,
+        user_email: str,
+        entity_identifier: Optional[str] = None,
+        aggregation_level: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Save future forecast results into forecast_data table.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            forecast_run_id: The ID of the forecast run to save
+            user_email: Email of user performing the action
+            entity_identifier: Optional specific entity to save (hyphen-separated)
+            aggregation_level: Required if entity_identifier is provided
+            
+        Returns:
+            Status and count of saved records
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
+            
+            # If entity_identifier provided, parse it to filter metadata
+            entity_fields = None
+            if entity_identifier and aggregation_level:
+                from app.core.forecast_comparison_service import ForecastComparisonService
+                entity_fields = ForecastComparisonService.parse_entity_identifier(
+                    entity_identifier, aggregation_level
+                )
+            
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Get best performing algorithm's mapping_id for this run
+                    cursor.execute("""
+                        SELECT fam.mapping_id
+                        FROM forecast_algorithms_mapping fam
+                        LEFT JOIN forecast_results fr ON fam.mapping_id = fr.mapping_id
+                        WHERE fam.forecast_run_id = %s
+                          AND fam.execution_status = 'Completed'
+                        GROUP BY fam.mapping_id
+                        ORDER BY AVG(fr.accuracy_metric) DESC
+                        LIMIT 1
+                    """, (forecast_run_id,))
+                    
+                    mapping_row = cursor.fetchone()
+                    if not mapping_row:
+                        raise NotFoundException("Forecast Results", forecast_run_id)
+                    
+                    mapping_id = mapping_row[0]
+
+                    # Fetch future_forecast results
+                    query = """
+                        SELECT date, value, metadata
+                        FROM forecast_results
+                        WHERE mapping_id = %s AND type = 'future_forecast'
+                    """
+                    params = [mapping_id]
+                    
+                    # If we have specific entity fields, filter by metadata JSONB
+                    if entity_fields:
+                        import json
+                        query += " AND metadata->'entity_filter' @> %s::jsonb"
+                        params.append(json.dumps(entity_fields))
+                    
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    
+                    if not results:
+                        return {
+                            "status": "success",
+                            "message": "No forecast results found matching criteria",
+                            "saved_count": 0
+                        }
+                    
+                    # Get one master_id from master_data to use for aggregated forecasts
+                    cursor.execute("SELECT master_id FROM master_data LIMIT 1")
+                    master_id_row = cursor.fetchone()
+                    if not master_id_row:
+                        raise ValidationException("No master data found to associate with forecast records")
+                    aggregated_master_id = master_id_row[0]
+
+                    # Get uom and unit_price for the aggregated master_id
+                    cursor.execute("""
+                        SELECT uom, unit_price
+                        FROM sales_data
+                        WHERE master_id = %s
+                        ORDER BY created_at DESC LIMIT 1
+                    """, (aggregated_master_id,))
+                    sales_row = cursor.fetchone()
+                    uom = sales_row[0] if sales_row else "UNIT"
+                    unit_price = sales_row[1] if sales_row else 0
+
+                    saved_count = 0
+                    for row in results:
+                        forecast_date, forecast_value, metadata = row
+
+                        # Save aggregated forecast record (one per date)
+                        cursor.execute(f"""
+                            INSERT INTO forecast_data
+                            (master_id, forecast_run_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}", forecast_run_id)
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                created_at = CURRENT_TIMESTAMP
+                        """, (
+                            aggregated_master_id,  # Use existing master_id for aggregated forecasts
+                            forecast_run_id,
+                            forecast_date,
+                            forecast_value,
+                            uom,  # Fetched UOM
+                            unit_price,  # Fetched unit price
+                            user_email
+                        ))
+                        saved_count += 1
+                    
+                    conn.commit()
+                    logger.info(f"Saved {saved_count} forecast records to forecast_data for run {forecast_run_id}")
+                    
+                    return {
+                        "status": "success",
+                        "message": f"Successfully saved {saved_count} forecast records",
+                        "saved_count": saved_count
+                    }
+                    
+                finally:
+                    cursor.close()
+        except Exception as e:
+            logger.error(f"Failed to save forecast results: {str(e)}")
+            if isinstance(e, (ValidationException, NotFoundException)):
+                raise
+            raise DatabaseException(f"Failed to save forecast results: {str(e)}")

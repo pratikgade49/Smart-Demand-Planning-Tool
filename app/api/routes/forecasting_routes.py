@@ -22,7 +22,7 @@ from app.core.forecasting_service import ForecastingService
 from app.core.forecast_version_service import ForecastVersionService
 from app.core.external_factors_service import ExternalFactorsService
 from app.core.responses import ResponseHandler
-from app.core.exceptions import AppException, ValidationException
+from app.core.exceptions import AppException, ValidationException, NotFoundException
 from app.core.algorithm_parameters import AlgorithmParametersService
 from app.core.forecast_job_service import ForecastJobService
 from app.core.background_forecast_executor import BackgroundForecastExecutor
@@ -619,3 +619,48 @@ async def get_performance_metrics(
             "performance_summary": summary
         }
     }
+
+
+class SaveForecastRequest(BaseModel):
+    """Request for saving forecast results."""
+    forecast_run_id: str
+    entity_identifier: Optional[str] = None
+    aggregation_level: Optional[str] = None
+
+
+@router.post("/save-forecast", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def save_forecast(
+    request: SaveForecastRequest,
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Save forecast results into forecast_data table.
+    
+    This commits the results of a specific forecast run (the best performing algorithm)
+    into the forecast_data table for future reference or use in other processes.
+    
+    Parameters:
+        - forecast_run_id: ID of the forecast run to save
+        - entity_identifier: Optional specific entity to save (e.g., "1001-Loc1")
+        - aggregation_level: Required if entity_identifier is provided (e.g., "product-location")
+    """
+    try:
+        logger.info(f"Saving forecast results for run {request.forecast_run_id} (Tenant: {tenant_data['tenant_id']})")
+        
+        result = ForecastingService.save_forecast_results(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            forecast_run_id=request.forecast_run_id,
+            user_email=tenant_data["email"],
+            entity_identifier=request.entity_identifier,
+            aggregation_level=request.aggregation_level
+        )
+        
+        return ResponseHandler.success(data=result)
+    
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error saving forecast: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

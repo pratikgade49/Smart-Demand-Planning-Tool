@@ -349,25 +349,27 @@ class ForecastComparisonService:
                         
                         # Get forecast results
                         cursor.execute("""
-                            SELECT 
-                                forecast_date,
-                                forecast_quantity,
+                            SELECT
+                                date,
+                                value,
+                                type,
                                 accuracy_metric,
                                 confidence_interval_lower,
                                 confidence_interval_upper
                             FROM forecast_results
                             WHERE mapping_id = %s
-                            ORDER BY forecast_date
+                            ORDER BY date
                         """, (mapping_id,))
-                        
+
                         forecast_data = []
                         for row in cursor.fetchall():
                             forecast_data.append({
                                 "date": row[0].isoformat() if row[0] else None,
                                 "forecast_quantity": float(row[1]) if row[1] else 0,
-                                "accuracy_metric": float(row[2]) if row[2] else None,
-                                "confidence_interval_lower": float(row[3]) if row[3] else None,
-                                "confidence_interval_upper": float(row[4]) if row[4] else None
+                                "type": row[2],
+                                "accuracy_metric": float(row[3]) if row[3] else None,
+                                "confidence_interval_lower": float(row[4]) if row[4] else None,
+                                "confidence_interval_upper": float(row[5]) if row[5] else None
                             })
                         
                         results[run_id] = forecast_data

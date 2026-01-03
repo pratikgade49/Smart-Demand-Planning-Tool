@@ -311,12 +311,36 @@ class SchemaManager:
                         )
                     """)
 
+                    # ====================================================================
+                    # Create forecast_data table with dynamic columns (SIMILAR TO sales_data)
+                    # ====================================================================
+                    cursor.execute(f"""
+                        CREATE TABLE IF NOT EXISTS forecast_data (
+                            forecast_data_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            master_id UUID NOT NULL REFERENCES master_data(master_id),
+                            forecast_run_id UUID NOT NULL REFERENCES forecast_runs(forecast_run_id) ON DELETE CASCADE,
+                            "{date_field.field_name}" {date_sql_type} NOT NULL,
+                            "{target_field.field_name}" {target_sql_type} NOT NULL,
+                            uom VARCHAR(20) NOT NULL,
+                            unit_price DECIMAL(18, 2),
+
+                            -- Audit fields (created only - transactions are immutable)
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) NOT NULL
+                        )
+                    """)
+
                     # Add unique constraint for batch upsert functionality
                     cursor.execute(f'ALTER TABLE sales_data ADD CONSTRAINT sales_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
+                    cursor.execute(f'ALTER TABLE forecast_data ADD CONSTRAINT forecast_data_master_date_run_unique UNIQUE (master_id, "{date_field.field_name}", forecast_run_id)')
 
-                    # Create indexes on sales_data
+                    # Create indexes on sales_data and forecast_data
                     cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_sales_data_master_id ON sales_data(master_id)')
+                    
+                    cursor.execute(f'CREATE INDEX idx_forecast_data_date ON forecast_data("{date_field.field_name}")')
+                    cursor.execute(f'CREATE INDEX idx_forecast_data_master_id ON forecast_data(master_id)')
+                    cursor.execute(f'CREATE INDEX idx_forecast_data_run_id ON forecast_data(forecast_run_id)')
                     
                     # Store metadata about target and date fields
                     cursor.execute("""
