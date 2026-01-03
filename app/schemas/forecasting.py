@@ -1,3 +1,10 @@
+"""
+Updated app/schemas/forecasting.py
+
+Changes:
+- ForecastResultResponse now uses date, value, type instead of forecast_date, forecast_quantity
+"""
+
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict
 
@@ -98,19 +105,28 @@ class AlgorithmMappingResponse(BaseModel):
     created_at: str
     updated_at: Optional[str] = None
 
+# ✅ UPDATED: Changed from forecast_date/forecast_quantity to date/value/type
 class ForecastResultResponse(BaseModel):
     result_id: str
     forecast_run_id: str
     version_id: str
     mapping_id: str
     algorithm_id: int
-    forecast_date: str
-    forecast_quantity: float
+    
+    # NEW SCHEMA
+    date: str  # Changed from forecast_date
+    value: float  # Changed from forecast_quantity
+    type: str  # NEW: 'testing_actual', 'testing_forecast', 'future_forecast'
+    
+    # Confidence intervals (only for future_forecast)
     confidence_interval_lower: Optional[float] = None
     confidence_interval_upper: Optional[float] = None
-    confidence_level: Optional[float] = None
+    confidence_level: Optional[str] = None  # Changed from float to str
+    
+    # Accuracy metrics (only for testing_forecast)
     accuracy_metric: Optional[float] = None
     metric_type: Optional[str] = None
+    
     metadata: Optional[Dict[str, Any]] = None
     created_at: str
     created_by: str

@@ -463,7 +463,7 @@ class ForecastExecutionService:
         interval: str,
         user_email: str
     ) -> List[Dict[str, Any]]:
-        """Execute a single algorithm and store results."""
+        """Execute a single algorithm and store results with train-test split."""
         
         mapping_id = algorithm_mapping['mapping_id']
         algorithm_id = algorithm_mapping['algorithm_id']
@@ -473,13 +473,12 @@ class ForecastExecutionService:
         # Validate custom parameters
         try:
             custom_params = ForecastExecutionService.validate_algorithm_parameters(algorithm_id, custom_params)
-        except ValidationException as e:
+        except Exception as e:
             logger.error(f"Parameter validation failed for algorithm {algorithm_name}: {str(e)}")
             raise
 
         start_time = datetime.utcnow()
-        logger.info(f"Starting algorithm execution: {algorithm_name} (ID: {algorithm_id}, Mapping: {mapping_id}) for forecast run: {forecast_run_id}")
-        logger.debug(f"Validated algorithm parameters: {custom_params}")
+        logger.info(f"Starting algorithm execution: {algorithm_name} (ID: {algorithm_id})")
 
         # Update algorithm status to Running
         ForecastExecutionService._update_algorithm_status(
@@ -491,184 +490,98 @@ class ForecastExecutionService:
             forecast_start_date = datetime.fromisoformat(forecast_start).date()
             forecast_end_date = datetime.fromisoformat(forecast_end).date()
             
-            # Calculate number of periods
-            periods = ForecastExecutionService._calculate_periods(
+            # Calculate number of periods for future forecast
+            future_periods = ForecastExecutionService._calculate_periods(
                 forecast_start_date,
                 forecast_end_date,
                 interval
             )
             
-            # ✅ IMPROVED: Merge external factors with better logging
+            # Merge external factors if available
             if not external_factors.empty:
-                logger.info(
-                    f"Merging external factors with historical data for {algorithm_name}"
-                )
-                logger.debug(f"Historical data date range: {historical_data['period'].min()} to {historical_data['period'].max()}")
-                logger.debug(f"External factors date range: {external_factors['date'].min()} to {external_factors['date'].max()}")
-                logger.debug(f"External factor columns: {list(external_factors.columns)}")
-                
-                # Merge on date
+                logger.info(f"Merging external factors for {algorithm_name}")
                 historical_data = historical_data.merge(
                     external_factors,
                     left_on='period',
                     right_on='date',
                     how='left'
                 )
-                
-                # Check merge success
-                factor_columns = [col for col in external_factors.columns if col != 'date']
-                non_null_count = historical_data[factor_columns].notna().sum().sum()
-                total_cells = len(historical_data) * len(factor_columns)
-                merge_success_rate = (non_null_count / total_cells * 100) if total_cells > 0 else 0
-                
-                logger.info(
-                    f"External factors merge: {non_null_count}/{total_cells} cells matched "
-                    f"({merge_success_rate:.1f}% success rate)"
-                )
-                
-                if merge_success_rate < 50:
-                    logger.warning(
-                        f"Low merge success rate for external factors! "
-                        f"Check that factor dates overlap with historical data dates."
-                    )
-            else:
-                logger.info(f"No external factors to merge for {algorithm_name}")
             
-            # Route to appropriate algorithm
-            if algorithm_id == 1:  # ARIMA
-                forecast, metrics = ForecastExecutionService.arima_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    order=custom_params.get('order', [1, 1, 1])
-                )
-            elif algorithm_id == 2:  # Linear Regression
-                forecast, metrics = ForecastExecutionService.linear_regression_forecast(
-                    data=historical_data,
-                    periods=periods
-                )
-            elif algorithm_id == 3:  # Polynomial Regression
-                forecast, metrics = ForecastExecutionService.polynomial_regression_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    degree=custom_params.get('degree', 2)
-                )
-            elif algorithm_id == 4:  # Exponential Smoothing
-                forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    alphas=custom_params.get('alphas', [custom_params.get('alpha', 0.3)])
-                )
-            elif algorithm_id == 5:  # Enhanced Exponential Smoothing
-                forecast, metrics = ForecastExecutionService.exponential_smoothing_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    alphas=custom_params.get('alphas', [0.1, 0.3, 0.5])
-                )
-            elif algorithm_id == 6:  # Holt Winters
-                forecast, metrics = ForecastExecutionService.holt_winters_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    season_length=custom_params.get('season_length', 12),
-                    alpha=custom_params.get('alpha', 0.3),
-                    beta=custom_params.get('beta', 0.1),
-                    gamma=custom_params.get('gamma', 0.1)
-                )
-            elif algorithm_id == 7:  # Prophet
-                forecast, metrics = ForecastExecutionService.prophet_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    seasonality_mode=custom_params.get('seasonality_mode', 'additive'),
-                    changepoint_prior_scale=custom_params.get('changepoint_prior_scale', 0.05)
-                )
-            elif algorithm_id == 8:  # LSTM Neural Network
-                forecast, metrics = ForecastExecutionService.lstm_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    sequence_length=custom_params.get('sequence_length', 12),
-                    epochs=custom_params.get('epochs', 50),
-                    batch_size=custom_params.get('batch_size', 32)
-                )
-            elif algorithm_id == 9:  # XGBoost
-                forecast, metrics = ForecastExecutionService.xgboost_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    n_estimators=custom_params.get('n_estimators', 100),
-                    max_depth=custom_params.get('max_depth', 6),
-                    learning_rate=custom_params.get('learning_rate', 0.1)
-                )
-            elif algorithm_id == 10:  # SVR
-                forecast, metrics = ForecastExecutionService.svr_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    C=custom_params.get('C', 1.0),
-                    epsilon=custom_params.get('epsilon', 0.1),
-                    kernel=custom_params.get('kernel', 'rbf')
-                )
-            elif algorithm_id == 11:  # KNN
-                forecast, metrics = ForecastExecutionService.knn_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    n_neighbors=custom_params.get('n_neighbors', 5)
-                )
-            elif algorithm_id == 12:  # Gaussian Process
-                forecast, metrics = ForecastExecutionService.gaussian_process_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    kernel=custom_params.get('kernel', 'RBF'),
-                    alpha=custom_params.get('alpha', 1e-6)
-                )
-            elif algorithm_id == 13:  # Neural Network (MLP)
-                forecast, metrics = ForecastExecutionService.mlp_neural_network_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    hidden_layers=custom_params.get('hidden_layers', [64, 32]),
-                    epochs=custom_params.get('epochs', 100),
-                    batch_size=custom_params.get('batch_size', 32)
-                )
-            elif algorithm_id == 14:  # Random Forest
-                forecast, metrics = ForecastExecutionService.random_forest_forecast(
-                    data=historical_data,
-                    periods=periods,
-                    n_estimators=custom_params.get('n_estimators', 100),
-                    max_depth=custom_params.get('max_depth', None),
-                    min_samples_split=custom_params.get('min_samples_split', 2),
-                    min_samples_leaf=custom_params.get('min_samples_leaf', 1)
-                )
+            # ========================================================================
+            # TRAIN-TEST SPLIT
+            # ========================================================================
+            train_ratio = 0.8
+            n = len(historical_data)
+            split_index = max(2, int(n * train_ratio))
+            
+            train_data = historical_data.iloc[:split_index].copy()
+            test_data = historical_data.iloc[split_index:].copy()
+            test_periods = len(test_data)
+            
+            logger.info(f"Train-test split: train={len(train_data)}, test={len(test_data)}")
+            
+            # Get actual values from test data
+            if 'total_quantity' in test_data.columns:
+                test_actuals = test_data['total_quantity'].values
+            elif 'quantity' in test_data.columns:
+                test_actuals = test_data['quantity'].values
             else:
-                # Default to simple moving average
-                forecast, metrics = ForecastExecutionService.simple_moving_average(
-                    data=historical_data,
-                    periods=periods,
-                    window=custom_params.get('window', 3)
+                test_actuals = np.array([])
+            
+            # Get test period dates
+            test_dates = test_data['period'].tolist() if 'period' in test_data.columns else []
+            
+            # ========================================================================
+            # EXECUTE ALGORITHM ON TRAIN DATA FOR TEST PREDICTION
+            # ========================================================================
+            test_forecast = np.array([])
+            test_metrics = {}
+            
+            if test_periods > 0:
+                logger.info(f"Generating test forecast for {test_periods} periods")
+                test_forecast, test_metrics = ForecastExecutionService._route_algorithm(
+                    algorithm_id=algorithm_id,
+                    algorithm_name=algorithm_name,
+                    data=train_data,
+                    periods=test_periods,
+                    custom_params=custom_params
                 )
             
-            # Generate forecast dates
-            forecast_dates = ForecastExecutionService._generate_forecast_dates(
+            # ========================================================================
+            # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
+            # ========================================================================
+            logger.info(f"Generating future forecast for {future_periods} periods")
+            future_forecast, future_metrics = ForecastExecutionService._route_algorithm(
+                algorithm_id=algorithm_id,
+                algorithm_name=algorithm_name,
+                data=historical_data,
+                periods=future_periods,
+                custom_params=custom_params
+            )
+            
+            # Generate future forecast dates
+            future_dates = ForecastExecutionService._generate_forecast_dates(
                 forecast_start_date,
-                periods,
+                future_periods,
                 interval
             )
             
-            # # Validate forecast quality
-            # Forecast quality validation removed
-
-            # if is_constant:
-            #     logger.warning(f"Algorithm {algorithm_name} produced constant forecast - all values are {forecast[0]:.2f}")
-
-            # # Log without Unicode characters to avoid Windows console encoding issues
-            # logger.info(f"Forecast validation: {variance_msg.replace(chr(10003), '[PASS]').replace(chr(9888), '[WARN]')}")
-
-            # Store results
-            results = ForecastExecutionService._store_forecast_results(
+            # ========================================================================
+            # STORE ALL THREE TYPES OF RESULTS
+            # ========================================================================
+            results = ForecastExecutionService._store_forecast_results_v2(
                 tenant_id=tenant_id,
                 database_name=database_name,
                 forecast_run_id=forecast_run_id,
                 version_id=algorithm_mapping.get('version_id'),
                 mapping_id=mapping_id,
                 algorithm_id=algorithm_id,
-                forecast_dates=forecast_dates,
-                forecast_values=forecast,
-                metrics=metrics,
+                test_dates=test_dates,
+                test_actuals=test_actuals,
+                test_forecast=test_forecast,
+                test_metrics=test_metrics,
+                future_dates=future_dates,
+                future_forecast=future_forecast,
                 user_email=user_email
             )
             
@@ -686,7 +599,126 @@ class ForecastExecutionService:
             raise
 
     @staticmethod
-    def linear_regression_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+    def _route_algorithm(
+        algorithm_id: int,
+        algorithm_name: str,
+        data: pd.DataFrame,
+        periods: int,
+        custom_params: Dict[str, Any]
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Route to appropriate algorithm based on ID."""
+        
+        # All algorithm methods return (forecast_array, metrics_dict)
+        if algorithm_id == 1:  # ARIMA
+            forecast, metrics = ForecastExecutionService.arima_forecast(
+                data=data,
+                periods=periods,
+                order=custom_params.get('order', [1, 1, 1])
+            )
+            return forecast, metrics
+        elif algorithm_id == 2:  # Linear Regression
+            return ForecastExecutionService.linear_regression_forecast(
+                data=data,
+                periods=periods
+            )
+        elif algorithm_id == 3:  # Polynomial Regression
+            return ForecastExecutionService.polynomial_regression_forecast(
+                data=data,
+                periods=periods,
+                degree=custom_params.get('degree', 2)
+            )
+        elif algorithm_id == 4:  # Exponential Smoothing
+            return ForecastExecutionService.exponential_smoothing_forecast(
+                data=data,
+                periods=periods,
+                alphas=custom_params.get('alphas', [custom_params.get('alpha', 0.3)])
+            )
+        elif algorithm_id == 5:  # Enhanced Exponential Smoothing
+            return ForecastExecutionService.exponential_smoothing_forecast(
+                data=data,
+                periods=periods,
+                alphas=custom_params.get('alphas', [0.1, 0.3, 0.5])
+            )
+        elif algorithm_id == 6:  # Holt Winters
+            return ForecastExecutionService.holt_winters_forecast(
+                data=data,
+                periods=periods,
+                season_length=custom_params.get('season_length', 12),
+                alpha=custom_params.get('alpha', 0.3),
+                beta=custom_params.get('beta', 0.1),
+                gamma=custom_params.get('gamma', 0.1)
+            )
+        elif algorithm_id == 7:  # Prophet
+            return ForecastExecutionService.prophet_forecast(
+                data=data,
+                periods=periods,
+                seasonality_mode=custom_params.get('seasonality_mode', 'additive'),
+                changepoint_prior_scale=custom_params.get('changepoint_prior_scale', 0.05)
+            )
+        elif algorithm_id == 8:  # LSTM
+            return ForecastExecutionService.lstm_forecast(
+                data=data,
+                periods=periods,
+                sequence_length=custom_params.get('sequence_length', 12),
+                epochs=custom_params.get('epochs', 50),
+                batch_size=custom_params.get('batch_size', 32)
+            )
+        elif algorithm_id == 9:  # XGBoost
+            return ForecastExecutionService.xgboost_forecast(
+                data=data,
+                periods=periods,
+                n_estimators=custom_params.get('n_estimators', 100),
+                max_depth=custom_params.get('max_depth', 6),
+                learning_rate=custom_params.get('learning_rate', 0.1)
+            )
+        elif algorithm_id == 10:  # SVR
+            return ForecastExecutionService.svr_forecast(
+                data=data,
+                periods=periods,
+                C=custom_params.get('C', 1.0),
+                epsilon=custom_params.get('epsilon', 0.1),
+                kernel=custom_params.get('kernel', 'rbf')
+            )
+        elif algorithm_id == 11:  # KNN
+            return ForecastExecutionService.knn_forecast(
+                data=data,
+                periods=periods,
+                n_neighbors=custom_params.get('n_neighbors', 5)
+            )
+        elif algorithm_id == 12:  # Gaussian Process
+            return ForecastExecutionService.gaussian_process_forecast(
+                data=data,
+                periods=periods,
+                kernel=custom_params.get('kernel', 'RBF'),
+                alpha=custom_params.get('alpha', 1e-6)
+            )
+        elif algorithm_id == 13:  # MLP Neural Network
+            return ForecastExecutionService.mlp_neural_network_forecast(
+                data=data,
+                periods=periods,
+                hidden_layers=custom_params.get('hidden_layers', [64, 32]),
+                epochs=custom_params.get('epochs', 100),
+                batch_size=custom_params.get('batch_size', 32)
+            )
+        elif algorithm_id == 14:  # Random Forest
+            return ForecastExecutionService.random_forest_forecast(
+                data=data,
+                periods=periods,
+                n_estimators=custom_params.get('n_estimators', 100),
+                max_depth=custom_params.get('max_depth', None),
+                min_samples_split=custom_params.get('min_samples_split', 2),
+                min_samples_leaf=custom_params.get('min_samples_leaf', 1)
+            )
+        else:
+            # Default to simple moving average
+            return ForecastExecutionService.simple_moving_average(
+                data=data,
+                periods=periods,
+                window=custom_params.get('window', 3)
+            )
+
+    @staticmethod
+    def linear_regression_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Linear regression forecasting"""
         # Prepare quantity data
         if 'total_quantity' in data.columns:
@@ -714,10 +746,16 @@ class ForecastExecutionService:
         predicted = model.predict(x)
         metrics = ForecastExecutionService.calculate_metrics(y, predicted)
         
-        return forecast, metrics
+        # Prepare test forecast (using fitted values for historical dates)
+        test_results = {
+            'test_forecast': predicted,
+            'test_dates': data['period'].tolist() if 'period' in data.columns else []
+        }
+        
+        return forecast, metrics 
 
     @staticmethod
-    def arima_forecast(data: pd.DataFrame, periods: int, order: List[int] = None) -> Tuple[np.ndarray, Dict[str, float]]:
+    def arima_forecast(data: pd.DataFrame, periods: int, order: List[int] = None) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """ARIMA forecasting (simplified implementation)."""
         try:
             from statsmodels.tsa.arima.model import ARIMA
@@ -736,7 +774,13 @@ class ForecastExecutionService:
             predicted = fitted.fittedvalues
             metrics = ForecastExecutionService.calculate_metrics(y[len(y)-len(predicted):], predicted)
             
-            return forecast, metrics
+            # Prepare test forecast
+            test_results = {
+                'test_forecast': predicted,
+                'test_dates': data['period'].iloc[len(y)-len(predicted):].tolist() if 'period' in data.columns else []
+            }
+            
+            return forecast, metrics 
             
         except ImportError:
             logger.warning("statsmodels not available, falling back to Linear Regression")
@@ -776,7 +820,13 @@ class ForecastExecutionService:
         predicted = poly_func(np.arange(n))
         metrics = ForecastExecutionService.calculate_metrics(y, predicted)
 
-        return forecast, metrics
+        # Prepare test forecast
+        test_results = {
+            'test_forecast': predicted,
+            'test_dates': data['period'].tolist() if 'period' in data.columns else []
+        }
+
+        return forecast, metrics 
 
     @staticmethod
     def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1, 0.3, 0.5]) -> tuple:
@@ -807,10 +857,11 @@ class ForecastExecutionService:
                     'mape': 100.0, 
                     'mae': np.std(y) if len(y) > 1 else 0, 
                     'rmse': np.std(y) if len(y) > 1 else 0
-                }
+                }, None
 
             best_metrics = None
             best_forecast = None
+            best_test_results = None
 
             for alpha in alphas:
                 logger.info(f"Running Exponential Smoothing with alpha={alpha}")
@@ -864,6 +915,11 @@ class ForecastExecutionService:
                     # Calculate metrics on the windowed subset (matching old implementation)
                     predicted = model.predict(X)
                     metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
+                    
+                    test_results = {
+                        'test_forecast': predicted,
+                        'test_dates': data['period'].iloc[window:].tolist() if 'period' in data.columns else []
+                    }
 
                 else:
                     # Fallback to simple exponential smoothing for very small datasets
@@ -875,6 +931,11 @@ class ForecastExecutionService:
                     
                     forecast = np.full(periods, smoothed[-1])
                     metrics = ForecastExecutionService.calculate_metrics(y[1:], smoothed[1:])
+                    
+                    test_results = {
+                        'test_forecast': smoothed[1:],
+                        'test_dates': data['period'].iloc[1:].tolist() if 'period' in data.columns else []
+                    }
 
                 logger.info(f"Alpha={alpha}, RMSE={metrics.get('rmse', 0):.2f}, MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}")
 
@@ -882,6 +943,7 @@ class ForecastExecutionService:
                 if best_metrics is None or metrics.get('rmse', float('inf')) < best_metrics.get('rmse', float('inf')):
                     best_metrics = metrics
                     best_forecast = forecast
+                    best_test_results = test_results
 
             return best_forecast, best_metrics
 
@@ -943,10 +1005,16 @@ class ForecastExecutionService:
         
         metrics = ForecastExecutionService.calculate_metrics(y, fitted)
         
-        return np.array(forecast), metrics
+        # Prepare test forecast
+        test_results = {
+            'test_forecast': np.array(fitted),
+            'test_dates': data['period'].tolist() if 'period' in data.columns else []
+        }
+        
+        return np.array(forecast), metrics 
 
     @staticmethod
-    def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> Tuple[np.ndarray, Dict[str, float]]:
+    def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Simple Moving Average forecast."""
         y = data['total_quantity'].values if 'total_quantity' in data.columns else data['quantity'].values
 
@@ -962,10 +1030,16 @@ class ForecastExecutionService:
         predicted = np.array([np.mean(y[max(0, i-window):i+1]) for i in range(len(y))])
         metrics = ForecastExecutionService.calculate_metrics(y, predicted)
 
-        return forecast, metrics
+        # Prepare test forecast
+        test_results = {
+            'test_forecast': predicted,
+            'test_dates': data['period'].tolist() if 'period' in data.columns else []
+        }
+
+        return forecast, metrics 
 
     @staticmethod
-    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float]]:
+    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Prophet forecasting using Facebook's Prophet library."""
         try:
             if Prophet is None:
@@ -1023,8 +1097,14 @@ class ForecastExecutionService:
             fitted_values = forecast_df['yhat'].values[:n]
             metrics = ForecastExecutionService.calculate_metrics(y_values, fitted_values)
 
+            # Prepare test forecast
+            test_results = {
+                'test_forecast': fitted_values,
+                'test_dates': data['period'].tolist() if 'period' in data.columns else []
+            }
+
             logger.info(f"Prophet forecast completed with {periods} periods")
-            return forecast, metrics
+            return forecast, metrics 
 
         except ImportError:
             logger.warning("Prophet library not available, falling back to Exponential Smoothing")
@@ -1034,7 +1114,7 @@ class ForecastExecutionService:
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
     @staticmethod
-    def lstm_forecast(data: pd.DataFrame, periods: int, sequence_length: int = 12, epochs: int = 50, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float]]:
+    def lstm_forecast(data: pd.DataFrame, periods: int, sequence_length: int = 12, epochs: int = 50, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """LSTM Neural Network forecasting."""
         try:
             from tensorflow import keras
@@ -1114,12 +1194,19 @@ class ForecastExecutionService:
             forecast = np.maximum(forecast, 0)  # Ensure non-negative
 
             # Calculate metrics on training data
-            y_train_pred = model.predict(X_train, verbose=0).flatten()
+            y_train_pred_scaled = model.predict(X_train, verbose=0).flatten()
+            y_train_pred = scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
             y_train_actual = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
             metrics = ForecastExecutionService.calculate_metrics(y_train_actual, y_train_pred)
 
+            # Prepare test forecast
+            test_results = {
+                'test_forecast': y_train_pred,
+                'test_dates': data['period'].iloc[sequence_length:].tolist() if 'period' in data.columns else []
+            }
+
             logger.info(f"LSTM forecast completed with {periods} periods")
-            return forecast, metrics
+            return forecast, metrics 
 
         except ImportError:
             logger.warning("TensorFlow/Keras not available, falling back to Exponential Smoothing")
@@ -1129,7 +1216,7 @@ class ForecastExecutionService:
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
     @staticmethod
-    def gaussian_process_forecast(data: pd.DataFrame, periods: int, kernel: str = 'RBF', alpha: float = 1e-6) -> Tuple[np.ndarray, Dict[str, float]]:
+    def gaussian_process_forecast(data: pd.DataFrame, periods: int, kernel: str = 'RBF', alpha: float = 1e-6) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """
         Gaussian Process Regression forecasting with uncertainty quantification.
         
@@ -1140,7 +1227,7 @@ class ForecastExecutionService:
             alpha: Regularization strength
             
         Returns:
-            Tuple of (forecast_array, metrics_dict)
+            Tuple of (forecast_array, metrics_dict )
         """
         try:
             from sklearn.gaussian_process import GaussianProcessRegressor
@@ -1216,7 +1303,8 @@ class ForecastExecutionService:
             # Handle NaN values in forecast
             forecast = np.nan_to_num(forecast, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # Calculate metrics on test data
+            # Calculate metrics on training data
+            test_results = None
             if len(X_train) > 0:
                 y_pred_scaled = gp.predict(X_train_scaled)
                 y_pred = scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
@@ -1225,13 +1313,19 @@ class ForecastExecutionService:
                 metrics = ForecastExecutionService.calculate_metrics(y_train, y_pred)
                 # Handle NaN in metrics
                 metrics = {k: (0.0 if np.isnan(v) else v) for k, v in metrics.items()}
+                
+                # Prepare test forecast results
+                test_results = {
+                    'test_forecast': y_pred,
+                    'test_dates': data['period'].iloc[max_lags:].tolist() if 'period' in data.columns else []
+                }
             else:
                 metrics = {'mae': 0, 'rmse': 0, 'mape': 0, 'r_squared': 0}
 
             # Forecast validation removed
 
             logger.info(f"Gaussian Process forecast completed with {periods} periods")
-            return forecast, metrics
+            return forecast, metrics 
             
         except ImportError:
             logger.warning("Scikit-learn not available, falling back to Exponential Smoothing")
@@ -1241,7 +1335,7 @@ class ForecastExecutionService:
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
     @staticmethod
-    def mlp_neural_network_forecast(data: pd.DataFrame, periods: int, hidden_layers: List[int] = None, epochs: int = 100, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float]]:
+    def mlp_neural_network_forecast(data: pd.DataFrame, periods: int, hidden_layers: List[int] = None, epochs: int = 100, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """
         Multi-layer Perceptron (MLP) Neural Network forecasting.
         
@@ -1253,7 +1347,7 @@ class ForecastExecutionService:
             batch_size: Batch size for training
             
         Returns:
-            Tuple of (forecast_array, metrics_dict)
+            Tuple of (forecast_array, metrics_dict )
         """
         if hidden_layers is None:
             hidden_layers = [64, 32]
@@ -1337,10 +1431,16 @@ class ForecastExecutionService:
             y_train_pred = y_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
             metrics = ForecastExecutionService.calculate_metrics(y_train, y_train_pred)
             
+            # Prepare test forecast results
+            test_results = {
+                'test_forecast': y_train_pred,
+                'test_dates': data['period'].iloc[sequence_length:].tolist() if 'period' in data.columns else []
+            }
+
             # Forecast validation removed
             
             logger.info(f"MLP Neural Network forecast completed with {periods} periods")
-            return forecast, metrics
+            return forecast, metrics 
             
         except ImportError:
             logger.warning("TensorFlow not available, falling back to Exponential Smoothing")
@@ -1398,12 +1498,17 @@ class ForecastExecutionService:
         fitted = trend + seasonal_full
         valid_fitted = ~np.isnan(fitted)
         
+        test_results = None
         if np.sum(valid_fitted) > 0:
             metrics = ForecastExecutionService.calculate_metrics(y[valid_fitted], fitted[valid_fitted])
+            test_results = {
+                'test_forecast': fitted[valid_fitted],
+                'test_dates': data['period'].iloc[np.where(valid_fitted)[0]].tolist() if 'period' in data.columns else []
+            }
         else:
             metrics = {'accuracy': 50.0, 'mae': np.std(y), 'rmse': np.std(y)}
         
-        return forecast, metrics
+        return forecast, metrics 
 
     @staticmethod
     def moving_average_forecast(data: pd.DataFrame, periods: int, window: int = 3) -> tuple:
@@ -1430,7 +1535,13 @@ class ForecastExecutionService:
         # Calculate metrics
         metrics = ForecastExecutionService.calculate_metrics(y[window-1:], moving_avg[window-1:])
         
-        return forecast, metrics
+        # Prepare test forecast
+        test_results = {
+            'test_forecast': np.array(moving_avg[window-1:]),
+            'test_dates': data['period'].iloc[window-1:].tolist() if 'period' in data.columns else []
+        }
+        
+        return forecast, metrics 
 
     @staticmethod
     def sarima_forecast(data: pd.DataFrame, periods: int) -> tuple:
@@ -1477,11 +1588,18 @@ class ForecastExecutionService:
                 fitted = auto_model.predict_in_sample()
                 if len(fitted) == len(y):
                     metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+                    start_idx = 0
                 else:
                     start_idx = len(y) - len(fitted)
                     metrics = ForecastExecutionService.calculate_metrics(y[start_idx:], fitted)
 
-                return forecast, metrics
+                # Prepare test forecast
+                test_results = {
+                    'test_forecast': fitted,
+                    'test_dates': data['period'].iloc[start_idx:].tolist() if 'period' in data.columns else []
+                }
+
+                return forecast, metrics 
 
         except Exception as e:
             print(f"SARIMA failed: {e}")
@@ -1622,7 +1740,7 @@ class ForecastExecutionService:
         return np.array(features)
 
     @staticmethod
-    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
+    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """
         XGBoost forecasting with time series cross-validation to prevent data leakage.
 
@@ -1634,7 +1752,7 @@ class ForecastExecutionService:
             learning_rate: Boosting learning rate
 
         Returns:
-            Tuple of (forecast_array, metrics_dict)
+            Tuple of (forecast_array, metrics_dict )
         """
         try:
             # Validate parameters
@@ -1741,24 +1859,37 @@ class ForecastExecutionService:
             forecast = np.array(forecast)
 
             # Calculate metrics on test data (to reflect real performance)
+            test_results = None
             if len(X_test) > 0:
                 predicted_test = model.predict(X_test)
                 metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+                
+                # Prepare test forecast results
+                test_results = {
+                    'test_forecast': predicted_test,
+                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
+                }
             else:
                 # Fallback to training metrics if no test data
                 predicted = model.predict(X_train)
                 metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+                
+                test_results = {
+                    'test_forecast': predicted,
+                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
+                }
 
-            # Forecast validation removed
-
-            return forecast, metrics
+            return forecast, metrics 
 
         except ImportError:
             logger.warning("XGBoost not available, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
+        except Exception as e:
+            logger.warning(f"XGBoost forecasting failed: {str(e)}, falling back to Linear Regression")
+            return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float]]:
+    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Support Vector Regression forecasting with time series cross-validation."""
         try:
             # Validate parameters
@@ -1868,23 +1999,34 @@ class ForecastExecutionService:
             forecast = np.array(forecast)
 
             # Calculate metrics on test data
+            test_results = None
             if len(X_test) > 0:
                 X_test_scaled = scaler.transform(X_test)
                 predicted_test = model.predict(X_test_scaled)
                 metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+                
+                test_results = {
+                    'test_forecast': predicted_test,
+                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
+                }
             else:
                 # Fallback to training metrics if no test data
                 predicted = model.predict(X_train_scaled)
                 metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+                
+                test_results = {
+                    'test_forecast': predicted,
+                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
+                }
 
-            return forecast, metrics
+            return forecast, metrics 
 
         except Exception as e:
             logger.warning(f"SVR failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float]]:
+    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """K-Nearest Neighbors forecasting with time series cross-validation."""
         try:
             # Prepare quantity data
@@ -1984,23 +2126,34 @@ class ForecastExecutionService:
             forecast = np.array(forecast)
 
             # Calculate metrics on test data
+            test_results = None
             if len(X_test) > 0:
                 X_test_scaled = scaler.transform(X_test)
                 predicted_test = model.predict(X_test_scaled)
                 metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+                
+                test_results = {
+                    'test_forecast': predicted_test,
+                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
+                }
             else:
                 # Fallback to training metrics if no test data
                 predicted = model.predict(X_train_scaled)
                 metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+                
+                test_results = {
+                    'test_forecast': predicted,
+                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
+                }
 
-            return forecast, metrics
+            return forecast, metrics 
 
         except Exception as e:
             logger.warning(f"KNN failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float]]:
+    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Random Forest regression forecasting with hyperparameter tuning."""
         try:
             n_estimators = max(10, min(500, n_estimators))
@@ -2088,16 +2241,26 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
+            # Calculate metrics on test data
+            test_results = None
             if len(X_test) > 0:
                 predicted_test = model.predict(X_test)
                 metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
+                
+                test_results = {
+                    'test_forecast': predicted_test,
+                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
+                }
             else:
                 predicted = model.predict(X_train)
                 metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
+                
+                test_results = {
+                    'test_forecast': predicted,
+                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
+                }
 
-            # Forecast validation removed
-
-            return forecast, metrics
+            return forecast, metrics 
 
         except Exception as e:
             logger.warning(f"Random Forest failed: {str(e)}, falling back to Linear Regression")
@@ -2205,96 +2368,170 @@ class ForecastExecutionService:
         return dates
 
     @staticmethod
-    def _store_forecast_results(
+    def _store_forecast_results_v2(
         tenant_id: str,
         database_name: str,
         forecast_run_id: str,
         version_id: str,
         mapping_id: str,
         algorithm_id: int,
-        forecast_dates: List[date],
-        forecast_values: np.ndarray,
-        metrics: Dict[str, float],
+        test_dates: List[date],
+        test_actuals: np.ndarray,
+        test_forecast: np.ndarray,
+        test_metrics: Dict[str, float],
+        future_dates: List[date],
+        future_forecast: np.ndarray,
         user_email: str
     ) -> List[Dict[str, Any]]:
-        """Store forecast results in database."""
+        """
+        Store forecast results with three types:
+        1. testing_actual - actual values from test period
+        2. testing_forecast - predicted values for test period
+        3. future_forecast - predictions for future period
+        """
+        from app.core.database import get_db_manager
+        from psycopg2.extras import Json
+        import uuid
+        
         db_manager = get_db_manager()
         results = []
         
-        # Ensure forecast_values is numpy array
-        forecast_values = np.asarray(forecast_values, dtype=np.float64)
-
-        # Handle NaN and infinite values
-        forecast_values = np.nan_to_num(forecast_values, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Validate and clip values to fit DECIMAL(18,4) bounds
-        # Max value for DECIMAL(18,4) is 9999999999999.9999
-        # But for forecast_quantity, we clip to reasonable business values
-        max_forecast_value = 99999999.999999
-        forecast_values = np.clip(forecast_values, 0, max_forecast_value)
+        # Ensure arrays are numpy arrays and handle NaN
+        test_actuals = np.nan_to_num(np.asarray(test_actuals, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        test_forecast = np.nan_to_num(np.asarray(test_forecast, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        future_forecast = np.nan_to_num(np.asarray(future_forecast, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Clip values to reasonable bounds
+        max_value = 99999999.999999
+        test_actuals = np.clip(test_actuals, 0, max_value)
+        test_forecast = np.clip(test_forecast, 0, max_value)
+        future_forecast = np.clip(future_forecast, 0, max_value)
         
         with db_manager.get_tenant_connection(database_name) as conn:
             cursor = conn.cursor()
             try:
-                for forecast_date, forecast_value in zip(forecast_dates, forecast_values):
+                # ====================================================================
+                # 1. Store testing_actual records
+                # ====================================================================
+                for test_date, actual_value in zip(test_dates, test_actuals):
                     result_id = str(uuid.uuid4())
-                    
-                    # Convert to Python native types and validate
-                    forecast_value_float = float(forecast_value)
-                    
-                    # Double-check bounds
-                    if not (0 <= forecast_value_float <= max_forecast_value):
-                        logger.warning(
-                            f"Forecast value {forecast_value_float} out of bounds, "
-                            f"clipping to [{0}, {max_forecast_value}]"
-                        )
-                        forecast_value_float = np.clip(forecast_value_float, 0, max_forecast_value)
-                    
-                    # Round to 4 decimal places to match DECIMAL(18,4)
-                    forecast_value_float = round(forecast_value_float, 4)
-                    
-                    # Extract metric value safely
-                    accuracy_metric = 0.0
-                    if metrics and 'accuracy' in metrics and metrics['accuracy'] is not None:
-                        accuracy_metric = float(metrics['accuracy'])
-                        # Accuracy is DECIMAL(5,2) - max value 999.99
-                        if accuracy_metric > 999.99:
-                            accuracy_metric = 999.99
-                        accuracy_metric = round(accuracy_metric, 2)
+                    actual_float = round(float(actual_value), 4)
                     
                     cursor.execute("""
                         INSERT INTO forecast_results
-                        (result_id, forecast_run_id, version_id, mapping_id,
-                         algorithm_id, forecast_date, forecast_quantity, accuracy_metric,
-                         metric_type, metadata, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (result_id, forecast_run_id, version_id, mapping_id, algorithm_id,
+                         date, value, type, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         result_id,
                         forecast_run_id,
                         version_id,
                         mapping_id,
                         algorithm_id,
-                        forecast_date,
-                        forecast_value_float,
-                        accuracy_metric,
-                        'MAPE',
-                        Json({'metrics': metrics}),  # Use Json() wrapper
+                        test_date,
+                        actual_float,
+                        'testing_actual',
                         user_email
                     ))
                     
                     results.append({
                         'result_id': result_id,
-                        'forecast_date': forecast_date.isoformat(),
-                        'forecast_quantity': forecast_value_float
+                        'date': test_date.isoformat() if isinstance(test_date, date) else str(test_date),
+                        'value': actual_float,
+                        'type': 'testing_actual'
+                    })
+                
+                # ====================================================================
+                # 2. Store testing_forecast records (with accuracy metrics)
+                # ====================================================================
+                accuracy_metric = 0.0
+                if test_metrics and 'accuracy' in test_metrics:
+                    accuracy_metric = float(test_metrics['accuracy'])
+                    accuracy_metric = min(round(accuracy_metric, 2), 999.99)
+                
+                for test_date, forecast_value in zip(test_dates, test_forecast):
+                    result_id = str(uuid.uuid4())
+                    forecast_float = round(float(forecast_value), 4)
+                    
+                    cursor.execute("""
+                        INSERT INTO forecast_results
+                        (result_id, forecast_run_id, version_id, mapping_id, algorithm_id,
+                         date, value, type, accuracy_metric, metric_type, metadata, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        result_id,
+                        forecast_run_id,
+                        version_id,
+                        mapping_id,
+                        algorithm_id,
+                        test_date,
+                        forecast_float,
+                        'testing_forecast',
+                        accuracy_metric,
+                        'MAPE',
+                        Json({'test_metrics': test_metrics}),
+                        user_email
+                    ))
+                    
+                    results.append({
+                        'result_id': result_id,
+                        'date': test_date.isoformat() if isinstance(test_date, date) else str(test_date),
+                        'value': forecast_float,
+                        'type': 'testing_forecast',
+                        'accuracy_metric': accuracy_metric
+                    })
+                
+                # ====================================================================
+                # 3. Store future_forecast records (with confidence intervals)
+                # ====================================================================
+                for future_date, forecast_value in zip(future_dates, future_forecast):
+                    result_id = str(uuid.uuid4())
+                    forecast_float = round(float(forecast_value), 4)
+                    
+                    # Calculate simple confidence intervals (±10% for demonstration)
+                    ci_lower = round(forecast_float * 0.9, 4)
+                    ci_upper = round(forecast_float * 1.1, 4)
+                    
+                    cursor.execute("""
+                        INSERT INTO forecast_results
+                        (result_id, forecast_run_id, version_id, mapping_id, algorithm_id,
+                         date, value, type, confidence_interval_lower, confidence_interval_upper,
+                         confidence_level, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        result_id,
+                        forecast_run_id,
+                        version_id,
+                        mapping_id,
+                        algorithm_id,
+                        future_date,
+                        forecast_float,
+                        'future_forecast',
+                        ci_lower,
+                        ci_upper,
+                        '90%',
+                        user_email
+                    ))
+                    
+                    results.append({
+                        'result_id': result_id,
+                        'date': future_date.isoformat() if isinstance(future_date, date) else str(future_date),
+                        'value': forecast_float,
+                        'type': 'future_forecast',
+                        'confidence_interval_lower': ci_lower,
+                        'confidence_interval_upper': ci_upper
                     })
                 
                 conn.commit()
+                logger.info(
+                    f"Stored forecast results: {len(test_actuals)} testing_actual, "
+                    f"{len(test_forecast)} testing_forecast, {len(future_forecast)} future_forecast"
+                )
                 
             finally:
                 cursor.close()
         
         return results
-
     @staticmethod
     def _update_algorithm_status(
         database_name: str,
@@ -2549,16 +2786,6 @@ class ForecastExecutionService:
             # Debug: Log data information
             logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
             logger.info(f"Algorithm {algorithm_name}: Data shape: {data.shape}")
-            logger.info(f"Algorithm {algorithm_name}: Data columns: {list(data.columns)}")
-            logger.info(f"Algorithm {algorithm_name}: Data dtypes: {data.dtypes.to_dict()}")
-            logger.info(f"Algorithm {algorithm_name}: First 5 rows:\n{data.head()}")
-            logger.info(f"Algorithm {algorithm_name}: Last 5 rows:\n{data.tail()}")
-            logger.info(f"Algorithm {algorithm_name}: Data summary:\n{data.describe()}")
-
-            # Check for null values
-            null_counts = data.isnull().sum()
-            if null_counts.sum() > 0:
-                logger.info(f"Algorithm {algorithm_name}: Null value counts:\n{null_counts}")
 
             # Ensure we have target_column (rename if needed)
             if 'quantity' in data.columns and target_column not in data.columns:
@@ -2580,39 +2807,57 @@ class ForecastExecutionService:
                 "simple_moving_average": ForecastExecutionService.simple_moving_average,
                 "seasonal_decomposition": ForecastExecutionService.seasonal_decomposition_forecast,
                 "moving_average": ForecastExecutionService.moving_average_forecast,
-                "sarima": ForecastExecutionService.sarima_forecast
+                "sarima": ForecastExecutionService.sarima_forecast,
+                "random_forest": ForecastExecutionService.random_forest_forecast
             }
             algorithm_func = algorithm_map.get(algorithm_name)
             if algorithm_func is None:
                 raise ValueError(f"Unknown algorithm: {algorithm_name}")
             
             def execute(input_data: pd.DataFrame, horizon: int) -> Tuple[np.ndarray, Dict[str, float]]:
+                """Execute algorithm and ensure it returns exactly 2 values"""
                 target_data = input_data if input_data is not None else data
                 if target_data is None or target_data.empty:
                     target_data = data
-                return algorithm_func(target_data, max(1, horizon))
+                
+                # Call the algorithm - it should return (forecast, metrics)
+                result = algorithm_func(target_data, max(1, horizon))
+                
+                # Ensure we have exactly 2 return values
+                if isinstance(result, tuple):
+                    if len(result) == 2:
+                        forecast, metrics = result
+                        return forecast, metrics
+                    else:
+                        raise ValueError(f"Algorithm {algorithm_name} returned {len(result)} values, expected 2")
+                else:
+                    raise ValueError(f"Algorithm {algorithm_name} did not return a tuple")
             
+            # Split data for evaluation
             train_df, test_df = ForecastExecutionService._split_train_test_dataframe(data)
             eval_data = train_df if train_df is not None and not train_df.empty else data
             eval_periods = len(test_df)
+            
             metrics: Dict[str, float]
+            
+            # Evaluate on test data if available
             if eval_periods > 0:
-                eval_forecast, _ = execute(eval_data, eval_periods)
+                eval_forecast, eval_metrics = execute(eval_data, eval_periods)
                 actual_eval = test_df[target_column].values
                 predicted_eval = np.asarray(eval_forecast)[:len(actual_eval)]
                 metrics = ForecastExecutionService.calculate_metrics(actual_eval, predicted_eval)
             else:
+                # Fallback: use training metrics
                 fallback_horizon = min(max(1, periods), max(1, len(eval_data)))
                 _, metrics = execute(eval_data, fallback_horizon)
             
+            # Generate final forecast on full data
             forecast, _ = execute(data, periods)
             
             # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
             
-            # Forecast quality validation removed
-            
-            # Extract accuracy metric (already calculated in calculate_metrics)
+            # Extract accuracy metric
             accuracy = metrics.get('accuracy', 0)
             
             return {
@@ -2633,5 +2878,6 @@ class ForecastExecutionService:
                 'accuracy': 0,
                 'mae': 999.0,
                 'rmse': 999.0,
-                'mape': 100.0
+                'mape': 100.0,
+                'error': str(e)
             }

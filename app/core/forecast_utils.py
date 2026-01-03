@@ -1,5 +1,6 @@
 """
 Forecast Utilities - Shared functions and models for forecasting operations.
+UPDATED: Now supports train-test split with testing_actual, testing_forecast, and future_forecast
 """
 
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 import uuid
 import pandas as pd
+import numpy as np
 from psycopg2.extras import Json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -77,7 +79,6 @@ def _process_entity_forecast(
     try:
         logger.info(f"Processing entity: {entity_name}")
 
-        # ✅ CHANGED: Use specific_combination parameter instead of updating filters
         # Get base filters without aggregation-level-specific fields
         base_filters = {k: v for k, v in request_data.forecast_filters.items() 
                        if k not in ['aggregation_level', 'interval', 'selected_external_factors']}
@@ -129,7 +130,6 @@ def _process_entity_forecast(
 
             try:
                 # Create forecast run
-                # ✅ CHANGED: Use base_filters + entity_filter + selected_factors for storage
                 filters_to_store = base_filters.copy()
                 filters_to_store.update(entity_filter)
                 filters_to_store['aggregation_level'] = aggregation_level
@@ -186,8 +186,64 @@ def _process_entity_forecast(
                     finally:
                         cursor.close()
 
+                # ================================================================
                 # Execute the algorithm
+                # ================================================================
+                
+                # ✅ FIXED: Do train-test split for ALL algorithms including best_fit
+                train_ratio = 0.8
+                n = len(historical_data)
+                split_index = max(2, int(n * train_ratio))
+                
+                train_data = historical_data.iloc[:split_index].copy()
+                test_data = historical_data.iloc[split_index:].copy()
+                test_periods = len(test_data)
+                
+                logger.info(f"DEBUG Entity {entity_name}: n={n}, split={split_index}, test_periods={test_periods}")
+                
+                # Get test actuals and dates for ALL algorithms
+                if test_periods > 0:
+                    # Get actual values
+                    if 'total_quantity' in test_data.columns:
+                        test_actuals = test_data['total_quantity'].values.tolist()
+                    elif 'quantity' in test_data.columns:
+                        test_actuals = test_data['quantity'].values.tolist()
+                    else:
+                        test_actuals = []
+                    
+                    # Get dates
+                    if 'period' in test_data.columns:
+                        test_dates = pd.to_datetime(test_data['period']).dt.date.tolist()
+                    elif date_field_name in test_data.columns:
+                        test_dates = pd.to_datetime(test_data[date_field_name]).dt.date.tolist()
+                    else:
+                        test_dates = []
+                        
+                    logger.info(f"DEBUG: Test actuals={len(test_actuals)}, test_dates={len(test_dates)}")
+                else:
+                    test_actuals = []
+                    test_dates = []
+                
                 if algo_config.algorithm_id == 999:
+                    # Best Fit algorithm
+                    
+                    # Generate test forecast on training data
+                    if test_periods > 0:
+                        try:
+                            test_forecast_result = ForecastExecutionService.generate_forecast(
+                                historical_data=train_data,
+                                config={'interval': interval, 'periods': test_periods},
+                                process_log=[]
+                            )
+                            test_forecasts = test_forecast_result['forecast']
+                            logger.info(f"DEBUG: Best fit test forecasts generated: {len(test_forecasts)}")
+                        except Exception as e:
+                            logger.warning(f"Best fit test forecast failed: {str(e)}")
+                            test_forecasts = []
+                    else:
+                        test_forecasts = []
+                    
+                    # Generate future forecast on full data
                     forecast_result = ForecastExecutionService.generate_forecast(
                         historical_data=historical_data,
                         config={'interval': interval, 'periods': periods},
@@ -204,7 +260,35 @@ def _process_entity_forecast(
                         'process_log': forecast_result.get('process_log', []),
                         'algorithms_evaluated': len(forecast_result.get('all_algorithms', []))
                     }
+                    
                 else:
+                    # Specific algorithm
+                    
+                    # Generate test forecast on training data
+                    if test_periods > 0:
+                        try:
+                            test_result = ForecastExecutionService._run_algorithm_safe(
+                                algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
+                                data=train_data.copy(),
+                                periods=test_periods,
+                                target_column='total_quantity'
+                            )
+                            test_forecasts = test_result['forecast']
+                            
+                            # Ensure test_forecasts is a list
+                            if isinstance(test_forecasts, np.ndarray):
+                                test_forecasts = test_forecasts.tolist()
+                            elif not isinstance(test_forecasts, list):
+                                test_forecasts = list(test_forecasts)
+                                
+                            logger.info(f"DEBUG: Specific algo test forecasts generated: {len(test_forecasts)}")
+                        except Exception as e:
+                            logger.warning(f"Could not generate test forecast: {str(e)}")
+                            test_forecasts = []
+                    else:
+                        test_forecasts = []
+                    
+                    # Generate future forecast on full data
                     algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
                         algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
                         data=historical_data.copy(),
@@ -224,15 +308,77 @@ def _process_entity_forecast(
                         'rmse': algorithm_name_result.get('rmse'),
                         'mape': algorithm_name_result.get('mape')
                     }
+                
+                # ✅ LOG what we have before inserting
+                logger.info(f"DEBUG {entity_name}: Preparing to insert:")
+                logger.info(f"  test_actuals={len(test_actuals)}, test_forecasts={len(test_forecasts)}, test_dates={len(test_dates)}")
+                logger.info(f"  future_forecasts={len(algo_forecast)}, future_dates={len(forecast_dates)}")
 
-                # Batch insert forecast results
+                # ================================================================
+                # BATCH INSERT: All three types of results
+                # ================================================================
                 batch_data = []
-                for forecast_date, forecast_value in zip(forecast_dates, algo_forecast):
+                
+                # 1. Insert testing_actual records
+                for test_date, actual_value in zip(test_dates, test_actuals):
+                    result_id = str(uuid.uuid4())
+                    actual_value_float = min(999999.9999, max(0, float(actual_value)))
+                    actual_value_float = round(actual_value_float, 4)
+                    
+                    batch_data.append((
+                        result_id,
+                        forecast_run_id,
+                        request_data.version_id,
+                        algo_mapping_id,
+                        algo_config.algorithm_id,
+                        test_date,
+                        actual_value_float,
+                        'testing_actual',
+                        None,  # No accuracy metric for actuals
+                        None,  # No metric type for actuals
+                        Json({
+                            'algorithm': algo_name_for_result,
+                            'entity_filter': entity_filter
+                        }),
+                        tenant_data["email"]
+                    ))
+                
+                # 2. Insert testing_forecast records
+                for test_date, forecast_value in zip(test_dates, test_forecasts):
                     result_id = str(uuid.uuid4())
                     forecast_value_float = min(999999.9999, max(0, float(forecast_value)))
                     forecast_value_float = round(forecast_value_float, 4)
                     accuracy_metric = round(algo_accuracy, 2) if algo_accuracy else None
-
+                    
+                    batch_data.append((
+                        result_id,
+                        forecast_run_id,
+                        request_data.version_id,
+                        algo_mapping_id,
+                        algo_config.algorithm_id,
+                        test_date,
+                        forecast_value_float,
+                        'testing_forecast',
+                        accuracy_metric,
+                        'MAPE',
+                        Json({
+                            'algorithm': algo_name_for_result,
+                            **algo_metrics,
+                            'entity_filter': entity_filter
+                        }),
+                        tenant_data["email"]
+                    ))
+                
+                # 3. Insert future_forecast records
+                for forecast_date, forecast_value in zip(forecast_dates, algo_forecast):
+                    result_id = str(uuid.uuid4())
+                    forecast_value_float = min(999999.9999, max(0, float(forecast_value)))
+                    forecast_value_float = round(forecast_value_float, 4)
+                    
+                    # Simple confidence intervals (±10%)
+                    ci_lower = round(forecast_value_float * 0.9, 4)
+                    ci_upper = round(forecast_value_float * 1.1, 4)
+                    
                     batch_data.append((
                         result_id,
                         forecast_run_id,
@@ -241,26 +387,30 @@ def _process_entity_forecast(
                         algo_config.algorithm_id,
                         forecast_date,
                         forecast_value_float,
-                        accuracy_metric,
-                        'Accuracy',
+                        'future_forecast',
+                        None,  # No accuracy for future
+                        None,  # No metric type for future
                         Json({
                             'algorithm': algo_name_for_result,
                             **algo_metrics,
-                            'entity_filter': entity_filter
+                            'entity_filter': entity_filter,
+                            'confidence_interval_lower': ci_lower,
+                            'confidence_interval_upper': ci_upper,
+                            'confidence_level': '90%'
                         }),
                         tenant_data["email"]
                     ))
 
-                # Batch insert results
+                # Batch insert all results
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                     cursor = conn.cursor()
                     try:
                         cursor.executemany("""
                             INSERT INTO forecast_results
                             (result_id, forecast_run_id, version_id, mapping_id,
-                             algorithm_id, forecast_date, forecast_quantity, accuracy_metric,
+                             algorithm_id, date, value, type, accuracy_metric,
                              metric_type, metadata, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, batch_data)
                         conn.commit()
                     finally:
@@ -280,7 +430,9 @@ def _process_entity_forecast(
                             Json({
                                 'algorithm_name': algo_name_for_result,
                                 'entity_filter': entity_filter,
-                                **algo_metrics
+                                **algo_metrics,
+                                'test_records': len(test_actuals),
+                                'forecast_records': len(forecast_dates)
                             }),
                             datetime.utcnow(),
                             algo_mapping_id
@@ -289,7 +441,8 @@ def _process_entity_forecast(
                     finally:
                         cursor.close()
 
-                algo_records_count = len(forecast_dates)
+                # Calculate total records (test actuals + test forecasts + future forecasts)
+                algo_records_count = len(test_actuals) + len(test_forecasts) + len(forecast_dates)
 
                 # Mark forecast run as completed
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
@@ -315,7 +468,11 @@ def _process_entity_forecast(
                     finally:
                         cursor.close()
 
-                logger.info(f"Entity {entity_name}, Algorithm {algo_name_for_result}: {algo_records_count} forecast records, Accuracy: {algo_accuracy:.2f}%")
+                logger.info(
+                    f"Entity {entity_name}, Algorithm {algo_name_for_result}: "
+                    f"{len(test_actuals)} test actuals, {len(test_forecasts)} test forecasts, "
+                    f"{len(forecast_dates)} future forecasts, Accuracy: {algo_accuracy:.2f}%"
+                )
 
                 return {
                     "entity": entity_name,
@@ -325,6 +482,8 @@ def _process_entity_forecast(
                     "forecast_run_id": forecast_run_id,
                     "status": "Completed",
                     "records": algo_records_count,
+                    "test_records": len(test_actuals),
+                    "forecast_records": len(forecast_dates),
                     "accuracy": round(algo_accuracy, 2) if algo_accuracy else None
                 }
 

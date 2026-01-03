@@ -665,27 +665,38 @@ class SchemaManager:
                         version_id UUID NOT NULL REFERENCES forecast_versions(version_id) ON DELETE CASCADE,
                         mapping_id UUID NOT NULL REFERENCES forecast_algorithms_mapping(mapping_id) ON DELETE CASCADE,
                         algorithm_id INTEGER NOT NULL REFERENCES algorithms(algorithm_id),
-                        forecast_date DATE NOT NULL,
-                        forecast_quantity DECIMAL(18, 4) NOT NULL,
+                        
+                        -- Core forecast data (UPDATED SCHEMA)
+                        date DATE NOT NULL,
+                        value DECIMAL(18, 4) NOT NULL,
+                        type VARCHAR(50) NOT NULL,
+                        
+                        -- Confidence intervals (only for future_forecast)
                         confidence_interval_lower DECIMAL(18, 4),
                         confidence_interval_upper DECIMAL(18, 4),
                         confidence_level VARCHAR(20),
+                        
+                        -- Accuracy metrics (only for testing_forecast)
                         accuracy_metric DECIMAL(5, 2),
                         metric_type VARCHAR(50),
+                        
                         metadata JSONB,
                         
                         -- Audit fields (created only - results are immutable)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
+                        CONSTRAINT check_result_type CHECK (type IN ('testing_actual', 'testing_forecast', 'future_forecast'))
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_run ON forecast_results(forecast_run_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_results_date ON forecast_results(forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_date ON forecast_results(date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_algo ON forecast_results(algorithm_id);
-                    CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(forecast_run_id, forecast_date);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_composite ON forecast_results(forecast_run_id, date);
                     CREATE INDEX IF NOT EXISTS idx_forecast_results_version ON forecast_results(version_id);
-
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_type ON forecast_results(type);
+                    CREATE INDEX IF NOT EXISTS idx_forecast_results_type_date ON forecast_results(type, date);
                     -- ========================================================================
                     -- Forecast Audit Log table (CREATED ONLY - immutable log entries)
                     -- ========================================================================

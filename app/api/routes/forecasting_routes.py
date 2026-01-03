@@ -447,12 +447,26 @@ async def compare_forecast_results(
     tenant_data: Dict = Depends(get_current_tenant),
     forecast_run_id: str = Query(..., description="Forecast run ID"),
     date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None)
+    date_to: Optional[str] = Query(None),
+    result_type: Optional[str] = Query(
+        "future_forecast", 
+        description="Type of results to compare",
+        pattern="^(testing_actual|testing_forecast|future_forecast)$"
+    )
 ):
     """
     Compare results across all algorithms for a forecast run.
     
     Returns aggregated comparison data showing each algorithm's performance.
+    
+    Parameters:
+        - forecast_run_id: ID of the forecast run
+        - date_from: Optional start date filter
+        - date_to: Optional end date filter
+        - result_type: Type of results to compare (default: future_forecast)
+          - testing_actual: Actual values from test period
+          - testing_forecast: Predicted values for test period
+          - future_forecast: Predictions for future period
     """
     try:
         from app.core.database import get_db_manager
@@ -461,34 +475,35 @@ async def compare_forecast_results(
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
-                # Build WHERE clause
-                where_clauses = ["fr.tenant_id = %s", "fr.forecast_run_id = %s"]
-                params = [tenant_data["tenant_id"], forecast_run_id]
+                # Build WHERE clause - UPDATED to use new columns
+                where_clauses = ["fr.forecast_run_id = %s", "fr.type = %s"]
+                params = [forecast_run_id, result_type]
                 
                 if date_from:
-                    where_clauses.append("fr.forecast_date >= %s")
+                    where_clauses.append("fr.date >= %s")  # Changed from forecast_date
                     params.append(date_from)
                 
                 if date_to:
-                    where_clauses.append("fr.forecast_date <= %s")
+                    where_clauses.append("fr.date <= %s")  # Changed from forecast_date
                     params.append(date_to)
                 
                 where_sql = " AND ".join(where_clauses)
                 
-                # Get comparison data
+                # Get comparison data - UPDATED to use new columns
                 cursor.execute(f"""
                     SELECT 
                         a.algorithm_id,
                         a.algorithm_name,
+                        fr.type,
                         COUNT(fr.result_id) as result_count,
-                        AVG(fr.forecast_quantity) as avg_forecast,
-                        MIN(fr.forecast_quantity) as min_forecast,
-                        MAX(fr.forecast_quantity) as max_forecast,
+                        AVG(fr.value) as avg_value,
+                        MIN(fr.value) as min_value,
+                        MAX(fr.value) as max_value,
                         AVG(fr.accuracy_metric) as avg_accuracy
                     FROM forecast_results fr
                     JOIN algorithms a ON fr.algorithm_id = a.algorithm_id
                     WHERE {where_sql}
-                    GROUP BY a.algorithm_id, a.algorithm_name
+                    GROUP BY a.algorithm_id, a.algorithm_name, fr.type
                     ORDER BY a.algorithm_name
                 """, params)
                 
@@ -497,16 +512,18 @@ async def compare_forecast_results(
                     comparison.append({
                         "algorithm_id": row[0],
                         "algorithm_name": row[1],
-                        "result_count": row[2],
-                        "avg_forecast": round(float(row[3]), 2) if row[3] else None,
-                        "min_forecast": round(float(row[4]), 2) if row[4] else None,
-                        "max_forecast": round(float(row[5]), 2) if row[5] else None,
-                        "avg_accuracy_metric": round(float(row[6]), 2) if row[6] else None
+                        "result_type": row[2],
+                        "result_count": row[3],
+                        "avg_value": round(float(row[4]), 2) if row[4] else None,
+                        "min_value": round(float(row[5]), 2) if row[5] else None,
+                        "max_value": round(float(row[6]), 2) if row[6] else None,
+                        "avg_accuracy_metric": round(float(row[7]), 2) if row[7] else None
                     })
                 
                 logger.info(f"Generated algorithm comparison for forecast run {forecast_run_id}: {len(comparison)} algorithms")
                 return ResponseHandler.success(data={
                     "forecast_run_id": forecast_run_id,
+                    "result_type": result_type,
                     "algorithm_comparison": comparison
                 })
                 
@@ -518,8 +535,6 @@ async def compare_forecast_results(
     except Exception as e:
         logger.error(f"Unexpected error comparing results: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
 
 
 @router.get("/algorithms", response_model=Dict[str, Any])
