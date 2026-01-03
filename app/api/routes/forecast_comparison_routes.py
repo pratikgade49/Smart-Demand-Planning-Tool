@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from app.core.forecast_comparison_service import ForecastComparisonService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_tenant
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ async def compare_forecasts(
     aggregation_level: str = Query(..., description="Aggregation level (e.g., 'product', 'product-location')"),
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$", description="Time interval"),
     forecast_run_ids: Optional[str] = Query(None, description="Comma-separated list of forecast_run_ids to compare"),
-    user_data: Dict = Depends(get_current_user)
+    tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
     Compare forecast scenarios for a specific entity.
@@ -72,7 +72,7 @@ async def compare_forecasts(
         
         # Execute comparison
         result = ForecastComparisonService.compare_forecasts(
-            database_name=user_data["database_name"],
+            database_name=tenant_data["database_name"],
             entity_identifier=entity_identifier,
             aggregation_level=aggregation_level,
             interval=interval,
@@ -99,7 +99,7 @@ async def get_comparison_summary(
     entity_identifier: str = Query(..., description="Entity identifier"),
     aggregation_level: str = Query(..., description="Aggregation level"),
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$"),
-    user_data: Dict = Depends(get_current_user)
+    tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
     Get a summary of available forecasts for comparison without full data.
@@ -128,14 +128,14 @@ async def get_comparison_summary(
         
         # Get historical data count only
         historical_data = ForecastComparisonService.get_historical_data(
-            user_data["database_name"],
+            tenant_data["database_name"],
             entity_fields,
             interval
         )
 
         # Find matching runs
         matching_runs = ForecastComparisonService.find_matching_forecast_runs(
-            user_data["database_name"],
+            tenant_data["database_name"],
             entity_fields,
             aggregation_level,
             interval
@@ -158,7 +158,7 @@ async def get_comparison_summary(
         # Get metadata for runs
         run_ids = [run['forecast_run_id'] for run in matching_runs]
         forecast_metadata = ForecastComparisonService.get_forecast_metadata(
-            user_data["database_name"],
+            tenant_data["database_name"],
             run_ids
         )
         
@@ -220,7 +220,7 @@ async def export_comparison(
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$"),
     forecast_run_ids: str = Query(..., description="Comma-separated list of forecast_run_ids"),
     format: str = Query("json", pattern="^(json|csv)$", description="Export format"),
-    user_data: Dict = Depends(get_current_user)
+    tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
     Export comparison data in JSON or CSV format.
@@ -256,7 +256,7 @@ async def export_comparison(
         
         # Get full comparison data
         result = ForecastComparisonService.compare_forecasts(
-            database_name=user_data["database_name"],
+            database_name=tenant_data["database_name"],
             entity_identifier=entity_identifier,
             aggregation_level=aggregation_level,
             interval=interval,

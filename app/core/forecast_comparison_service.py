@@ -60,7 +60,6 @@ class ForecastComparisonService:
 
     @staticmethod
     def get_historical_data(
-        tenant_id: str,
         database_name: str,
         entity_fields: Dict[str, str],
         interval: str
@@ -69,7 +68,6 @@ class ForecastComparisonService:
         Get historical data for a specific entity.
         
         Args:
-            tenant_id: Tenant identifier
             database_name: Tenant's database name
             entity_fields: Dictionary of field:value pairs
             interval: Time interval (MONTHLY, WEEKLY, etc.)
@@ -82,7 +80,7 @@ class ForecastComparisonService:
         try:
             # Get dynamic field names (target and date)
             target_field, date_field = ForecastComparisonService._get_field_names(
-                tenant_id, database_name
+                database_name
             )
             
             # Build WHERE clause for entity fields
@@ -137,7 +135,6 @@ class ForecastComparisonService:
 
     @staticmethod
     def find_matching_forecast_runs(
-        tenant_id: str,
         database_name: str,
         entity_fields: Dict[str, str],
         aggregation_level: str,
@@ -147,7 +144,6 @@ class ForecastComparisonService:
         Find all forecast runs matching the entity and criteria.
         
         Args:
-            tenant_id: Tenant identifier
             database_name: Tenant's database name
             entity_fields: Dictionary of field:value pairs
             aggregation_level: Aggregation level
@@ -224,7 +220,6 @@ class ForecastComparisonService:
 
     @staticmethod
     def get_forecast_metadata(
-        tenant_id: str,
         database_name: str,
         forecast_run_ids: List[str]
     ) -> Dict[str, Dict[str, Any]]:
@@ -232,7 +227,6 @@ class ForecastComparisonService:
         Get detailed metadata for forecast runs including algorithm and external factors.
         
         Args:
-            tenant_id: Tenant identifier
             database_name: Tenant's database name
             forecast_run_ids: List of forecast run IDs
             
@@ -310,7 +304,6 @@ class ForecastComparisonService:
 
     @staticmethod
     def get_forecast_results(
-        tenant_id: str,
         database_name: str,
         forecast_run_ids: List[str]
     ) -> Dict[str, List[Dict[str, Any]]]:
@@ -318,7 +311,6 @@ class ForecastComparisonService:
         Get forecast results for multiple runs (best performing algorithm only).
         
         Args:
-            tenant_id: Tenant identifier
             database_name: Tenant's database name
             forecast_run_ids: List of forecast run IDs
             
@@ -500,7 +492,6 @@ class ForecastComparisonService:
 
     @staticmethod
     def compare_forecasts(
-        tenant_id: str,
         database_name: str,
         entity_identifier: str,
         aggregation_level: str,
@@ -511,7 +502,6 @@ class ForecastComparisonService:
         Main comparison method - orchestrates all comparison steps.
         
         Args:
-            tenant_id: Tenant identifier
             database_name: Tenant's database name
             entity_identifier: Entity identifier (e.g., "1001-Loc1")
             aggregation_level: Aggregation level (e.g., "product-location")
@@ -533,12 +523,12 @@ class ForecastComparisonService:
         
         # Step 2: Get historical data
         historical_data = ForecastComparisonService.get_historical_data(
-            tenant_id, database_name, entity_fields, interval
+            database_name, entity_fields, interval
         )
         
         # Step 3: Find matching forecast runs
         matching_runs = ForecastComparisonService.find_matching_forecast_runs(
-            tenant_id, database_name, entity_fields, aggregation_level, interval
+            database_name, entity_fields, aggregation_level, interval
         )
         
         if not matching_runs:
@@ -567,12 +557,12 @@ class ForecastComparisonService:
         
         # Step 5: Get forecast metadata
         forecast_metadata = ForecastComparisonService.get_forecast_metadata(
-            tenant_id, database_name, run_ids
+            database_name, run_ids
         )
         
         # Step 6: Get forecast results
         forecast_data = ForecastComparisonService.get_forecast_results(
-            tenant_id, database_name, run_ids
+            database_name, run_ids
         )
         
         # Step 7: Calculate comparison metrics
@@ -632,7 +622,7 @@ class ForecastComparisonService:
         return response
 
     @staticmethod
-    def _get_field_names(tenant_id: str, database_name: str) -> Tuple[str, str]:
+    def _get_field_names(database_name: str) -> Tuple[str, str]:
         """Get target and date field names from metadata."""
         db_manager = get_db_manager()
 

@@ -129,11 +129,13 @@ def _process_entity_forecast(
 
             try:
                 # Create forecast run
-                # ✅ CHANGED: Use base_filters + entity_filter for storage
+                # ✅ CHANGED: Use base_filters + entity_filter + selected_factors for storage
                 filters_to_store = base_filters.copy()
                 filters_to_store.update(entity_filter)
                 filters_to_store['aggregation_level'] = aggregation_level
                 filters_to_store['interval'] = interval
+                if selected_factors:
+                    filters_to_store['selected_external_factors'] = selected_factors
                 
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                     cursor = conn.cursor()
