@@ -528,7 +528,7 @@ class ForecastExecutionService:
             # ========================================================================
             # TRAIN-TEST SPLIT
             # ========================================================================
-            train_ratio = 0.8
+            train_ratio = 0.85
             n = len(historical_data)
             split_index = max(2, int(n * train_ratio))
             
@@ -1771,10 +1771,10 @@ class ForecastExecutionService:
         return np.array(features)
 
     @staticmethod
-    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
+    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
         """
-        XGBoost forecasting with time series cross-validation to prevent data leakage.
-
+        XGBoost forecasting - uses ALL data for training (no internal split).
+        
         Args:
             data: Historical data with 'quantity' column
             periods: Number of periods to forecast
@@ -1783,7 +1783,7 @@ class ForecastExecutionService:
             learning_rate: Boosting learning rate
 
         Returns:
-            Tuple of (forecast_array, metrics_dict )
+            Tuple of (forecast_array, metrics_dict)
         """
         try:
             # Validate parameters
@@ -1802,8 +1802,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < 10:  # Need more data for proper cross-validation
-                raise ValueError("Need at least 10 historical data points for XGBoost with cross-validation")
+            if n < 10:
+                raise ValueError("Need at least 10 historical data points for XGBoost")
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
@@ -1828,16 +1828,7 @@ class ForecastExecutionService:
             if len(X) < 5:
                 raise ValueError("Insufficient data for XGBoost training")
 
-            # Time series cross-validation: use expanding window
-            train_size = max(5, len(X) - periods)
-            X_train = X[:train_size]
-            y_train = y_target[:train_size]
-            X_test = X[train_size:]
-            y_test = y_target[train_size:]
-
-            logger.info(f"XGBoost time series split: train_size={len(X_train)}, test_size={len(X_test)}")
-
-            # Train XGBoost model on training data only
+            # Train XGBoost model on ALL data (no internal split)
             model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
@@ -1846,7 +1837,7 @@ class ForecastExecutionService:
                 n_jobs=-1,
                 verbosity=0
             )
-            model.fit(X_train, y_train, verbose=False)
+            model.fit(X, y_target, verbose=False)
 
             # Generate forecast
             forecast = []
@@ -1863,12 +1854,10 @@ class ForecastExecutionService:
                             try:
                                 val = float(factor_value_raw)
                             except Exception:
-                                # Try to factorize entire column and pick numeric code for last value
                                 try:
                                     codes, uniques = pd.factorize(data[factor_name].fillna('__NA__'))
                                     val = float(codes[-1])
                                 except Exception:
-                                    # fallback deterministic encoding
                                     val = float(abs(hash(str(factor_value_raw))) % 1000000) / 1000.0
                         last_factor_values[factor_name] = val
 
@@ -1889,28 +1878,11 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on test data (to reflect real performance)
-            test_results = None
-            if len(X_test) > 0:
-                predicted_test = model.predict(X_test)
-                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
-                
-                # Prepare test forecast results
-                test_results = {
-                    'test_forecast': predicted_test,
-                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
-                }
-            else:
-                # Fallback to training metrics if no test data
-                predicted = model.predict(X_train)
-                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
-                
-                test_results = {
-                    'test_forecast': predicted,
-                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
-                }
+            # Calculate metrics on training data
+            predicted = model.predict(X)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
 
-            return forecast, metrics 
+            return forecast, metrics
 
         except ImportError:
             logger.warning("XGBoost not available, falling back to Linear Regression")
@@ -1919,9 +1891,22 @@ class ForecastExecutionService:
             logger.warning(f"XGBoost forecasting failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
+
     @staticmethod
-    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """Support Vector Regression forecasting with time series cross-validation."""
+    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        Support Vector Regression forecasting - uses ALL data for training (no internal split).
+        
+        Args:
+            data: Historical data
+            periods: Number of periods to forecast
+            C: Regularization parameter
+            epsilon: Epsilon-tube parameter
+            kernel: Kernel type ('linear', 'poly', 'rbf', 'sigmoid')
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
         try:
             # Validate parameters
             C = max(0.1, min(100.0, C))
@@ -1941,8 +1926,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < 10:  # Need more data for proper cross-validation
-                raise ValueError("Need at least 10 historical data points for SVR with cross-validation")
+            if n < 10:
+                raise ValueError("Need at least 10 historical data points for SVR")
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
@@ -1967,27 +1952,18 @@ class ForecastExecutionService:
             if len(X) < 5:
                 raise ValueError("Insufficient data for SVR training")
 
-            # Time series cross-validation: use expanding window
-            train_size = max(5, len(X) - periods)
-            X_train = X[:train_size]
-            y_train = y_target[:train_size]
-            X_test = X[train_size:]
-            y_test = y_target[train_size:]
-
-            logger.info(f"SVR time series split: train_size={len(X_train)}, test_size={len(X_test)}")
-
             # Scale features for SVR (required for better performance)
             from sklearn.preprocessing import StandardScaler
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
+            X_scaled = scaler.fit_transform(X)
             
-            # Train SVR model on training data only
+            # Train SVR model on ALL data (no internal split)
             model = SVR(
                 kernel=kernel,
                 C=C,
                 epsilon=epsilon
             )
-            model.fit(X_train_scaled, y_train)
+            model.fit(X_scaled, y_target)
 
             # Generate forecast
             forecast = []
@@ -2029,36 +2005,29 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on test data
-            test_results = None
-            if len(X_test) > 0:
-                X_test_scaled = scaler.transform(X_test)
-                predicted_test = model.predict(X_test_scaled)
-                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
-                
-                test_results = {
-                    'test_forecast': predicted_test,
-                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
-                }
-            else:
-                # Fallback to training metrics if no test data
-                predicted = model.predict(X_train_scaled)
-                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
-                
-                test_results = {
-                    'test_forecast': predicted,
-                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
-                }
+            # Calculate metrics on training data
+            predicted = model.predict(X_scaled)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
 
-            return forecast, metrics 
+            return forecast, metrics
 
         except Exception as e:
             logger.warning(f"SVR failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """K-Nearest Neighbors forecasting with time series cross-validation."""
+    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        K-Nearest Neighbors forecasting - uses ALL data for training (no internal split).
+        
+        Args:
+            data: Historical data
+            periods: Number of periods to forecast
+            n_neighbors: Number of neighbors to use
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
         try:
             # Prepare quantity data
             if 'total_quantity' in data.columns:
@@ -2069,8 +2038,8 @@ class ForecastExecutionService:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
             n = len(y)
-            if n < n_neighbors + 5:  # Need more data for proper cross-validation
-                raise ValueError(f"Need at least {n_neighbors + 5} historical data points for KNN with cross-validation")
+            if n < n_neighbors + 5:
+                raise ValueError(f"Need at least {n_neighbors + 5} historical data points for KNN")
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
@@ -2095,26 +2064,17 @@ class ForecastExecutionService:
             if len(X) < n_neighbors:
                 raise ValueError(f"Insufficient data for KNN training (need at least {n_neighbors} samples)")
 
-            # Time series cross-validation: use expanding window
-            train_size = max(n_neighbors, len(X) - periods)
-            X_train = X[:train_size]
-            y_train = y_target[:train_size]
-            X_test = X[train_size:]
-            y_test = y_target[train_size:]
-
-            logger.info(f"KNN time series split: train_size={len(X_train)}, test_size={len(X_test)}")
-
             # Scale features for KNN (important for distance metrics)
             from sklearn.preprocessing import StandardScaler
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
+            X_scaled = scaler.fit_transform(X)
 
-            # Train KNN model on training data only
+            # Train KNN model on ALL data (no internal split)
             model = KNeighborsRegressor(
-                n_neighbors=min(n_neighbors, len(X_train)),
+                n_neighbors=min(n_neighbors, len(X)),
                 weights='uniform'
             )
-            model.fit(X_train_scaled, y_train)
+            model.fit(X_scaled, y_target)
 
             # Generate forecast
             forecast = []
@@ -2156,36 +2116,32 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on test data
-            test_results = None
-            if len(X_test) > 0:
-                X_test_scaled = scaler.transform(X_test)
-                predicted_test = model.predict(X_test_scaled)
-                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
-                
-                test_results = {
-                    'test_forecast': predicted_test,
-                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
-                }
-            else:
-                # Fallback to training metrics if no test data
-                predicted = model.predict(X_train_scaled)
-                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
-                
-                test_results = {
-                    'test_forecast': predicted,
-                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
-                }
+            # Calculate metrics on training data
+            predicted = model.predict(X_scaled)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
 
-            return forecast, metrics 
+            return forecast, metrics
 
         except Exception as e:
             logger.warning(f"KNN failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
-    @staticmethod
-    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """Random Forest regression forecasting with hyperparameter tuning."""
+    staticmethod
+    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        Random Forest regression forecasting - uses ALL data for training (no internal split).
+        
+        Args:
+            data: Historical data
+            periods: Number of periods to forecast
+            n_estimators: Number of trees
+            max_depth: Maximum tree depth
+            min_samples_split: Minimum samples to split
+            min_samples_leaf: Minimum samples in leaf
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
         try:
             n_estimators = max(10, min(500, n_estimators))
             if max_depth is not None:
@@ -2204,7 +2160,7 @@ class ForecastExecutionService:
 
             n = len(y)
             if n < 10:
-                raise ValueError("Need at least 10 historical data points for Random Forest with cross-validation")
+                raise ValueError("Need at least 10 historical data points for Random Forest")
 
             window = min(5, n - 1)
             external_factors = ForecastExecutionService._get_external_factor_columns(data)
@@ -2228,14 +2184,7 @@ class ForecastExecutionService:
             if len(X) < 5:
                 raise ValueError("Insufficient data for Random Forest training")
 
-            train_size = max(5, len(X) - periods)
-            X_train = X[:train_size]
-            y_train = y_target[:train_size]
-            X_test = X[train_size:]
-            y_test = y_target[train_size:]
-
-            logger.info(f"Random Forest time series split: train_size={len(X_train)}, test_size={len(X_test)}")
-
+            # Train Random Forest model on ALL data (no internal split)
             model = RandomForestRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
@@ -2244,8 +2193,9 @@ class ForecastExecutionService:
                 random_state=42,
                 n_jobs=-1
             )
-            model.fit(X_train, y_train)
+            model.fit(X, y_target)
 
+            # Generate forecast
             forecast = []
             recent_lags = list(y[-window:])
             
@@ -2272,31 +2222,16 @@ class ForecastExecutionService:
 
             forecast = np.array(forecast)
 
-            # Calculate metrics on test data
-            test_results = None
-            if len(X_test) > 0:
-                predicted_test = model.predict(X_test)
-                metrics = ForecastExecutionService.calculate_metrics(y_test, predicted_test)
-                
-                test_results = {
-                    'test_forecast': predicted_test,
-                    'test_dates': data['period'].iloc[window + train_size:].tolist() if 'period' in data.columns else []
-                }
-            else:
-                predicted = model.predict(X_train)
-                metrics = ForecastExecutionService.calculate_metrics(y_train, predicted)
-                
-                test_results = {
-                    'test_forecast': predicted,
-                    'test_dates': data['period'].iloc[window:window + train_size].tolist() if 'period' in data.columns else []
-                }
+            # Calculate metrics on training data
+            predicted = model.predict(X)
+            metrics = ForecastExecutionService.calculate_metrics(y_target, predicted)
 
-            return forecast, metrics 
+            return forecast, metrics
 
         except Exception as e:
             logger.warning(f"Random Forest failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
-
+    
     @staticmethod
     def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
         """Calculate accuracy metrics"""
