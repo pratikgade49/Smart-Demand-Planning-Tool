@@ -312,6 +312,14 @@ class BackgroundForecastExecutor:
                     f"Job {job_id}: Detected {len(entity_combinations)} distinct entity combinations from database"
                 )
                 
+                # Load external factors ONCE for the entire job
+                external_factors_df = ForecastExecutionService._prepare_external_factors(
+                    tenant_id=tenant_id,
+                    database_name=database_name,
+                    selected_factors=selected_factors
+                )
+                logger.info(f"Job {job_id}: Loaded external factors once for all entities")
+
                 # Execute forecast for each entity
                 forecast_runs = []
                 total_records = 0
@@ -359,6 +367,14 @@ class BackgroundForecastExecutor:
 
                 logger.info(f"Job {job_id}: Executing {len(algorithms_to_execute)} algorithm(s)")
                 
+                # Pre-load external factors once to avoid redundant database calls for each entity
+                logger.info(f"Job {job_id}: Pre-loading external factors...")
+                external_factors_df = ForecastExecutionService._prepare_external_factors(
+                    tenant_id=tenant_id,
+                    database_name=database_name,
+                    selected_factors=selected_factors
+                )
+
                 # Create a modified request object for processing
                 class ModifiedRequest:
                     def __init__(self, data):
@@ -388,7 +404,8 @@ class BackgroundForecastExecutor:
                             periods,
                             forecast_dates,
                             algorithms_to_execute,
-                            db_manager
+                            db_manager,
+                            external_factors_df  # Pass pre-loaded factors
                         ): entity_filter for entity_filter in entity_combinations
                     }
                     

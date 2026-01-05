@@ -187,9 +187,7 @@ class ForecastExecutionService:
                 if 'n_estimators' in validated_params:
                     validated_params['n_estimators'] = max(10, min(500, int(validated_params['n_estimators'])))
                 if 'max_depth' in validated_params:
-                    if validated_params['max_depth'] is None:
-                        validated_params['max_depth'] = None
-                    else:
+                    if validated_params['max_depth'] is not None:
                         validated_params['max_depth'] = max(1, min(50, int(validated_params['max_depth'])))
                 if 'min_samples_split' in validated_params:
                     validated_params['min_samples_split'] = max(2, min(20, int(validated_params['min_samples_split'])))
@@ -2742,10 +2740,19 @@ class ForecastExecutionService:
                 if values:
                     ensemble_forecast.append(np.mean(values))
             
+            # Average the test forecast values from top 3
+            ensemble_test_forecast = []
+            if top3[0].get('test_forecast'):
+                for i in range(len(top3[0]['test_forecast'])):
+                    values = [algo['test_forecast'][i] for algo in top3 if i < len(algo.get('test_forecast', []))]
+                    if values:
+                        ensemble_test_forecast.append(np.mean(values))
+
             # Average the metrics
             ensemble_result = {
                 'algorithm': 'Ensemble (Top 3 Avg)',
                 'forecast': ensemble_forecast,
+                'test_forecast': ensemble_test_forecast,
                 'accuracy': np.mean([algo['accuracy'] for algo in top3]),
                 'mae': np.mean([algo['mae'] for algo in top3]),
                 'rmse': np.mean([algo['rmse'] for algo in top3]),

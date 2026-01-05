@@ -65,7 +65,8 @@ def _process_entity_forecast(
     periods: int,
     forecast_dates: List[date],
     algorithms_to_execute: List[AlgorithmConfig],
-    db_manager
+    db_manager,
+    external_factors_df: Optional[pd.DataFrame] = None
 ) -> Dict[str, Any]:
     """
     Process forecast for a single entity with all its algorithms.
@@ -97,15 +98,16 @@ def _process_entity_forecast(
 
         logger.info(f"Entity {entity_name}: {len(historical_data)} historical records")
 
-        # Load external factors
-        external_factors_df = ForecastExecutionService._prepare_external_factors(
-            tenant_id=tenant_data["tenant_id"],
-            database_name=tenant_data["database_name"],
-            selected_factors=selected_factors
-        )
+        # Load external factors if not provided
+        if external_factors_df is None:
+            external_factors_df = ForecastExecutionService._prepare_external_factors(
+                tenant_id=tenant_data["tenant_id"],
+                database_name=tenant_data["database_name"],
+                selected_factors=selected_factors
+            )
 
         # Merge external factors if available
-        if not external_factors_df.empty:
+        if external_factors_df is not None and not external_factors_df.empty:
             historical_data[date_field_name] = pd.to_datetime(historical_data[date_field_name], errors='coerce')
             external_factors_df['date'] = pd.to_datetime(external_factors_df['date'], errors='coerce')
 
