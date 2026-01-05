@@ -277,6 +277,89 @@ class AlgorithmParametersService:
                 )
             ]
         },
+        14: {  # Moving Average
+            "algorithm_name": "Moving Average",
+            "description": "Simple moving average forecasting",
+            "parameters": [
+                ParameterDefinition(
+                    name="window",
+                    type="int",
+                    description="Window size for moving average calculation",
+                    required=True,
+                    default_value=3,
+                    min_value=1,
+                    max_value=50
+                )
+            ]
+        },
+        15: {  # SARIMA
+            "algorithm_name": "SARIMA",
+            "description": "Seasonal AutoRegressive Integrated Moving Average - Statistical time series forecasting with seasonality",
+            "parameters": [
+                ParameterDefinition(
+                    name="order",
+                    type="list",
+                    description="SARIMA order (p, d, q) - autoregressive, differencing, moving average components",
+                    required=True,
+                    default_value=[1, 1, 1],
+                    list_item_type="int",
+                    min_value=0,
+                    max_value=10
+                ),
+                ParameterDefinition(
+                    name="seasonal_order",
+                    type="list",
+                    description="SARIMA seasonal order (P, D, Q, s)",
+                    required=True,
+                    default_value=[1, 1, 1, 12],
+                    list_item_type="int",
+                    min_value=0,
+                    max_value=12
+                )
+            ]
+        },
+        16: {  # Random Forest
+            "algorithm_name": "Random Forest",
+            "description": "Random Forest regression with ensemble learning",
+            "parameters": [
+                ParameterDefinition(
+                    name="n_estimators",
+                    type="int",
+                    description="Number of trees in the forest",
+                    required=True,
+                    default_value=100,
+                    min_value=10,
+                    max_value=500
+                ),
+                ParameterDefinition(
+                    name="max_depth",
+                    type="int",
+                    description="Maximum depth of the trees (None for unlimited)",
+                    required=False,
+                    default_value=None,
+                    min_value=1,
+                    max_value=50
+                ),
+                ParameterDefinition(
+                    name="min_samples_split",
+                    type="int",
+                    description="Minimum number of samples required to split an internal node",
+                    required=True,
+                    default_value=2,
+                    min_value=2,
+                    max_value=20
+                ),
+                ParameterDefinition(
+                    name="min_samples_leaf",
+                    type="int",
+                    description="Minimum number of samples required to be at a leaf node",
+                    required=True,
+                    default_value=1,
+                    min_value=1,
+                    max_value=10
+                )
+            ]
+        },
         999: {  # Best Fit
             "algorithm_name": "Best Fit",
             "description": "Auto-selection of best performing algorithm",

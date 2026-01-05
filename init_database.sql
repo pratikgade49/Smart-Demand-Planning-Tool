@@ -66,6 +66,8 @@ INSERT INTO algorithms (algorithm_id, algorithm_name, default_parameters, algori
 (11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression with hyperparameter tuning and external factors'),
 (12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression with hyperparameter tuning and scaling'),
 (13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]], "alpha_list": [0.001, 0.01]}', 'ML', 'Multi-layer Perceptron Neural Network with hyperparameter tuning and external factors'),
+(14, 'Moving Average', '{"window": 3}', 'Statistic', 'Simple moving average forecasting'),
+(15, 'SARIMA', '{"order": [1, 1, 1], "seasonal_order": [1, 1, 1, 12]}', 'Statistic', 'Seasonal AutoRegressive Integrated Moving Average - Statistical time series forecasting with seasonality'),
 (999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection - runs all algorithms and selects the best performing one')
 ON CONFLICT (algorithm_id) DO NOTHING;
 

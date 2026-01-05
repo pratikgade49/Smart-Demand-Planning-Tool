@@ -179,7 +179,7 @@ class ForecastExecutionService:
                 if 'n_neighbors' in validated_params:
                     validated_params['n_neighbors'] = max(1, min(50, int(validated_params['n_neighbors'])))
 
-            elif algorithm_id == 14:  # Random Forest
+            elif algorithm_id == 16:  # Random Forest
                 # n_estimators: 10-500
                 # max_depth: 1-50 or None
                 # min_samples_split: 2-20
@@ -195,6 +195,26 @@ class ForecastExecutionService:
                     validated_params['min_samples_split'] = max(2, min(20, int(validated_params['min_samples_split'])))
                 if 'min_samples_leaf' in validated_params:
                     validated_params['min_samples_leaf'] = max(1, min(10, int(validated_params['min_samples_leaf'])))
+
+            elif algorithm_id == 14:  # Moving Average
+                # window: 1-50
+                if 'window' in validated_params:
+                    validated_params['window'] = max(1, min(50, int(validated_params['window'])))
+
+            elif algorithm_id == 15:  # SARIMA
+                # order: [p, d, q] - integers >= 0
+                if 'order' in validated_params:
+                    order = validated_params['order']
+                    if not isinstance(order, list) or len(order) != 3:
+                        raise ValidationException("SARIMA order must be a list of 3 integers")
+                    validated_params['order'] = [max(0, min(10, int(x))) for x in order]
+
+                # seasonal_order: [P, D, Q, s]
+                if 'seasonal_order' in validated_params:
+                    s_order = validated_params['seasonal_order']
+                    if not isinstance(s_order, list) or len(s_order) != 4:
+                        raise ValidationException("SARIMA seasonal_order must be a list of 4 integers")
+                    validated_params['seasonal_order'] = [max(0, min(12, int(x))) for x in s_order]
 
             # Log validated parameters
             logger.info(f"Validated parameters for algorithm {algorithm_id}: {validated_params}")
@@ -700,7 +720,7 @@ class ForecastExecutionService:
                 epochs=custom_params.get('epochs', 100),
                 batch_size=custom_params.get('batch_size', 32)
             )
-        elif algorithm_id == 14:  # Random Forest
+        elif algorithm_id == 16:  # Random Forest
             return ForecastExecutionService.random_forest_forecast(
                 data=data,
                 periods=periods,
@@ -708,6 +728,19 @@ class ForecastExecutionService:
                 max_depth=custom_params.get('max_depth', None),
                 min_samples_split=custom_params.get('min_samples_split', 2),
                 min_samples_leaf=custom_params.get('min_samples_leaf', 1)
+            )
+        elif algorithm_id == 14:  # Moving Average
+            return ForecastExecutionService.moving_average_forecast(
+                data=data,
+                periods=periods,
+                window=custom_params.get('window', 3)
+            )
+        elif algorithm_id == 15:  # SARIMA
+            return ForecastExecutionService.sarima_forecast(
+                data=data,
+                periods=periods,
+                order=custom_params.get('order', [1, 1, 1]),
+                seasonal_order=custom_params.get('seasonal_order', [1, 1, 1, 12])
             )
         else:
             # Default to simple moving average
@@ -2740,6 +2773,7 @@ class ForecastExecutionService:
             'rmse': best_metrics['rmse'],
             'mape': best_metrics.get('mape'),
             'forecast': best_model['forecast'],
+            'test_forecast': best_model.get('test_forecast', []),
             'all_algorithms': algorithm_results,
             'process_log': process_log
         }
@@ -2839,6 +2873,7 @@ class ForecastExecutionService:
             eval_periods = len(test_df)
             
             metrics: Dict[str, float]
+            test_forecast_list: List[float] = []
             
             # Evaluate on test data if available
             if eval_periods > 0:
@@ -2846,6 +2881,7 @@ class ForecastExecutionService:
                 actual_eval = test_df[target_column].values
                 predicted_eval = np.asarray(eval_forecast)[:len(actual_eval)]
                 metrics = ForecastExecutionService.calculate_metrics(actual_eval, predicted_eval)
+                test_forecast_list = predicted_eval.tolist()
             else:
                 # Fallback: use training metrics
                 fallback_horizon = min(max(1, periods), max(1, len(eval_data)))
@@ -2863,6 +2899,7 @@ class ForecastExecutionService:
             return {
                 'algorithm': algorithm_name,
                 'forecast': forecast_list,
+                'test_forecast': test_forecast_list,
                 'accuracy': accuracy,
                 'mae': metrics.get('mae', 0),
                 'rmse': metrics.get('rmse', 0),

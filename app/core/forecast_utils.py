@@ -190,19 +190,53 @@ def _process_entity_forecast(
                 # Execute the algorithm
                 # ================================================================
                 
-                # ✅ FIXED: Do train-test split for ALL algorithms including best_fit
-                train_ratio = 0.8
-                n = len(historical_data)
-                split_index = max(2, int(n * train_ratio))
-                
-                train_data = historical_data.iloc[:split_index].copy()
-                test_data = historical_data.iloc[split_index:].copy()
-                test_periods = len(test_data)
-                
-                logger.info(f"DEBUG Entity {entity_name}: n={n}, split={split_index}, test_periods={test_periods}")
-                
-                # Get test actuals and dates for ALL algorithms
+                if algo_config.algorithm_id == 999:
+                    # Best Fit algorithm (Single-pass)
+                    forecast_result = ForecastExecutionService.generate_forecast(
+                        historical_data=historical_data,
+                        config={'interval': interval, 'periods': periods},
+                        process_log=[]
+                    )
+                    algo_name_for_result = "best_fit"
+                    algo_accuracy = forecast_result.get('accuracy')
+                    algo_forecast = forecast_result['forecast']
+                    test_forecasts = forecast_result.get('test_forecast', [])
+                    algo_metrics = {
+                        'mae': forecast_result.get('mae'),
+                        'rmse': forecast_result.get('rmse'),
+                        'mape': forecast_result.get('mape'),
+                        'selected_algorithm': forecast_result['selected_algorithm'],
+                        'process_log': forecast_result.get('process_log', []),
+                        'algorithms_evaluated': len(forecast_result.get('all_algorithms', []))
+                    }
+                else:
+                    # Specific algorithm (Single-pass)
+                    algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
+                        algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
+                        data=historical_data.copy(),
+                        periods=periods,
+                        target_column='total_quantity'
+                    )
+
+                    if algorithm_name_result['accuracy'] == 0 and not algorithm_name_result.get('forecast'):
+                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed, skipping")
+                        return None
+
+                    algo_name_for_result = algorithm_name_result['algorithm']
+                    algo_accuracy = algorithm_name_result.get('accuracy')
+                    algo_forecast = algorithm_name_result['forecast']
+                    test_forecasts = algorithm_name_result.get('test_forecast', [])
+                    algo_metrics = {
+                        'mae': algorithm_name_result.get('mae'),
+                        'rmse': algorithm_name_result.get('rmse'),
+                        'mape': algorithm_name_result.get('mape')
+                    }
+
+                # Get test actuals and dates from historical data for the last N periods
+                test_periods = len(test_forecasts)
                 if test_periods > 0:
+                    test_data = historical_data.iloc[-test_periods:].copy()
+                    
                     # Get actual values
                     if 'total_quantity' in test_data.columns:
                         test_actuals = test_data['total_quantity'].values.tolist()
@@ -218,96 +252,9 @@ def _process_entity_forecast(
                         test_dates = pd.to_datetime(test_data[date_field_name]).dt.date.tolist()
                     else:
                         test_dates = []
-                        
-                    logger.info(f"DEBUG: Test actuals={len(test_actuals)}, test_dates={len(test_dates)}")
                 else:
                     test_actuals = []
                     test_dates = []
-                
-                if algo_config.algorithm_id == 999:
-                    # Best Fit algorithm
-                    
-                    # Generate test forecast on training data
-                    if test_periods > 0:
-                        try:
-                            test_forecast_result = ForecastExecutionService.generate_forecast(
-                                historical_data=train_data,
-                                config={'interval': interval, 'periods': test_periods},
-                                process_log=[]
-                            )
-                            test_forecasts = test_forecast_result['forecast']
-                            logger.info(f"DEBUG: Best fit test forecasts generated: {len(test_forecasts)}")
-                        except Exception as e:
-                            logger.warning(f"Best fit test forecast failed: {str(e)}")
-                            test_forecasts = []
-                    else:
-                        test_forecasts = []
-                    
-                    # Generate future forecast on full data
-                    forecast_result = ForecastExecutionService.generate_forecast(
-                        historical_data=historical_data,
-                        config={'interval': interval, 'periods': periods},
-                        process_log=[]
-                    )
-                    algo_name_for_result = "best_fit"
-                    algo_accuracy = forecast_result.get('accuracy')
-                    algo_forecast = forecast_result['forecast']
-                    algo_metrics = {
-                        'mae': forecast_result.get('mae'),
-                        'rmse': forecast_result.get('rmse'),
-                        'mape': forecast_result.get('mape'),
-                        'selected_algorithm': forecast_result['selected_algorithm'],
-                        'process_log': forecast_result.get('process_log', []),
-                        'algorithms_evaluated': len(forecast_result.get('all_algorithms', []))
-                    }
-                    
-                else:
-                    # Specific algorithm
-                    
-                    # Generate test forecast on training data
-                    if test_periods > 0:
-                        try:
-                            test_result = ForecastExecutionService._run_algorithm_safe(
-                                algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
-                                data=train_data.copy(),
-                                periods=test_periods,
-                                target_column='total_quantity'
-                            )
-                            test_forecasts = test_result['forecast']
-                            
-                            # Ensure test_forecasts is a list
-                            if isinstance(test_forecasts, np.ndarray):
-                                test_forecasts = test_forecasts.tolist()
-                            elif not isinstance(test_forecasts, list):
-                                test_forecasts = list(test_forecasts)
-                                
-                            logger.info(f"DEBUG: Specific algo test forecasts generated: {len(test_forecasts)}")
-                        except Exception as e:
-                            logger.warning(f"Could not generate test forecast: {str(e)}")
-                            test_forecasts = []
-                    else:
-                        test_forecasts = []
-                    
-                    # Generate future forecast on full data
-                    algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
-                        algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
-                        data=historical_data.copy(),
-                        periods=periods,
-                        target_column='total_quantity'
-                    )
-
-                    if algorithm_name_result['accuracy'] == 0:
-                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed, skipping")
-                        return None
-
-                    algo_name_for_result = algorithm_name_result['algorithm']
-                    algo_accuracy = algorithm_name_result.get('accuracy')
-                    algo_forecast = algorithm_name_result['forecast']
-                    algo_metrics = {
-                        'mae': algorithm_name_result.get('mae'),
-                        'rmse': algorithm_name_result.get('rmse'),
-                        'mape': algorithm_name_result.get('mape')
-                    }
                 
                 # ✅ LOG what we have before inserting
                 logger.info(f"DEBUG {entity_name}: Preparing to insert:")

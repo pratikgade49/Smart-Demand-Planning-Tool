@@ -813,7 +813,9 @@ class SchemaManager:
                         (11, 'KNN', '{"n_neighbors_list": [7, 10]}', 'ML', 'K-Nearest Neighbors regression'),
                         (12, 'Gaussian Process', '{}', 'ML', 'Gaussian Process Regression'),
                         (13, 'Neural Network', '{"hidden_layer_sizes_list": [[10], [20, 10]]}', 'ML', 'Multi-layer Perceptron'),
-                        (14, 'Random Forest', '{"n_estimators": 100}', 'ML', 'Random Forest Regression'),
+                        (14, 'Moving Average', '{"window": 3}', 'Statistic', 'Moving Average forecasting'),
+                        (15, 'SARIMA', '{"order": [1, 1, 1], "seasonal_order": [1, 1, 1, 12]}', 'Statistic', 'Seasonal ARIMA'),
+                        (16, 'Random Forest', '{"n_estimators": 100}', 'ML', 'Random Forest Regression'),
                         (999, 'Best Fit', '{}', 'Hybrid', 'Advanced AI/ML auto model selection')
                     ]
 
