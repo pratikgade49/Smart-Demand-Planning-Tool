@@ -3,6 +3,10 @@ Application configuration module.
 Handles environment variables and application settings.
 """
 
+import os
+# Suppress TensorFlow CPU optimization warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 from pydantic_settings import BaseSettings
 from pydantic import ConfigDict, field_validator
 from typing import Optional
@@ -18,6 +22,7 @@ class Settings(BaseSettings):
     # Server Settings
     HOST: str = "localhost"
     PORT: int = 8000
+    BASE_URL: str = "http://localhost:8000"
     
     # Master Database Settings (for tenant registry)
     MASTER_DATABASE_URL: str = "postgresql://postgres:root@localhost:5432/smart_demand_master"

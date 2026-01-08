@@ -141,7 +141,9 @@ async def onboard_tenant(request: TenantOnboardRequest):
         response_data = {
             "tenant_id": result["tenant_id"],
             "tenant_name": result["tenant_name"],
+            "tenant_identifier": result["tenant_identifier"],
             "database_name": result["database_name"],
+            "tenant_url": result["tenant_url"],
             "message": "Tenant onboarded successfully."
         }
 

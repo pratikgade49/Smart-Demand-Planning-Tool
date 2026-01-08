@@ -90,6 +90,13 @@ class TenantOnboardRequest(BaseModel):
 
     tenant_name: str = Field(..., min_length=1, max_length=255, description="Tenant name")
     tenant_identifier: str = Field(..., min_length=1, max_length=100, description="Unique tenant identifier")
+    subscription: str = Field(..., description="Subscription type")
+    cpu_size: str = Field(..., description="CPU Size")
+    network_load_gb_month: float = Field(..., ge=0, description="Network load in GB per month")
+    db_space: str = Field(..., description="Database space")
+    no_of_users: int = Field(..., ge=1, description="Number of users")
+    subscription_start_date: str = Field(..., description="Subscription start date (YYYY-MM-DD)")
+    subscription_end_date: str = Field(..., description="Subscription end date (YYYY-MM-DD)")
 
     @field_validator("tenant_identifier")
     @classmethod
@@ -103,7 +110,14 @@ class TenantOnboardRequest(BaseModel):
         json_schema_extra={
             "example": {
                 "tenant_name": "Acme Corporation",
-                "tenant_identifier": "acme_corp"
+                "tenant_identifier": "acme_corp",
+                "subscription": "Enterprise",
+                "cpu_size": "4-core",
+                "network_load_gb_month": 100.5,
+                "db_space": "100GB",
+                "no_of_users": 50,
+                "subscription_start_date": "2024-01-01",
+                "subscription_end_date": "2024-12-31"
             }
         }
     )
@@ -113,7 +127,9 @@ class TenantOnboardResponse(BaseModel):
 
     tenant_id: str
     tenant_name: str
+    tenant_identifier: str
     database_name: str
+    tenant_url: str
     message: str
 
     model_config = ConfigDict(
@@ -121,7 +137,9 @@ class TenantOnboardResponse(BaseModel):
             "example": {
                 "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
                 "tenant_name": "Acme Corporation",
-                "database_name": "tenant_acme_corp",
+                "tenant_identifier": "acme_corp",
+                "database_name": "tenant_acme_corp_db",
+                "tenant_url": "http://localhost:8000/acme_corp",
                 "message": "Tenant onboarded successfully."
             }
         }

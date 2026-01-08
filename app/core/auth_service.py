@@ -136,14 +136,17 @@ class AuthService:
     def onboard_tenant(request) -> Dict[str, Any]:
         """
         Onboard a new tenant without creating users.
-        Just creates tenant database.
+        Creates tenant database and tenant attributes.
         """
         db_manager = get_db_manager()
         tenant_id = str(uuid.uuid4())
-        
+
         # Generate database name
         database_name = f"tenant_{request.tenant_identifier.lower()}_db"
-        
+
+        # Generate tenant URL
+        tenant_url = f"{settings.BASE_URL}/{request.tenant_identifier}"
+
         try:
             # Insert tenant into master database (no admin credentials)
             with db_manager.get_master_connection() as conn:
@@ -160,22 +163,52 @@ class AuthService:
                         database_name,
                         'ACTIVE'
                     ))
+
+                    # Insert tenant attributes
+                    tenant_details = {
+                        "tenant_name": request.tenant_name,
+                        "tenant_identifier": request.tenant_identifier
+                    }
+
+                    tenant_attributes = {
+                        "tenant_url": tenant_url,
+                        "subscription": request.subscription,
+                        "cpu_size": request.cpu_size,
+                        "network_load_gb_month": request.network_load_gb_month,
+                        "db_space": request.db_space,
+                        "no_of_users": request.no_of_users,
+                        "subscription_start_date": request.subscription_start_date,
+                        "subscription_end_date": request.subscription_end_date
+                    }
+
+                    import json
+                    cursor.execute("""
+                        INSERT INTO public.tenant_attributes
+                        (tenant_id, tenant_details, tenant_attributes)
+                        VALUES (%s, %s, %s)
+                    """, (
+                        tenant_id,
+                        json.dumps(tenant_details),
+                        json.dumps(tenant_attributes)
+                    ))
+
                     conn.commit()
                 finally:
                     cursor.close()
-            
+
             # Create tenant database
             SchemaManager.create_tenant_database(tenant_id, database_name)
-            
+
             logger.info(f"Tenant onboarded successfully: {request.tenant_identifier}")
-            
+
             return {
                 "tenant_id": tenant_id,
                 "tenant_name": request.tenant_name,
                 "tenant_identifier": request.tenant_identifier,
-                "database_name": database_name
+                "database_name": database_name,
+                "tenant_url": tenant_url
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to onboard tenant: {str(e)}")
             raise DatabaseException(f"Failed to onboard tenant: {str(e)}")

@@ -85,7 +85,7 @@ class DatabaseManager:
     def _create_master_tables(self, master_db_name: str) -> None:
         """
         Create all required tables in master database with FULL audit trails.
-        This includes tenants, users (NEW!), and audit_log tables.
+        This includes tenants, users (NEW!), tenant_attributes (NEW!), and audit_log tables.
         """
         try:
             master_conn = connect(
@@ -221,6 +221,31 @@ class DatabaseManager:
                 logger.info(" Created/verified audit_log table")
 
                 # ============================================================================
+                # Create tenant_attributes table with FULL AUDIT TRAIL
+                # ============================================================================
+                master_cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS public.tenant_attributes (
+                        tenant_id UUID PRIMARY KEY REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+                        tenant_details JSONB,
+                        tenant_attributes JSONB,
+
+                        -- Audit fields
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255) DEFAULT 'system',
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_by VARCHAR(255)
+                    )
+                """)
+                logger.info("Created/verified tenant_attributes table with full audit trail")
+
+                # Create index on tenant_attributes
+                master_cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tenant_attributes_tenant
+                    ON public.tenant_attributes(tenant_id)
+                """)
+                logger.info("Created indexes on tenant_attributes table")
+
+                # ============================================================================
                 # Create trigger for auto-updating updated_at on tenants
                 # ============================================================================
                 master_cursor.execute("""
@@ -247,8 +272,18 @@ class DatabaseManager:
                     DROP TRIGGER IF EXISTS update_users_updated_at ON public.users;
                 """)
                 master_cursor.execute("""
-                    CREATE TRIGGER update_users_updated_at 
+                    CREATE TRIGGER update_users_updated_at
                         BEFORE UPDATE ON public.users
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                """)
+
+                master_cursor.execute("""
+                    DROP TRIGGER IF EXISTS update_tenant_attributes_updated_at ON public.tenant_attributes;
+                """)
+                master_cursor.execute("""
+                    CREATE TRIGGER update_tenant_attributes_updated_at
+                        BEFORE UPDATE ON public.tenant_attributes
                         FOR EACH ROW
                         EXECUTE FUNCTION update_updated_at_column();
                 """)

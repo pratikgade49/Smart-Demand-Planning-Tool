@@ -202,6 +202,7 @@ def setup_logging(
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("multipart").setLevel(logging.WARNING)
+    logging.getLogger("tensorflow").setLevel(logging.ERROR)
     
     logging.info(f"Logging initialized - Level: {log_level}, File Logging: {enable_file_logging}")
 
