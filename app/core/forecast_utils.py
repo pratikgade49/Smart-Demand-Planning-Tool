@@ -254,6 +254,26 @@ def _process_entity_forecast(
                         'mape': algorithm_name_result.get('mape')
                     }
 
+                    # Update forecast_runs table with algorithm name and accuracy
+                    with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                        cursor = conn.cursor()
+                        try:
+                            cursor.execute("""
+                                UPDATE forecast_runs
+                                SET algorithm_name = %s, accuracy = %s, updated_at = %s, updated_by = %s
+                                WHERE forecast_run_id = %s
+                            """, (
+                                algo_name_for_result,
+                                algo_accuracy,
+                                datetime.utcnow(),
+                                tenant_data["email"],
+                                forecast_run_id
+                            ))
+                            conn.commit()
+                            logger.info(f"Updated forecast_runs with algorithm: {algo_name_for_result}, accuracy: {algo_accuracy}")
+                        finally:
+                            cursor.close()
+
                 # Get test actuals and dates from historical data for the last N periods
                 test_periods = len(test_forecasts)
                 if test_periods > 0:
