@@ -554,28 +554,78 @@ class ForecastExecutionService:
             # ========================================================================
             test_forecast = np.array([])
             test_metrics = {}
-            
-            if test_periods > 0:
-                logger.info(f"Generating test forecast for {test_periods} periods")
-                test_forecast, test_metrics = ForecastExecutionService._route_algorithm(
+
+            if algorithm_id == 999:
+                # Special handling for best fit algorithm selection
+                if test_periods > 0:
+                    logger.info(f"Generating test forecast for best fit algorithm ({test_periods} periods)")
+                    test_result = ForecastExecutionService.generate_forecast(
+                        train_data, {'periods': test_periods}, []
+                    )
+                    test_forecast = np.array(test_result['forecast'])
+                    test_metrics = {
+                        'accuracy': test_result['accuracy'],
+                        'mae': test_result['mae'],
+                        'rmse': test_result['rmse']
+                    }
+
+                # ========================================================================
+                # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
+                # ========================================================================
+                logger.info(f"Generating future forecast for best fit algorithm ({future_periods} periods)")
+                future_result = ForecastExecutionService.generate_forecast(
+                    historical_data, {'periods': future_periods}, []
+                )
+                future_forecast = np.array(future_result['forecast'])
+                future_metrics = {
+                    'accuracy': future_result['accuracy'],
+                    'mae': future_result['mae'],
+                    'rmse': future_result['rmse']
+                }
+
+                # Update forecast_runs table with selected algorithm and accuracy
+                db_manager = get_db_manager()
+                with db_manager.get_tenant_connection(database_name) as conn:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            UPDATE forecast_runs
+                            SET algorithm_name = %s, accuracy = %s, updated_at = %s, updated_by = %s
+                            WHERE forecast_run_id = %s
+                        """, (
+                            future_result['selected_algorithm'],
+                            future_result['accuracy'],
+                            datetime.utcnow(),
+                            user_email,
+                            forecast_run_id
+                        ))
+                        conn.commit()
+                        logger.info(f"Updated forecast_runs with algorithm: {future_result['selected_algorithm']}, accuracy: {future_result['accuracy']}")
+                    finally:
+                        cursor.close()
+            else:
+                # Normal algorithm execution
+                if test_periods > 0:
+                    logger.info(f"Generating test forecast for {test_periods} periods")
+                    test_forecast, test_metrics = ForecastExecutionService._route_algorithm(
+                        algorithm_id=algorithm_id,
+                        algorithm_name=algorithm_name,
+                        data=train_data,
+                        periods=test_periods,
+                        custom_params=custom_params
+                    )
+
+                # ========================================================================
+                # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
+                # ========================================================================
+                logger.info(f"Generating future forecast for {future_periods} periods")
+                future_forecast, future_metrics = ForecastExecutionService._route_algorithm(
                     algorithm_id=algorithm_id,
                     algorithm_name=algorithm_name,
-                    data=train_data,
-                    periods=test_periods,
+                    data=historical_data,
+                    periods=future_periods,
                     custom_params=custom_params
                 )
-            
-            # ========================================================================
-            # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
-            # ========================================================================
-            logger.info(f"Generating future forecast for {future_periods} periods")
-            future_forecast, future_metrics = ForecastExecutionService._route_algorithm(
-                algorithm_id=algorithm_id,
-                algorithm_name=algorithm_name,
-                data=historical_data,
-                periods=future_periods,
-                custom_params=custom_params
-            )
             
             # Generate future forecast dates
             future_dates = ForecastExecutionService._generate_forecast_dates(
@@ -1639,23 +1689,44 @@ class ForecastExecutionService:
         return ForecastExecutionService.arima_forecast(data, periods)
 
     @staticmethod
-    def _get_external_factor_columns(data: pd.DataFrame) -> List[str]:
+    def _get_external_factor_columns(data: pd.DataFrame, tenant_id: str = None, database_name: str = None) -> List[str]:
         """
         Identify external factor columns in the data.
         External factors are columns not in the standard set (period, total_quantity, quantity, date).
         Also excludes aggregation columns and calculated fields.
-        
+
         Args:
             data: DataFrame with historical data and potentially merged external factors
-            
+            tenant_id: Tenant identifier (optional, for dynamic field detection)
+            database_name: Database name (optional, for dynamic field detection)
+
         Returns:
             List of external factor column names
         """
         # Standard columns from sales data and aggregation
         standard_columns = {
-            'period', 'total_quantity', 'quantity', 'date',
             'transaction_count', 'avg_price', 'uom'
         }
+
+        # Get dynamic field names from database if available
+        try:
+            if tenant_id and database_name:
+                from app.core.forecasting_service import ForecastingService
+                target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
+                # Add the actual tenant-specific field names
+                standard_columns.update({target_field, date_field})
+                logger.info(f"Excluding tenant-specific fields: target='{target_field}', date='{date_field}'")
+            else:
+                # Fallback: exclude common patterns if we don't have tenant info
+                dynamic_date_fields = {'test_period', 'date', 'period', 'total_quantity', 'quantity'}
+                standard_columns.update(dynamic_date_fields)
+                logger.warning("No tenant info provided - using fallback field exclusions")
+        except Exception as e:
+            logger.warning(f"Could not get dynamic field names: {str(e)}, using fallback exclusions")
+            # Fallback: exclude common patterns
+            dynamic_date_fields = {'test_period', 'date', 'period', 'total_quantity', 'quantity'}
+            standard_columns.update(dynamic_date_fields)
+
         # Exclude any column that could be a master data aggregation field
         # These would typically be string/categorical columns used for grouping
         external_factors = []
@@ -1665,18 +1736,17 @@ class ForecastExecutionService:
                 # (typically has few unique values relative to data size)
                 if col in data.columns:
                     dtype = data[col].dtype
-                    # If it's a string/object column with few unique values, it's likely an aggregation field
-                     # Exclude datetime columns (likely the date field)
+                    # Exclude datetime columns (likely the date field)
                     if pd.api.types.is_datetime64_any_dtype(dtype):
                         continue
-                    
+
                     if dtype == 'object' or dtype.name == 'category':
                         unique_ratio = data[col].nunique() / len(data) if len(data) > 0 else 0
                         if unique_ratio < 0.1:  # Less than 10% unique values = aggregation field
                             continue
                 # Otherwise, treat as external factor
                 external_factors.append(col)
-        
+
         return external_factors
 
     @staticmethod

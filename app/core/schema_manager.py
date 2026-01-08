@@ -633,6 +633,8 @@ class SchemaManager:
                         processed_records INTEGER DEFAULT 0,
                         failed_records INTEGER DEFAULT 0,
                         error_message TEXT,
+                        algorithm_name VARCHAR(255),
+                        accuracy DECIMAL(18, 4),
                         
                         -- Audit fields (full trail)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

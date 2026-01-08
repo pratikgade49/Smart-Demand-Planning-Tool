@@ -451,8 +451,9 @@ class ExcelUploadService:
             try:
                 qty_value = row_data[qty_col]
                 if pd.isna(qty_value):
-                    raise ValidationException("Quantity cannot be empty")
-                quantity = float(qty_value)
+                    quantity = 0.0
+                else:
+                    quantity = float(qty_value)
                 if quantity < 0:
                     raise ValidationException("Quantity cannot be negative")
                 sales_data['quantity'] = quantity
@@ -660,9 +661,17 @@ class ExcelUploadService:
                 ))
 
             if values_list:
+                # Deduplicate values_list based on (master_id, date) to avoid ON CONFLICT issues in batch
+                unique_values = {}
+                for values in values_list:
+                    key = (values[1], values[2])  # master_id, date
+                    unique_values[key] = values
+
+                deduped_values_list = list(unique_values.values())
+
                 # Create batch upsert query
                 placeholders = ', '.join(['%s'] * 8)
-                value_placeholders = ', '.join([f"({placeholders})"] * len(values_list))
+                value_placeholders = ', '.join([f"({placeholders})"] * len(deduped_values_list))
 
                 batch_upsert_query = f"""
                     INSERT INTO sales_data
@@ -678,7 +687,7 @@ class ExcelUploadService:
                 """
 
                 # Flatten the values list
-                flattened_values = [item for sublist in values_list for item in sublist]
+                flattened_values = [item for sublist in deduped_values_list for item in sublist]
 
                 try:
                     cursor.execute(batch_upsert_query, flattened_values)

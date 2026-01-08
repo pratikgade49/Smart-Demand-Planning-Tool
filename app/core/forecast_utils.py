@@ -211,6 +211,26 @@ def _process_entity_forecast(
                         'process_log': forecast_result.get('process_log', []),
                         'algorithms_evaluated': len(forecast_result.get('all_algorithms', []))
                     }
+
+                    # Update forecast_runs table with selected algorithm and accuracy
+                    with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
+                        cursor = conn.cursor()
+                        try:
+                            cursor.execute("""
+                                UPDATE forecast_runs
+                                SET algorithm_name = %s, accuracy = %s, updated_at = %s, updated_by = %s
+                                WHERE forecast_run_id = %s
+                            """, (
+                                forecast_result['selected_algorithm'],
+                                forecast_result['accuracy'],
+                                datetime.utcnow(),
+                                tenant_data["email"],
+                                forecast_run_id
+                            ))
+                            conn.commit()
+                            logger.info(f"Updated forecast_runs with algorithm: {forecast_result['selected_algorithm']}, accuracy: {forecast_result['accuracy']}")
+                        finally:
+                            cursor.close()
                 else:
                     # Specific algorithm (Single-pass)
                     algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
