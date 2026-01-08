@@ -102,6 +102,15 @@ async def execute_forecast_async(
                     logger.error(f"Parameter validation failed: {error_msg}")
                     raise ValidationException(error_msg)
 
+        # Check for duplicate running jobs with same forecast parameters
+        is_duplicate = ForecastJobService.check_duplicate_running_job(
+            tenant_id=tenant_data['tenant_id'],
+            database_name=tenant_data['database_name'],
+            new_request_data=request_data
+        )
+        if is_duplicate:
+            raise ValidationException("forecast in progress for selected sub item, kindly wait.")
+
         # Create forecast job record
         job_result = ForecastJobService.create_job(
             tenant_id=tenant_data['tenant_id'],

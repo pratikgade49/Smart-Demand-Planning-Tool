@@ -11,6 +11,7 @@ from enum import Enum
 import json
 
 from app.core.database import get_db_manager
+from app.core.exceptions import ValidationException
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,52 @@ class ForecastJobService:
         except Exception as e:
             logger.error(f"Failed to update job status: {str(e)}", exc_info=True)
             raise
+
+    @staticmethod
+    def check_duplicate_running_job(
+        tenant_id: str,
+        database_name: str,
+        new_request_data: Dict[str, Any]
+    ) -> bool:
+        """
+        Check if there's a running job with the same forecast parameters.
+
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Database name for tenant
+            new_request_data: The new forecast request data
+
+        Returns:
+            True if duplicate running job found, False otherwise
+        """
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT request_data
+                        FROM forecast_jobs
+                        WHERE tenant_id = %s AND status = 'running'
+                    """, (tenant_id,))
+
+                    rows = cursor.fetchall()
+
+                    for row in rows:
+                        existing_request_data = row[0]
+
+                        # Compare key fields that determine the forecast sub-items
+                        if (existing_request_data.get('forecast_filters') == new_request_data.get('forecast_filters') and
+                            existing_request_data.get('forecast_start') == new_request_data.get('forecast_start') and
+                            existing_request_data.get('forecast_end') == new_request_data.get('forecast_end') and
+                            existing_request_data.get('algorithms') == new_request_data.get('algorithms')):
+                            return True
+
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to check for duplicate running job: {str(e)}", exc_info=True)
+            return False  # On error, allow creation to avoid blocking
 
     @staticmethod
     def get_user_jobs(

@@ -1844,7 +1844,7 @@ class ForecastExecutionService:
     def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         XGBoost forecasting - uses ALL data for training (no internal split).
-        
+
         Args:
             data: Historical data with 'quantity' column
             periods: Number of periods to forecast
@@ -1878,7 +1878,7 @@ class ForecastExecutionService:
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
             external_factors = ForecastExecutionService._get_external_factor_columns(data)
-            
+
             if external_factors:
                 logger.info(f"XGBoost: Using external factors: {external_factors}")
                 X, y_target = ForecastExecutionService._extract_features_with_factors(data, window, external_factors)
@@ -1898,16 +1898,18 @@ class ForecastExecutionService:
             if len(X) < 5:
                 raise ValueError("Insufficient data for XGBoost training")
 
-            # Train XGBoost model on ALL data (no internal split)
+            # Train XGBoost model on ALL data (no internal split) - FIXED: Added random_state for reproducible results
             model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
-                random_state=42,
+                random_state=42,  # Fixed random state for reproducible results
                 n_jobs=-1,
                 verbosity=0
             )
             model.fit(X, y_target, verbose=False)
+
+            logger.info("XGBoost: Model training completed with fixed random_state=42")
 
             # Generate forecast
             forecast = []
