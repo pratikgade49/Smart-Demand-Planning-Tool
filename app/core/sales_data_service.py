@@ -363,7 +363,7 @@ class SalesDataService:
             col_names = [desc[0] for desc in cursor.description]
 
             # Build dictionary, excluding system fields
-            exclude_fields = {"master_id", "tenant_id", "created_at", "created_by", "updated_at", "updated_by"}
+            exclude_fields = {"master_id", "tenant_id", "created_at", "created_by", "updated_at", "updated_by","uom","deleted_at"}
             master_data = {
                 col_names[i]: row[i]
                 for i in range(len(col_names))
@@ -415,19 +415,35 @@ class SalesDataService:
                 # Calculate offset
                 offset = (request.page - 1) * request.page_size
 
-                # Get paginated master_ids
+                # Get paginated master_ids, ordered by master_data fields (ASC) instead of master_id
+                order_cols: List[str] = []
                 order_by = "master_id ASC"
+                sales_order_by = f'sd.master_id, sd."{date_field}" ASC'
                 try:
                     cursor.execute("""
-                        SELECT column_name FROM information_schema.columns 
-                        WHERE table_name = 'master_data' AND column_name IN ('product', 'customer')
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'master_data'
+                        ORDER BY ordinal_position
                     """)
-                    existing_cols = [r[0] for r in cursor.fetchall()]
-                    if 'product' in existing_cols and 'customer' in existing_cols:
-                        order_by = "product, customer ASC"
-                    elif 'product' in existing_cols:
-                        order_by = "product ASC"
-                except:
+                    all_cols = [r[0] for r in cursor.fetchall()]
+                    exclude_cols = {
+                        "master_id",
+                        "tenant_id",
+                        "created_at",
+                        "created_by",
+                        "updated_at",
+                        "updated_by",
+                        "deleted_at",
+                        "uom",
+                    }
+                    order_cols = [c for c in all_cols if c not in exclude_cols]
+                    if order_cols:
+                        order_by = ", ".join([f'"{c}" ASC' for c in order_cols])
+                        sales_order_by = ", ".join(
+                            [f'md."{c}" ASC' for c in order_cols] + [f'sd."{date_field}" ASC']
+                        )
+                except Exception:
                     pass
 
                 master_id_query = f"""
@@ -448,12 +464,14 @@ class SalesDataService:
 
                 # Get sales data for these master_ids within date range
                 placeholders = ",".join(["%s"] * len(master_ids))
+                join_master_data = "JOIN public.master_data md ON sd.master_id = md.master_id" if order_cols else ""
                 sales_query = f"""
-                    SELECT sales_id, master_id, "{date_field}", "{target_field}", uom 
-                    FROM public.sales_data 
-                    WHERE master_id IN ({placeholders})
-                    AND "{date_field}" BETWEEN %s AND %s
-                    ORDER BY master_id, "{date_field}" ASC
+                    SELECT sd.sales_id, sd.master_id, sd."{date_field}", sd."{target_field}", sd.uom 
+                    FROM public.sales_data sd
+                    {join_master_data}
+                    WHERE sd.master_id IN ({placeholders})
+                    AND sd."{date_field}" BETWEEN %s AND %s
+                    ORDER BY {sales_order_by}
                 """
                 cursor.execute(sales_query, master_ids + [start_date, end_date])
                 rows = cursor.fetchall()

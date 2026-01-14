@@ -858,48 +858,76 @@ class ForecastingService:
                             "saved_count": 0
                         }
                     
-                    # Get one master_id from master_data to use for aggregated forecasts
-                    cursor.execute("SELECT master_id FROM master_data LIMIT 1")
-                    master_id_row = cursor.fetchone()
-                    if not master_id_row:
-                        raise ValidationException("No master data found to associate with forecast records")
-                    aggregated_master_id = master_id_row[0]
-
-                    # Get uom and unit_price for the aggregated master_id
-                    cursor.execute("""
-                        SELECT uom, unit_price
-                        FROM sales_data
-                        WHERE master_id = %s
-                        ORDER BY created_at DESC LIMIT 1
-                    """, (aggregated_master_id,))
-                    sales_row = cursor.fetchone()
-                    uom = sales_row[0] if sales_row else "UNIT"
-                    unit_price = sales_row[1] if sales_row else 0
+                    master_id_cache = {}
+                    sales_info_cache = {}
 
                     saved_count = 0
                     for row in results:
                         forecast_date, forecast_value, metadata = row
+                        if isinstance(metadata, str):
+                            try:
+                                metadata = json.loads(metadata)
+                            except json.JSONDecodeError:
+                                metadata = {}
+                        entity_filter = (
+                            metadata.get("entity_filter")
+                            if isinstance(metadata, dict)
+                            else None
+                        )
+                        if not entity_filter and entity_fields:
+                            entity_filter = entity_fields
+                        if not isinstance(entity_filter, dict) or not entity_filter:
+                            raise ValidationException(
+                                "Entity filter missing for forecast result"
+                            )
+                        entity_key = tuple(
+                            sorted((k, str(v)) for k, v in entity_filter.items())
+                        )
+                        if entity_key not in master_id_cache:
+                            master_id_cache[entity_key] = ForecastingService._resolve_master_id(
+                                cursor,
+                                entity_filter,
+                            )
+                        master_id = master_id_cache[entity_key]
+
+                        if master_id not in sales_info_cache:
+                            sales_info_cache[master_id] = ForecastingService._resolve_sales_info(
+                                cursor,
+                                master_id,
+                            )
+                        uom, unit_price = sales_info_cache[master_id]
 
                         # Save aggregated forecast record (one per date)
                         cursor.execute(f"""
-                            INSERT INTO forecast_data
-                            (master_id, forecast_run_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (master_id, "{date_field}", forecast_run_id)
-                            DO UPDATE SET
-                                "{target_field}" = EXCLUDED."{target_field}",
-                                uom = EXCLUDED.uom,
-                                unit_price = EXCLUDED.unit_price,
-                                created_at = CURRENT_TIMESTAMP
+                            UPDATE forecast_data
+                            SET "{target_field}" = %s,
+                                uom = %s,
+                                unit_price = %s,
+                                created_at = CURRENT_TIMESTAMP,
+                                created_by = %s
+                            WHERE master_id = %s
+                              AND "{date_field}" = %s
                         """, (
-                            aggregated_master_id,  # Use existing master_id for aggregated forecasts
-                            forecast_run_id,
-                            forecast_date,
                             forecast_value,
-                            uom,  # Fetched UOM
-                            unit_price,  # Fetched unit price
-                            user_email
+                            uom,
+                            unit_price,
+                            user_email,
+                            master_id,
+                            forecast_date,
                         ))
+                        if cursor.rowcount == 0:
+                            cursor.execute(f"""
+                                INSERT INTO forecast_data
+                                (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (
+                                master_id,
+                                forecast_date,
+                                forecast_value,
+                                uom,  # Fetched UOM
+                                unit_price,  # Fetched unit price
+                                user_email
+                            ))
                         saved_count += 1
                     
                     conn.commit()
@@ -918,3 +946,40 @@ class ForecastingService:
             if isinstance(e, (ValidationException, NotFoundException)):
                 raise
             raise DatabaseException(f"Failed to save forecast results: {str(e)}")
+
+    @staticmethod
+    def _resolve_master_id(cursor, entity_filter: Dict[str, Any]) -> str:
+        if not entity_filter:
+            raise ValidationException("Entity filter is required for master data lookup")
+        from psycopg2 import sql
+        clauses = []
+        params = []
+        for key, value in entity_filter.items():
+            clauses.append(sql.SQL("{} = %s").format(sql.Identifier(key)))
+            params.append(value)
+        query = sql.SQL("SELECT master_id FROM master_data WHERE {} LIMIT 1").format(
+            sql.SQL(" AND ").join(clauses)
+        )
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if not row:
+            raise ValidationException(
+                f"No master data found for entity_filter: {entity_filter}"
+            )
+        return row[0]
+
+    @staticmethod
+    def _resolve_sales_info(cursor, master_id: str) -> tuple[str, Any]:
+        cursor.execute(
+            """
+            SELECT uom, unit_price
+            FROM sales_data
+            WHERE master_id = %s
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (master_id,),
+        )
+        sales_row = cursor.fetchone()
+        uom = sales_row[0] if sales_row else "UNIT"
+        unit_price = sales_row[1] if sales_row else 0
+        return uom, unit_price

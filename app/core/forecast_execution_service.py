@@ -94,20 +94,15 @@ class ForecastExecutionService:
                     validated_params['alpha'] = max(1e-15, min(1.0, float(validated_params['alpha'])))
 
             elif algorithm_id == 13:  # MLP Neural Network
-                if 'alpha_list' in validated_params:
-                    alphas = validated_params['alpha_list']
-                    if isinstance(alphas, list):
-                        validated_params['alpha_list'] = [max(0.0001, min(1.0, float(a))) for a in alphas]
-                if 'hidden_layer_sizes_list' in validated_params:
-                    configs = validated_params['hidden_layer_sizes_list']
-                    if isinstance(configs, list):
-                        new_configs = []
-                        for config in configs:
-                            if isinstance(config, list):
-                                new_configs.append([max(1, min(100, int(x))) for x in config])
-                            else:
-                                new_configs.append([max(1, min(100, int(config)))] if isinstance(config, (int, float)) else [10])
-                        validated_params['hidden_layer_sizes_list'] = new_configs
+                if 'hidden_layers' in validated_params:
+                    if validated_params['hidden_layers'] is None:
+                        validated_params['hidden_layers'] = [64, 32]
+                    elif isinstance(validated_params['hidden_layers'], list):
+                        validated_params['hidden_layers'] = [max(1, min(100, int(x))) for x in validated_params['hidden_layers']]
+                if 'epochs' in validated_params:
+                    validated_params['epochs'] = max(1, min(1000, int(validated_params['epochs'])))
+                if 'batch_size' in validated_params:
+                    validated_params['batch_size'] = max(1, min(256, int(validated_params['batch_size'])))
 
             elif algorithm_id == 4:  # Exponential Smoothing
                 # alphas: list of floats 0.0-1.0

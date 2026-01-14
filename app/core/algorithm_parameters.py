@@ -163,34 +163,31 @@ class AlgorithmParametersService:
             "description": "Extreme Gradient Boosting",
             "parameters": [
                 ParameterDefinition(
-                    name="n_estimators_list",
-                    type="list",
-                    description="Number of estimators to try",
-                    required=True,
-                    default_value=[50, 100],
-                    list_item_type="int",
+                    name="n_estimators",
+                    type="int",
+                    description="Number of boosting rounds",
+                    required=False,
+                    default_value=100,
                     min_value=10,
                     max_value=1000
                 ),
                 ParameterDefinition(
-                    name="learning_rate_list",
-                    type="list",
-                    description="Learning rates to try",
-                    required=True,
-                    default_value=[0.05, 0.1, 0.2],
-                    list_item_type="float",
-                    min_value=0.01,
-                    max_value=1.0
+                    name="max_depth",
+                    type="int",
+                    description="Maximum tree depth",
+                    required=False,
+                    default_value=6,
+                    min_value=1,
+                    max_value=20
                 ),
                 ParameterDefinition(
-                    name="max_depth_list",
-                    type="list",
-                    description="Maximum depths to try",
-                    required=True,
-                    default_value=[3, 4, 5],
-                    list_item_type="int",
-                    min_value=1,
-                    max_value=10
+                    name="learning_rate",
+                    type="float",
+                    description="Boosting learning rate",
+                    required=False,
+                    default_value=0.1,
+                    min_value=0.01,
+                    max_value=1.0
                 )
             ]
         },
@@ -199,24 +196,30 @@ class AlgorithmParametersService:
             "description": "Support Vector Regression",
             "parameters": [
                 ParameterDefinition(
-                    name="C_list",
-                    type="list",
-                    description="Regularization parameters to try",
-                    required=True,
-                    default_value=[1, 10, 100],
-                    list_item_type="float",
+                    name="C",
+                    type="float",
+                    description="Regularization parameter",
+                    required=False,
+                    default_value=1.0,
                     min_value=0.1,
                     max_value=1000.0
                 ),
                 ParameterDefinition(
-                    name="epsilon_list",
-                    type="list",
-                    description="Epsilon values to try",
-                    required=True,
-                    default_value=[0.1, 0.2],
-                    list_item_type="float",
+                    name="epsilon",
+                    type="float",
+                    description="Epsilon-tube parameter",
+                    required=False,
+                    default_value=0.1,
                     min_value=0.01,
                     max_value=1.0
+                ),
+                ParameterDefinition(
+                    name="kernel",
+                    type="string",
+                    description="Kernel type",
+                    required=False,
+                    default_value="rbf",
+                    allowed_values=["linear", "poly", "rbf", "sigmoid"]
                 )
             ]
         },
@@ -225,12 +228,11 @@ class AlgorithmParametersService:
             "description": "K-Nearest Neighbors regression",
             "parameters": [
                 ParameterDefinition(
-                    name="n_neighbors_list",
-                    type="list",
-                    description="Number of neighbors to try",
-                    required=True,
-                    default_value=[7, 10],
-                    list_item_type="int",
+                    name="n_neighbors",
+                    type="int",
+                    description="Number of neighbors to use",
+                    required=False,
+                    default_value=5,
                     min_value=1,
                     max_value=50
                 )
@@ -256,24 +258,32 @@ class AlgorithmParametersService:
             "description": "Multi-layer perceptron neural network",
             "parameters": [
                 ParameterDefinition(
-                    name="hidden_layer_sizes_list",
+                    name="hidden_layers",
                     type="list",
-                    description="Hidden layer configurations to try",
-                    required=True,
-                    default_value=[[10], [20, 10]],
-                    list_item_type="list",
+                    description="Hidden layer sizes",
+                    required=False,
+                    default_value=[64, 32],
+                    list_item_type="int",
                     min_value=1,
                     max_value=100
                 ),
                 ParameterDefinition(
-                    name="alpha_list",
-                    type="list",
-                    description="Regularization parameters to try",
-                    required=True,
-                    default_value=[0.001, 0.01],
-                    list_item_type="float",
-                    min_value=0.0001,
-                    max_value=1.0
+                    name="epochs",
+                    type="int",
+                    description="Number of training epochs",
+                    required=False,
+                    default_value=100,
+                    min_value=1,
+                    max_value=1000
+                ),
+                ParameterDefinition(
+                    name="batch_size",
+                    type="int",
+                    description="Batch size for training",
+                    required=False,
+                    default_value=32,
+                    min_value=1,
+                    max_value=256
                 )
             ]
         },
@@ -419,7 +429,12 @@ class AlgorithmParametersService:
         Returns:
             ParameterValidationResult with validation status and messages
         """
-        result = ParameterValidationResult(is_valid=True, errors=[], warnings=[])
+        result = ParameterValidationResult(
+            is_valid=True, 
+            errors=[], 
+            warnings=[],
+            validated_parameters={}
+        )
 
         # Get parameter schema
         schema = AlgorithmParametersService.get_algorithm_parameters(algorithm_id)
@@ -428,30 +443,57 @@ class AlgorithmParametersService:
             result.errors.append(f"Unknown algorithm ID: {algorithm_id}")
             return result
 
-        if not custom_parameters:
-            # Check if any required parameters are missing
-            for param in schema.parameters:
-                if param.required:
-                    result.is_valid = False
-                    result.errors.append(f"Required parameter '{param.name}' is missing")
-            return result
+        input_params = custom_parameters or {}
+        validated_params = {}
 
-        # Validate each parameter
+        # Validate each parameter defined in schema
         for param in schema.parameters:
             param_name = param.name
-            if param_name not in custom_parameters:
+            
+            if param_name not in input_params:
                 if param.required:
-                    result.is_valid = False
-                    result.errors.append(f"Required parameter '{param_name}' is missing")
+                    if param.default_value is not None:
+                        # Use default value if required but missing
+                        validated_params[param_name] = param.default_value
+                        result.warnings.append(f"Required parameter '{param_name}' missing, using default value")
+                    else:
+                        result.is_valid = False
+                        result.errors.append(f"Required parameter '{param_name}' is missing")
+                else:
+                    # Use default value for optional parameters if missing
+                    validated_params[param_name] = param.default_value
                 continue
 
-            param_value = custom_parameters[param_name]
+            param_value = input_params[param_name]
+
+            # Handle None values for optional parameters
+            if param_value is None:
+                if param.required:
+                    result.is_valid = False
+                    result.errors.append(f"Required parameter '{param_name}' cannot be None")
+                else:
+                    validated_params[param_name] = param_value
+                continue
 
             # Type validation
             if not AlgorithmParametersService._validate_parameter_type(param_value, param.type):
                 result.is_valid = False
                 result.errors.append(f"Parameter '{param_name}' must be of type {param.type}")
                 continue
+
+            # Convert string values to expected types
+            if isinstance(param_value, str):
+                try:
+                    if param.type == 'int':
+                        param_value = int(param_value)
+                    elif param.type == 'float':
+                        param_value = float(param_value)
+                    elif param.type == 'bool':
+                        param_value = param_value.lower() in ['true', '1']
+                except ValueError:
+                    result.is_valid = False
+                    result.errors.append(f"Parameter '{param_name}' cannot be converted to {param.type}")
+                    continue
 
             # Range validation for numeric types
             if param.type in ['int', 'float']:
@@ -510,6 +552,9 @@ class AlgorithmParametersService:
                         result.is_valid = False
                         result.errors.append(f"Value '{param_value}' for '{param_name}' is not allowed")
 
+            validated_params[param_name] = param_value
+
+        result.validated_parameters = validated_params
         return result
 
     @staticmethod
@@ -535,5 +580,24 @@ class AlgorithmParametersService:
         expected_python_type = type_map.get(expected_type)
         if not expected_python_type:
             return False
+
+        # Allow int for float types
+        if expected_type == 'float' and isinstance(value, int):
+            return True
+
+        # Allow string representations of numbers
+        if isinstance(value, str):
+            try:
+                if expected_type == 'int':
+                    int(value)
+                    return True
+                elif expected_type == 'float':
+                    float(value)
+                    return True
+                elif expected_type == 'bool':
+                    value.lower() in ['true', 'false', '1', '0']
+                    return True
+            except ValueError:
+                return False
 
         return isinstance(value, expected_python_type)

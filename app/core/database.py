@@ -13,7 +13,7 @@ import logging
 import uuid
 
 from app.config import settings
-from app.core.exceptions import DatabaseException
+from app.core.exceptions import AppException, DatabaseException
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +372,10 @@ class DatabaseManager:
             yield connection
             connection.commit()
             
+        except AppException:
+            if connection:
+                connection.rollback()
+            raise
         except Exception as e:
             if connection:
                 connection.rollback()
@@ -407,6 +411,10 @@ class DatabaseManager:
             yield connection
             connection.commit()
             
+        except AppException:
+            if connection:
+                connection.rollback()
+            raise
         except Exception as e:
             if connection:
                 connection.rollback()

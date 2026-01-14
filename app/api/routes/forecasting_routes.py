@@ -6,6 +6,8 @@ Endpoints for forecast run management and execution.
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from app.schemas.forecasting import (
     ForecastVersionCreate,
     ForecastVersionUpdate,
@@ -17,7 +19,6 @@ from app.schemas.forecasting import (
 
 from app.core.resource_monitor import monitor_endpoint, ResourceMonitor
 import logging
-from app.core.database import get_db_manager
 from app.core.forecasting_service import ForecastingService
 from app.core.forecast_version_service import ForecastVersionService
 from app.core.external_factors_service import ExternalFactorsService
@@ -101,6 +102,13 @@ async def execute_forecast_async(
                     error_msg = f"Invalid parameters for algorithm {algo['algorithm_id']}: {'; '.join(validation_result.errors)}"
                     logger.error(f"Parameter validation failed: {error_msg}")
                     raise ValidationException(error_msg)
+                
+                # Update with validated parameters (including defaults)
+                algo['custom_parameters'] = validation_result.validated_parameters
+
+        # If we used algorithm_id, ensure request_data['custom_parameters'] is updated
+        if request_data.get('algorithm_id') is not None and not request_data.get('algorithms'):
+            request_data['custom_parameters'] = algorithms_to_validate[0]['custom_parameters']
 
         # Check for duplicate running jobs with same forecast parameters
         is_duplicate = ForecastJobService.check_duplicate_running_job(
@@ -144,6 +152,12 @@ async def execute_forecast_async(
             }
         }
     
+    except ValidationException as e:
+        logger.error(f"Validation error in async forecast execution: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except AppException as e:
+        logger.error(f"Application error in async forecast execution: {str(e)}")
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error in async forecast execution: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -197,6 +211,19 @@ async def get_forecast_job_status(
 @router.get("/job-history", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def get_forecast_job_history(
     limit: int = Query(50, ge=1, le=200),
+    created_from: Optional[str] = Query(
+        None,
+        description="Filter jobs created at or after this timestamp (ISO format)"
+    ),
+    created_to: Optional[str] = Query(
+        None,
+        description="Filter jobs created at or before this timestamp (ISO format)"
+    ),
+    timezone_name: Optional[str] = Query(
+        None,
+        alias="timezone",
+        description="IANA timezone name (e.g. Asia/Kolkata)"
+    ),
     tenant_data: Dict = Depends(get_current_tenant)
 ):
     """
@@ -210,12 +237,43 @@ async def get_forecast_job_history(
     """
     try:
         logger.info(f"Fetching forecast job history for {tenant_data['email']}")
-        
+
+        created_from_dt = None
+        created_to_dt = None
+        if created_from:
+            try:
+                created_from_dt = datetime.fromisoformat(created_from)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="created_from must be a valid ISO datetime"
+                )
+        if created_to:
+            try:
+                created_to_dt = datetime.fromisoformat(created_to)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="created_to must be a valid ISO datetime"
+                )
+
+        if timezone_name:
+            try:
+                ZoneInfo(timezone_name)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="timezone must be a valid IANA timezone name"
+                )
+
         jobs = ForecastJobService.get_user_jobs(
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
             user_email=tenant_data['email'],
-            limit=limit
+            limit=limit,
+            created_from=created_from_dt,
+            created_to=created_to_dt,
+            timezone_name=timezone_name
         )
         
         return ResponseHandler.success(
@@ -225,6 +283,59 @@ async def get_forecast_job_history(
     
     except Exception as e:
         logger.error(f"Error getting job history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get("/results/get", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_forecast_results(
+    job_id: str = Query(..., description="Forecast job ID"),
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Get forecast results for a job ID by combining job result data and
+    forecast results from the database.
+    """
+    try:
+        if not job_id.strip():
+            raise HTTPException(status_code=400, detail="job_id is required")
+
+        result = ForecastJobService.get_forecast_results(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            job_id=job_id
+        )
+        return ResponseHandler.success(data=result, status_code=200)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error getting forecast results: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get("/mappingid/get", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_forecast_mapping_details(
+    mapping_id: str = Query(..., description="Forecast algorithm mapping ID"),
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Get forecast algorithm mapping details for a mapping ID.
+    """
+    try:
+        if not mapping_id.strip():
+            raise HTTPException(status_code=400, detail="mapping_id is required")
+
+        result = ForecastJobService.get_mapping_details(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            mapping_id=mapping_id
+        )
+        return ResponseHandler.success(data=result, status_code=200)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error getting mapping details: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.post("/versions", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
@@ -489,11 +600,11 @@ async def compare_forecast_results(
                 params = [forecast_run_id, result_type]
                 
                 if date_from:
-                    where_clauses.append("fr.date >= %s")  # Changed from forecast_date
+                    where_clauses.append("fr.date >= %s")  # Changed from date
                     params.append(date_from)
                 
                 if date_to:
-                    where_clauses.append("fr.date <= %s")  # Changed from forecast_date
+                    where_clauses.append("fr.date <= %s")  # Changed from date
                     params.append(date_to)
                 
                 where_sql = " AND ".join(where_clauses)
@@ -637,6 +748,11 @@ class SaveForecastRequest(BaseModel):
     aggregation_level: Optional[str] = None
 
 
+class CopyForecastRequest(BaseModel):
+    """Request for copying forecast results by job."""
+    job_id: str
+
+
 @router.post("/save-forecast", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def save_forecast(
     request: SaveForecastRequest,
@@ -672,4 +788,38 @@ async def save_forecast(
         raise HTTPException(status_code=status_code, detail=str(e))
     except Exception as e:
         logger.error(f"Error saving forecast: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/copy-forecast", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def copy_forecast(
+    request: CopyForecastRequest,
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Copy forecast results for all runs in a job into forecast_data table.
+    Updates are matched on master_id and date.
+    """
+    try:
+        if not request.job_id.strip():
+            raise ValidationException("job_id is required")
+
+        logger.info(
+            f"Copying forecast results for job {request.job_id} (Tenant: {tenant_data['tenant_id']})"
+        )
+
+        result = ForecastJobService.copy_forecast_results(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            job_id=request.job_id,
+            user_email=tenant_data["email"]
+        )
+
+        return ResponseHandler.success(data=result)
+
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error copying forecast: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")

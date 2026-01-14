@@ -102,7 +102,8 @@ class FieldCatalogueService:
                     
                     conn.commit()
                     logger.info(f"Field catalogue created: {catalogue_id} in database: {database_name}")
-                    
+                    FieldCatalogueService.finalize_field_catalogue(
+                        tenant_id, database_name, catalogue_id, user_email)
                     return {
                         "catalogue_id": catalogue_id,
                         "fields": [f.to_dict() for f in field_definitions],
@@ -114,6 +115,8 @@ class FieldCatalogueService:
                     
                 finally:
                     cursor.close()
+
+                
                     
         except (ValidationException, NotFoundException):
             raise

@@ -37,8 +37,8 @@ class MasterDataService:
                         FROM information_schema.columns
                         WHERE table_name = 'master_data'
                         AND table_schema = 'public'
-                        AND column_name NOT IN ('master_id', 'tenant_id', 'created_at',
-                                               'created_by', 'updated_at', 'updated_by')
+                        AND column_name NOT IN ('master_id','uom', 'tenant_id', 'created_at',
+                                               'created_by', 'updated_at', 'updated_by','deleted_at')
                         ORDER BY column_name
                     """)
 

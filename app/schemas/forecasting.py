@@ -30,6 +30,7 @@ class ParameterValidationResult(BaseModel):
     is_valid: bool
     errors: List[str] = []
     warnings: List[str] = []
+    validated_parameters: Optional[Dict[str, Any]] = None
 
 # Forecasting Schema Models
 class ForecastVersionCreate(BaseModel):
