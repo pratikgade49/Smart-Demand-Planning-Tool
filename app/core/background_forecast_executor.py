@@ -234,6 +234,7 @@ from app.core.forecast_execution_service import ForecastExecutionService
 from app.core.resource_monitor import ResourceMonitor, performance_tracker
 from app.core.algorithm_parameters import AlgorithmParametersService
 from app.core.exceptions import ValidationException
+from app.config import settings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -387,7 +388,7 @@ class BackgroundForecastExecutor:
                 
                 # Execute in parallel with monitoring
                 db_manager = get_db_manager()
-                max_workers = min(len(entity_combinations), 10)
+                max_workers = min(len(entity_combinations), settings.NUMBER_OF_THREADS)
                 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_entity = {

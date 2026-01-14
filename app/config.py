@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     
     # Migration Settings
     MIGRATIONS_DIR: str = "migrations"
+
+    # Parallel Processing Settings
+    NUMBER_OF_THREADS: int = 10
     
     model_config = ConfigDict(
         env_file=".env",

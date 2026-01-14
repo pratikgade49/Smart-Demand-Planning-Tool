@@ -31,6 +31,7 @@ from app.core.database import get_db_manager
 from app.core.exceptions import DatabaseException, ValidationException, NotFoundException
 from app.core.forecasting_service import ForecastingService
 from app.core.external_factors_service import ExternalFactorsService
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,7 @@ class ForecastExecutionService:
             failed_records = 0
  
             # Use ThreadPoolExecutor for parallel algorithm execution
-            max_workers = min(len(algorithms), os.cpu_count() or 4)
+            max_workers = min(len(algorithms), settings.NUMBER_OF_THREADS)
             logger.info(f"Starting parallel execution of {len(algorithms)} algorithms with {max_workers} workers")
  
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2660,7 +2661,7 @@ class ForecastExecutionService:
         best_metrics = None
         
         # Use ThreadPoolExecutor for parallel execution
-        max_workers = min(len(available_algorithms), os.cpu_count() or 4)
+        max_workers = min(len(available_algorithms), settings.NUMBER_OF_THREADS)
         process_log.append(f"Starting parallel execution with {max_workers} workers for {len(available_algorithms)} algorithms...")
         
         # Determine forecast periods

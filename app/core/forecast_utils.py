@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import os
 import logging
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +508,7 @@ def _process_entity_forecast(
                 }
 
         # Use ThreadPoolExecutor for parallel algorithm execution within entity
-        max_algo_workers = min(len(algorithms_to_execute), os.cpu_count() or 4)
+        max_algo_workers = min(len(algorithms_to_execute), settings.NUMBER_OF_THREADS)
         logger.info(f"Starting parallel execution of {len(algorithms_to_execute)} algorithms for entity {entity_name} with {max_algo_workers} workers")
 
         with ThreadPoolExecutor(max_workers=max_algo_workers) as algo_executor:
