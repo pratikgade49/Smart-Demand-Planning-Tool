@@ -9,6 +9,7 @@ from app.core.excel_upload_service import ExcelUploadService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
 from app.api.dependencies import get_current_tenant
+from app.schemas.upload import ExcelSampleResponse
 import logging
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,63 @@ async def upload_excel_file(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error in upload_excel_file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/preview", response_model=Dict[str, Any])
+async def preview_excel_file(
+    file: UploadFile = File(...),
+    catalogue_id: str = Form(...),
+    sample_size: int = Form(10),
+    tenant_data: Dict = Depends(get_current_tenant)
+):
+    """
+    Preview sample data from Excel file before upload.
+
+    - **file**: Excel file to preview
+    - **catalogue_id**: Field catalogue ID for column mapping
+    - **sample_size**: Number of sample rows to return (default: 10, max: 100)
+    """
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith(('.xlsx', '.xls')):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only Excel files (.xlsx, .xls) are allowed"
+            )
+
+        # Validate catalogue_id
+        if not catalogue_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="catalogue_id is required for data preview"
+            )
+
+        # Validate sample_size
+        if sample_size < 1 or sample_size > 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="sample_size must be between 1 and 100"
+            )
+
+        # Read file content
+        file_content = await file.read()
+
+        # Get sample data
+        result = ExcelUploadService.get_excel_sample_data(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            file_content=file_content,
+            catalogue_id=catalogue_id,
+            sample_size=sample_size
+        )
+
+        return ResponseHandler.success(data=result)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in preview_excel_file: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

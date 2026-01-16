@@ -26,6 +26,7 @@ from app.api.routes import external_factors_routes
 from app.api.routes import forecast_comparison_routes
 from app.api.routes import sap_ibp_routes
 from app.api.routes import sales_data_routes
+from app.api.routes import dashboard_routes
 from app.api.routes import master_data_routes
 from app.api.middleware.monitoring_middleware import ResourceMonitoringMiddleware
 
@@ -268,6 +269,8 @@ app.include_router(master_data_routes.router, prefix="/api/v1")
 logger.debug("Registered master data routes")
 app.include_router(sales_data_routes.router, prefix="/api/v1")
 logger.debug("Registered sales data routes")
+app.include_router(dashboard_routes.router, prefix="/api/v1")
+logger.debug("Registered dashboard routes")
 logger.info("All API routes registered successfully")
 
 

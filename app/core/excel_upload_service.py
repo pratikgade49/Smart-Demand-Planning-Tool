@@ -852,3 +852,89 @@ class ExcelUploadService:
             if isinstance(e, (ValidationException, DatabaseException)):
                 raise
             raise ValidationException(f"Upload failed: {str(e)}")
+
+    @staticmethod
+    def get_excel_sample_data(
+        tenant_id: str,
+        database_name: str,
+        file_content: bytes,
+        catalogue_id: str,
+        sample_size: int = 10
+    ) -> Dict[str, Any]:
+        """Get sample data from Excel file with column mapping for preview."""
+        log_operation_start(logger, "get_excel_sample_data", tenant_id=tenant_id, sample_size=sample_size)
+        start_time = time.time()
+
+        try:
+            # Validate and parse Excel file
+            df = ExcelUploadService.validate_excel_file(file_content)
+            total_rows = len(df)
+
+            # Get field catalogue
+            field_catalogue = FieldCatalogueService.get_field_catalogue(
+                tenant_id, database_name, catalogue_id
+            )
+
+            if field_catalogue['status'] != 'FINALIZED':
+                raise ValidationException("Field catalogue must be finalized")
+
+            # Identify column mappings
+            master_mapping, sales_mapping, field_names_mapping = ExcelUploadService.identify_column_types(
+                df, field_catalogue
+            )
+
+            # Prepare column mapping info
+            mapped_columns = {}
+            for catalogue_field, excel_col in master_mapping.items():
+                mapped_columns[catalogue_field] = excel_col
+            for key, excel_col in sales_mapping.items():
+                if key == 'target':
+                    mapped_columns[field_names_mapping['target_field']] = excel_col
+                elif key == 'date':
+                    mapped_columns[field_names_mapping['date_field']] = excel_col
+                elif excel_col:
+                    mapped_columns[key.upper()] = excel_col
+
+            # Get sample rows (first N rows)
+            sample_df = df.head(sample_size)
+
+            # Map columns and convert to list of dicts
+            sample_data = []
+            for _, row in sample_df.iterrows():
+                row_dict = {}
+                for catalogue_field, excel_col in mapped_columns.items():
+                    if excel_col in row and not pd.isna(row[excel_col]):
+                        row_dict[catalogue_field] = ExcelUploadService.clean_value(row[excel_col])
+                    else:
+                        row_dict[catalogue_field] = None
+                sample_data.append(row_dict)
+
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"Sample data generated: {len(sample_data)} rows, {len(mapped_columns)} mapped columns, {duration_ms:.2f}ms",
+                extra={
+                    "sample_size": len(sample_data),
+                    "total_rows": total_rows,
+                    "mapped_columns": len(mapped_columns),
+                    "duration_ms": duration_ms
+                }
+            )
+
+            log_operation_end(logger, "get_excel_sample_data", success=True)
+
+            return {
+                "data": sample_data,
+                "total_rows": total_rows,
+                "columns_mapped": True,
+                "mapped_columns": mapped_columns,
+                "sample_size": len(sample_data)
+            }
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            if isinstance(e, ValidationException):
+                log_operation_end(logger, "get_excel_sample_data", success=False, error=str(e))
+                raise
+            logger.error(f"Error generating sample data: {str(e)}", exc_info=True)
+            log_operation_end(logger, "get_excel_sample_data", success=False, error=str(e))
+            raise ValidationException(f"Failed to generate sample data: {str(e)}")

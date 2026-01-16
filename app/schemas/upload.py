@@ -61,3 +61,12 @@ class UploadHistoryResponse(BaseModel):
     status: str
     uploaded_at: datetime
     uploaded_by: str
+
+class ExcelSampleResponse(BaseModel):
+    """Response schema for Excel sample data preview."""
+
+    data: List[Dict[str, Any]] = Field(description="Sample data rows with mapped column names")
+    total_rows: int = Field(description="Total number of rows in the Excel file")
+    columns_mapped: bool = Field(description="Whether columns were successfully mapped to catalogue fields")
+    mapped_columns: Dict[str, str] = Field(description="Mapping of catalogue field names to Excel column names")
+    sample_size: int = Field(description="Number of sample rows returned")
