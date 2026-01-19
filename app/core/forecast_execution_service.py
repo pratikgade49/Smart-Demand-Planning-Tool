@@ -11,7 +11,8 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import logging
 import threading
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -477,43 +478,40 @@ class ForecastExecutionService:
         interval: str,
         user_email: str
     ) -> List[Dict[str, Any]]:
-        """Execute a single algorithm and store results with train-test split."""
+        """Execute a single algorithm with detailed debugging."""
         
         mapping_id = algorithm_mapping['mapping_id']
         algorithm_id = algorithm_mapping['algorithm_id']
         algorithm_name = algorithm_mapping['algorithm_name']
         custom_params = algorithm_mapping.get('custom_parameters') or {}
 
-        # Validate custom parameters
         try:
             custom_params = ForecastExecutionService.validate_algorithm_parameters(algorithm_id, custom_params)
         except Exception as e:
             logger.error(f"Parameter validation failed for algorithm {algorithm_name}: {str(e)}")
             raise
 
-        start_time = datetime.utcnow()
-        logger.info(f"Starting algorithm execution: {algorithm_name} (ID: {algorithm_id})")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"STARTING ALGORITHM: {algorithm_name} (ID: {algorithm_id})")
+        logger.info(f"{'='*80}")
 
-        # Update algorithm status to Running
-        ForecastExecutionService._update_algorithm_status(
-            database_name, mapping_id, 'Running'
-        )
+        ForecastExecutionService._update_algorithm_status(database_name, mapping_id, 'Running')
         
         try:
-            # Convert dates
             forecast_start_date = datetime.fromisoformat(forecast_start).date()
             forecast_end_date = datetime.fromisoformat(forecast_end).date()
             
-            # Calculate number of periods for future forecast
             future_periods = ForecastExecutionService._calculate_periods(
                 forecast_start_date,
                 forecast_end_date,
                 interval
             )
             
-            # Merge external factors if available
+            logger.info(f"Future periods to forecast: {future_periods}")
+            
+            # Merge external factors
             if not external_factors.empty:
-                logger.info(f"Merging external factors for {algorithm_name}")
+                logger.info(f"Merging {len(external_factors)} external factor records")
                 historical_data = historical_data.merge(
                     external_factors,
                     left_on='period',
@@ -521,9 +519,7 @@ class ForecastExecutionService:
                     how='left'
                 )
             
-            # ========================================================================
-            # TRAIN-TEST SPLIT
-            # ========================================================================
+            # Train-test split
             train_ratio = 0.85
             n = len(historical_data)
             split_index = max(2, int(n * train_ratio))
@@ -532,9 +528,13 @@ class ForecastExecutionService:
             test_data = historical_data.iloc[split_index:].copy()
             test_periods = len(test_data)
             
-            logger.info(f"Train-test split: train={len(train_data)}, test={len(test_data)}")
+            logger.info(f"\nDATA SPLIT:")
+            logger.info(f"  Total historical data: {n} periods")
+            logger.info(f"  Training data: {len(train_data)} periods (indices 0-{split_index-1})")
+            logger.info(f"  Test data: {len(test_data)} periods (indices {split_index}-{n-1})")
+            logger.info(f"  Future forecast: {future_periods} periods")
             
-            # Get actual values from test data
+            # Get test actuals and dates
             if 'total_quantity' in test_data.columns:
                 test_actuals = test_data['total_quantity'].values
             elif 'quantity' in test_data.columns:
@@ -542,97 +542,111 @@ class ForecastExecutionService:
             else:
                 test_actuals = np.array([])
             
-            # Get test period dates
             test_dates = test_data['period'].tolist() if 'period' in test_data.columns else []
             
-            # ========================================================================
-            # EXECUTE ALGORITHM ON TRAIN DATA FOR TEST PREDICTION
-            # ========================================================================
+            logger.info(f"\nTEST SET ACTUALS:")
+            logger.info(f"  Count: {len(test_actuals)}")
+            if len(test_actuals) > 0:
+                logger.info(f"  Range: [{test_actuals.min():.0f}, {test_actuals.max():.0f}]")
+                logger.info(f"  First 3 values: {test_actuals[:3]}")
+                logger.info(f"  Last 3 values: {test_actuals[-3:]}")
+            
+            # ====================================================================
+            # GENERATE TEST FORECAST
+            # ====================================================================
             test_forecast = np.array([])
             test_metrics = {}
 
-            if algorithm_id == 999:
-                # Special handling for best fit algorithm selection
-                if test_periods > 0:
-                    logger.info(f"Generating test forecast for best fit algorithm ({test_periods} periods)")
-                    test_result = ForecastExecutionService.generate_forecast(
-                        train_data, {'periods': test_periods}, []
-                    )
-                    test_forecast = np.array(test_result['forecast'])
-                    test_metrics = {
-                        'accuracy': test_result['accuracy'],
-                        'mae': test_result['mae'],
-                        'rmse': test_result['rmse']
-                    }
-
-                # ========================================================================
-                # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
-                # ========================================================================
-                logger.info(f"Generating future forecast for best fit algorithm ({future_periods} periods)")
-                future_result = ForecastExecutionService.generate_forecast(
-                    historical_data, {'periods': future_periods}, []
-                )
-                future_forecast = np.array(future_result['forecast'])
-                future_metrics = {
-                    'accuracy': future_result['accuracy'],
-                    'mae': future_result['mae'],
-                    'rmse': future_result['rmse']
-                }
-
-                # Update forecast_runs table with selected algorithm and accuracy
-                db_manager = get_db_manager()
-                with db_manager.get_tenant_connection(database_name) as conn:
-                    cursor = conn.cursor()
-                    try:
-                        cursor.execute("""
-                            UPDATE forecast_runs
-                            SET algorithm_name = %s, accuracy = %s, updated_at = %s, updated_by = %s
-                            WHERE forecast_run_id = %s
-                        """, (
-                            future_result['selected_algorithm'],
-                            future_result['accuracy'],
-                            datetime.utcnow(),
-                            user_email,
-                            forecast_run_id
-                        ))
-                        conn.commit()
-                        logger.info(f"Updated forecast_runs with algorithm: {future_result['selected_algorithm']}, accuracy: {future_result['accuracy']}")
-                    finally:
-                        cursor.close()
-            else:
-                # Normal algorithm execution
-                if test_periods > 0:
-                    logger.info(f"Generating test forecast for {test_periods} periods")
-                    test_forecast, test_metrics = ForecastExecutionService._route_algorithm(
-                        algorithm_id=algorithm_id,
-                        algorithm_name=algorithm_name,
-                        data=train_data,
-                        periods=test_periods,
-                        custom_params=custom_params
-                    )
-
-                # ========================================================================
-                # EXECUTE ALGORITHM ON FULL DATA FOR FUTURE FORECAST
-                # ========================================================================
-                logger.info(f"Generating future forecast for {future_periods} periods")
-                future_forecast, future_metrics = ForecastExecutionService._route_algorithm(
+            if test_periods > 0:
+                logger.info(f"\n{'='*80}")
+                logger.info(f"GENERATING TEST FORECAST")
+                logger.info(f"{'='*80}")
+                logger.info(f"Training on: {len(train_data)} periods")
+                logger.info(f"Predicting: {test_periods} future periods")
+                
+                # Call algorithm
+                test_forecast_result, train_metrics = ForecastExecutionService._route_algorithm(
                     algorithm_id=algorithm_id,
                     algorithm_name=algorithm_name,
-                    data=historical_data,
-                    periods=future_periods,
+                    data=train_data,
+                    periods=test_periods,
                     custom_params=custom_params
                 )
+                
+                test_forecast = np.array(test_forecast_result)
+                
+                logger.info(f"\nTEST FORECAST RESULT:")
+                logger.info(f"  Type: {type(test_forecast)}")
+                logger.info(f"  Length: {len(test_forecast)}")
+                logger.info(f"  Range: [{test_forecast.min():.0f}, {test_forecast.max():.0f}]")
+                logger.info(f"  First 3 values: {test_forecast[:3]}")
+                logger.info(f"  Last 3 values: {test_forecast[-3:]}")
+                
+                # ⚠️ CRITICAL CHECK
+                if len(test_forecast) != test_periods:
+                    logger.error(f"❌ LENGTH MISMATCH! Expected {test_periods}, got {len(test_forecast)}")
+                
+                # Calculate test metrics
+                if len(test_actuals) > 0 and len(test_forecast) > 0:
+                    min_len = min(len(test_actuals), len(test_forecast))
+                    test_metrics = ForecastExecutionService.calculate_metrics(
+                        test_actuals[:min_len], 
+                        test_forecast[:min_len]
+                    )
+                    logger.info(f"\nTEST SET METRICS:")
+                    logger.info(f"  MAE: {test_metrics['mae']:.2f}")
+                    logger.info(f"  RMSE: {test_metrics['rmse']:.2f}")
+                    logger.info(f"  MAPE: {test_metrics['mape']:.2f}%")
+                    logger.info(f"  Accuracy: {test_metrics['accuracy']:.2f}%")
+                else:
+                    test_metrics = train_metrics
+                    logger.warning("Using training metrics for test set (no actuals available)")
+
+            # ====================================================================
+            # GENERATE FUTURE FORECAST
+            # ====================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"GENERATING FUTURE FORECAST")
+            logger.info(f"{'='*80}")
+            logger.info(f"Training on: {len(historical_data)} periods (ALL historical data)")
+            logger.info(f"Predicting: {future_periods} future periods")
             
-            # Generate future forecast dates
+            future_forecast_result, future_metrics = ForecastExecutionService._route_algorithm(
+                algorithm_id=algorithm_id,
+                algorithm_name=algorithm_name,
+                data=historical_data,
+                periods=future_periods,
+                custom_params=custom_params
+            )
+            
+            future_forecast = np.array(future_forecast_result)
+            
+            logger.info(f"\nFUTURE FORECAST RESULT:")
+            logger.info(f"  Type: {type(future_forecast)}")
+            logger.info(f"  Length: {len(future_forecast)}")
+            logger.info(f"  Range: [{future_forecast.min():.0f}, {future_forecast.max():.0f}]")
+            logger.info(f"  First 3 values: {future_forecast[:3]}")
+            logger.info(f"  Last 3 values: {future_forecast[-3:]}")
+            
+            # Generate future dates
             future_dates = ForecastExecutionService._generate_forecast_dates(
                 forecast_start_date,
                 future_periods,
                 interval
             )
             
-            # ========================================================================
-            # STORE ALL THREE TYPES OF RESULTS
-            # ========================================================================
+            # ====================================================================
+            # STORE RESULTS
+            # ====================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"STORING RESULTS")
+            logger.info(f"{'='*80}")
+            logger.info(f"Test dates: {len(test_dates)}")
+            logger.info(f"Test actuals: {len(test_actuals)}")
+            logger.info(f"Test forecast: {len(test_forecast)}")
+            logger.info(f"Future dates: {len(future_dates)}")
+            logger.info(f"Future forecast: {len(future_forecast)}")
+            
             results = ForecastExecutionService._store_forecast_results_v2(
                 tenant_id=tenant_id,
                 database_name=database_name,
@@ -649,14 +663,21 @@ class ForecastExecutionService:
                 user_email=user_email
             )
             
-            # Update algorithm status to Completed
             ForecastExecutionService._update_algorithm_status(
                 database_name, mapping_id, 'Completed'
             )
             
+            logger.info(f"\n{'='*80}")
+            logger.info(f"ALGORITHM {algorithm_name} COMPLETED SUCCESSFULLY")
+            logger.info(f"{'='*80}\n")
+            
             return results
             
         except Exception as e:
+            logger.error(f"\n{'='*80}")
+            logger.error(f"ALGORITHM {algorithm_name} FAILED")
+            logger.error(f"ERROR: {str(e)}")
+            logger.error(f"{'='*80}\n", exc_info=True)
             ForecastExecutionService._update_algorithm_status(
                 database_name, mapping_id, 'Failed', str(e)
             )
@@ -865,9 +886,22 @@ class ForecastExecutionService:
 
 
 
+    """
+FINAL FIX: Use linear regression for trend calculation instead of simple differences
+This makes the trend robust to spikes and outliers
+"""
+
     @staticmethod
     def polynomial_regression_forecast(data: pd.DataFrame, periods: int, degree: int = 2) -> tuple:
-        """Polynomial regression forecasting"""
+        """
+        Polynomial regression with ROBUST trend calculation using linear regression.
+        
+        KEY FIX: Calculate trend using linear regression on recent data,
+        which is much more robust to spikes/outliers than simple differences.
+        """
+        logger.info(f"=== POLYNOMIAL REGRESSION START ===")
+        logger.info(f"Training data: {len(data)} rows, forecasting {periods} FUTURE periods, degree={degree}")
+        
         if 'total_quantity' in data.columns:
             y = data['total_quantity'].values
         elif 'quantity' in data.columns:
@@ -876,34 +910,153 @@ class ForecastExecutionService:
             raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
         n = len(y)
+        logger.info(f"Training set size: {n}, values range: [{y.min():.0f}, {y.max():.0f}]")
+        
         if n < 2:
             raise ValueError("Need at least 2 historical data points")
 
-        # Validate degree parameter
-        if degree < 1 or degree > 5:
-            logger.warning(f"Invalid degree {degree}, using default degree 2")
-            degree = 2
+        # Cap degree for stability
+        if n < 10:
+            safe_degree = 1
+        elif n < 25:
+            safe_degree = min(degree, 2)
+        else:
+            safe_degree = min(degree, 3)
+        
+        logger.info(f"Using degree: {safe_degree} (requested: {degree})")
+        degree = safe_degree
 
-        # Ensure degree doesn't exceed available data points
-        degree = min(degree, n - 1)
-
-        logger.info(f"Using polynomial degree: {degree}")
-
-        coeffs = np.polyfit(np.arange(n), y, degree)
+        # Fit polynomial on training data
+        x = np.arange(n)
+        coeffs = np.polyfit(x, y, degree)
         poly_func = np.poly1d(coeffs)
+        
+        logger.info(f"Polynomial fitted with coefficients: {coeffs}")
+        
+        # Calculate fitted values for metrics
+        predicted = poly_func(x)
+        predicted = np.maximum(predicted, 0)
+        
+        logger.info(f"Fitted values on training data: range=[{predicted.min():.0f}, {predicted.max():.0f}]")
+        
+        # Generate future forecast
         future_x = np.arange(n, n + periods)
-        forecast = poly_func(future_x)
-        forecast = np.maximum(forecast, 0)
-        predicted = poly_func(np.arange(n))
-        metrics = ForecastExecutionService.calculate_metrics(y, predicted)
+        forecast_raw = poly_func(future_x)
+        
+        logger.info(f"Raw polynomial forecast: range=[{forecast_raw.min():.0f}, {forecast_raw.max():.0f}]")
+        
+        # ========================================================================
+        # CRITICAL FIX: Use linear regression for robust trend estimation
+        # ========================================================================
+        
+        # Calculate recent statistics
+        lookback = min(12, n)  # For mean/std calculation
+        recent_values = y[-lookback:]
+        recent_mean = np.mean(recent_values)
+        recent_std = np.std(recent_values)
+        
+        # Calculate trend using RANSAC (robust to outliers/spikes)
+        from sklearn.linear_model import RANSACRegressor, LinearRegression
+        
+        # Use up to 30 periods for trend calculation
+        trend_window = min(n, 30)
+        trend_x = np.arange(trend_window).reshape(-1, 1)
+        trend_y = y[-trend_window:].reshape(-1, 1)
+        
+        # RANSAC is robust to outliers - it will ignore spike points
+        try:
+            ransac = RANSACRegressor(
+                LinearRegression(),
+                min_samples=max(3, int(trend_window * 0.5)),  # Use at least 50% of data
+                residual_threshold=recent_std * 0.5,  # Points beyond 0.5 std are outliers
+                random_state=42
+            )
+            ransac.fit(trend_x, trend_y)
+            robust_trend = float(ransac.estimator_.coef_[0][0])
+            
+            # Log which points were considered inliers
+            inlier_mask = ransac.inlier_mask_
+            num_inliers = np.sum(inlier_mask) if inlier_mask is not None else trend_window
+            logger.info(f"RANSAC used {num_inliers}/{trend_window} points as inliers")
+            
+        except Exception as e:
+            # Fallback to simple linear regression if RANSAC fails
+            logger.warning(f"RANSAC failed: {str(e)}, using simple linear regression")
+            lr_model = LinearRegression()
+            lr_model.fit(trend_x, trend_y)
+            robust_trend = float(lr_model.coef_[0][0])
+        
+        logger.info(f"Recent stats: mean={recent_mean:.0f}, std={recent_std:.0f}")
+        logger.info(f"Robust trend (from RANSAC on last {trend_window} periods): {robust_trend:.2f}/period")
+        
+        # Apply smart dampening
+        forecast = []
+        for i in range(periods):
+            poly_value = forecast_raw[i]
+            
+            # Conservative projection using robust trend
+            conservative_proj = y[-1] + (i + 1) * robust_trend
+            
+            # Mean reversion target
+            mean_target = recent_mean
+            
+            # Progressive blending strategy
+            if i < 3:
+                # Near-term: 60% poly, 40% conservative (reduced from 70%)
+                damped = poly_value * 0.6 + conservative_proj * 0.4
+            elif i < 6:
+                # Mid-term: 40% poly, 60% conservative
+                damped = poly_value * 0.4 + conservative_proj * 0.6
+            else:
+                # Long-term: 20% poly, 50% conservative, 30% mean reversion
+                damped = poly_value * 0.2 + conservative_proj * 0.5 + mean_target * 0.3
+            
+            # Apply reasonable bounds
+            max_bound = recent_mean * 1.8  # Tightened from 2.0
+            min_bound = recent_mean * 0.5  # Loosened from 0.4
+            
+            # Also respect training data range
+            max_bound = min(max_bound, max(y) * 1.3)
+            min_bound = max(min_bound, min(y) * 0.6)
+            
+            damped = np.clip(damped, min_bound, max_bound)
+            forecast.append(max(0, damped))
+        
+        forecast = np.array(forecast)
+        
+        logger.info(f"Final forecast after dampening: range=[{forecast.min():.0f}, {forecast.max():.0f}]")
+        
+        # Calculate metrics on training data
+        try:
+            mae = float(np.mean(np.abs(y - predicted)))
+            rmse = float(np.sqrt(np.mean((y - predicted) ** 2)))
+            
+            mask = y != 0
+            if np.sum(mask) > 0:
+                mape = float(np.mean(np.abs((y[mask] - predicted[mask]) / y[mask])) * 100)
+            else:
+                mape = 100.0
+            
+            mape = min(mape, 100.0)
+            accuracy = max(0.0, 100.0 - mape)
+            
+            metrics = {
+                'accuracy': round(accuracy, 2),
+                'mae': round(mae, 2),
+                'rmse': round(rmse, 2),
+                'mape': round(mape, 2)
+            }
+            
+            logger.info(f"Training metrics: MAE={mae:.2f}, RMSE={rmse:.2f}, MAPE={mape:.2f}%, Accuracy={accuracy:.2f}%")
+            
+        except Exception as e:
+            logger.error(f"Metric calculation failed: {str(e)}", exc_info=True)
+            metrics = {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
+        
+        logger.info(f"=== POLYNOMIAL REGRESSION END ===\n")
+        
+        return forecast, metrics
 
-        # Prepare test forecast
-        test_results = {
-            'test_forecast': predicted,
-            'test_dates': data['period'].tolist() if 'period' in data.columns else []
-        }
-
-        return forecast, metrics 
 
     @staticmethod
     def exponential_smoothing_forecast(data: pd.DataFrame, periods: int, alphas: list = [0.1, 0.3, 0.5]) -> tuple:
@@ -1030,8 +1183,14 @@ class ForecastExecutionService:
 
 
     @staticmethod
-    def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12, alpha: float = 0.3, beta: float = 0.1, gamma: float = 0.1) -> tuple:
-        """Holt-Winters exponential smoothing"""
+    def holt_winters_forecast(data: pd.DataFrame, periods: int, season_length: int = 12,
+                            alpha: float = 0.3, beta: float = 0.1, gamma: float = 0.1) -> tuple:
+        """
+        Holt-Winters with improved bounds and trend dampening.
+        """
+        logger.info(f"=== HOLT-WINTERS START ===")
+        logger.info(f"Training data: {len(data)} rows, forecasting {periods} FUTURE periods, season_length={season_length}")
+        
         if 'total_quantity' in data.columns:
             y = data['total_quantity'].values
         elif 'quantity' in data.columns:
@@ -1040,55 +1199,170 @@ class ForecastExecutionService:
             raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
         n = len(y)
-        if n < 2 * season_length:
+        logger.info(f"Training set size: {n}, values range: [{y.min():.0f}, {y.max():.0f}]")
+        
+        min_required = 2 * season_length
+        
+        if n < min_required:
+            logger.warning(f"Insufficient data for Holt-Winters (need {min_required}, have {n}). Using exponential smoothing.")
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
-
-        # Validate parameters
-        alpha = max(0.0, min(1.0, alpha))
-        beta = max(0.0, min(1.0, beta))
-        gamma = max(0.0, min(1.0, gamma))
-
-        logger.info(f"Using Holt-Winters parameters: alpha={alpha}, beta={beta}, gamma={gamma}, season_length={season_length}")
-
-        # Traditional Holt-Winters
-        alpha, beta, gamma = alpha, beta, gamma
         
+        # Detect seasonality type
+        cv = np.std(y) / np.mean(y) if np.mean(y) > 0 else 0
+        use_multiplicative = cv > 0.3 and np.min(y) > 0
+        
+        logger.info(f"Coefficient of variation: {cv:.3f}, using {'multiplicative' if use_multiplicative else 'additive'}")
+        
+        # Initialize components
         level = np.mean(y[:season_length])
-        trend = (np.mean(y[season_length:2*season_length]) - np.mean(y[:season_length])) / season_length
-        seasonal = y[:season_length] - level
         
+        if n >= 2 * season_length:
+            trend = (np.mean(y[season_length:2*season_length]) - np.mean(y[:season_length])) / season_length
+        else:
+            trend = 0
+        
+        logger.info(f"Initial level: {level:.0f}, initial trend: {trend:.2f}")
+        
+        # Initialize seasonal
+        seasonal = np.zeros(season_length)
+        num_seasons = n // season_length
+        
+        for i in range(season_length):
+            vals = [y[i + j*season_length] for j in range(num_seasons) if i + j*season_length < n]
+            if vals:
+                avg = np.mean(vals)
+                if use_multiplicative and level > 0:
+                    seasonal[i] = avg / level
+                else:
+                    seasonal[i] = avg - level
+        
+        # Normalize seasonal
+        if use_multiplicative:
+            seasonal = seasonal / np.mean(seasonal)
+        else:
+            seasonal = seasonal - np.mean(seasonal)
+        
+        logger.info(f"Seasonal components: range=[{seasonal.min():.3f}, {seasonal.max():.3f}]")
+        
+        # Fit model
         levels = [level]
         trends = [trend]
         seasonals = list(seasonal)
         fitted = []
         
-        for i in range(len(y)):
+        for i in range(n):
+            s = i % season_length
+            
             if i == 0:
-                fitted.append(level + trend + seasonal[i % season_length])
+                if use_multiplicative:
+                    f = level * seasonal[s]
+                else:
+                    f = level + seasonal[s]
+                fitted.append(f)
             else:
-                level = alpha * (y[i] - seasonals[i % season_length]) + (1 - alpha) * (levels[-1] + trends[-1])
-                trend = beta * (level - levels[-1]) + (1 - beta) * trends[-1]
-                if len(seasonals) > i:
-                    seasonals[i % season_length] = gamma * (y[i] - level) + (1 - gamma) * seasonals[i % season_length]
+                prev_level = levels[-1]
+                prev_trend = trends[-1]
                 
-                levels.append(level)
-                trends.append(trend)
-                fitted.append(level + trend + seasonals[i % season_length])
+                if use_multiplicative:
+                    new_level = alpha * (y[i] / seasonals[s]) + (1 - alpha) * (prev_level + prev_trend)
+                    new_trend = beta * (new_level - prev_level) + (1 - beta) * prev_trend
+                    seasonals[s] = gamma * (y[i] / new_level) + (1 - gamma) * seasonals[s]
+                    f = (prev_level + prev_trend) * seasonals[s]
+                else:
+                    new_level = alpha * (y[i] - seasonals[s]) + (1 - alpha) * (prev_level + prev_trend)
+                    new_trend = beta * (new_level - prev_level) + (1 - beta) * prev_trend
+                    seasonals[s] = gamma * (y[i] - new_level) + (1 - gamma) * seasonals[s]
+                    f = prev_level + prev_trend + seasonals[s]
+                
+                levels.append(new_level)
+                trends.append(new_trend)
+                fitted.append(f)
+                
+                level = new_level
+                trend = new_trend
         
+        fitted = np.array(fitted)
+        logger.info(f"Fitted values: range=[{fitted.min():.0f}, {fitted.max():.0f}]")
+        
+        # ========================================================================
+        # CRITICAL FIX: Calculate robust trend for dampening
+        # ========================================================================
+        from sklearn.linear_model import LinearRegression
+        
+        # Use last season for trend calculation
+        lookback = min(season_length, n)
+        trend_data = y[-lookback:]
+        trend_x = np.arange(lookback).reshape(-1, 1)
+        
+        lr_model = LinearRegression()
+        lr_model.fit(trend_x, trend_data)
+        robust_trend = float(lr_model.coef_[0])
+        
+        logger.info(f"Robust trend from linear regression: {robust_trend:.2f}/period")
+        
+        # Generate forecast with dampened trend
         forecast = []
+        recent_mean = np.mean(y[-season_length:]) if len(y) >= season_length else np.mean(y)
+        
         for i in range(periods):
-            forecast_value = level + (i + 1) * trend + seasonals[(len(y) + i) % season_length]
-            forecast.append(max(0, forecast_value))
+            s = (n + i) % season_length
+            
+            # Original Holt-Winters prediction
+            if use_multiplicative:
+                hw_pred = (level + (i + 1) * trend) * seasonals[s]
+            else:
+                hw_pred = level + (i + 1) * trend + seasonals[s]
+            
+            # Conservative prediction using robust trend
+            conservative_pred = y[-1] + (i + 1) * robust_trend
+            
+            # Blend HW with conservative (more dampening for longer horizons)
+            blend_weight = 0.7 - (0.3 * i / max(periods - 1, 1))  # 70% -> 40%
+            blend_weight = max(0.4, blend_weight)
+            
+            pred = hw_pred * blend_weight + conservative_pred * (1 - blend_weight)
+            
+            # Apply bounds
+            max_bound = recent_mean * 1.6 
+            min_bound = recent_mean * 0.5
+            pred = np.clip(pred, min_bound, max_bound)
+            
+            forecast.append(max(0, pred))
         
-        metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+        forecast = np.array(forecast)
+        logger.info(f"Final forecast: range=[{forecast.min():.0f}, {forecast.max():.0f}]")
         
-        # Prepare test forecast
-        test_results = {
-            'test_forecast': np.array(fitted),
-            'test_dates': data['period'].tolist() if 'period' in data.columns else []
-        }
+        # Calculate metrics
+        try:
+            mae = float(np.mean(np.abs(y - fitted)))
+            rmse = float(np.sqrt(np.mean((y - fitted) ** 2)))
+            
+            mask = y != 0
+            if np.sum(mask) > 0:
+                mape = float(np.mean(np.abs((y[mask] - fitted[mask]) / y[mask])) * 100)
+            else:
+                mape = 100.0
+            
+            mape = min(mape, 100.0)
+            accuracy = max(0.0, 100.0 - mape)
+            
+            metrics = {
+                'accuracy': round(accuracy, 2),
+                'mae': round(mae, 2),
+                'rmse': round(rmse, 2),
+                'mape': round(mape, 2)
+            }
+            
+            logger.info(f"Training metrics: MAE={mae:.2f}, RMSE={rmse:.2f}, MAPE={mape:.2f}%, Accuracy={accuracy:.2f}%")
+            
+        except Exception as e:
+            logger.error(f"Metric calculation failed: {str(e)}", exc_info=True)
+            metrics = {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
         
-        return np.array(forecast), metrics 
+        logger.info(f"=== HOLT-WINTERS END ===\n")
+        
+        return forecast, metrics
+
 
     @staticmethod
     def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
@@ -2302,19 +2576,72 @@ class ForecastExecutionService:
     
     @staticmethod
     def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
-        """Calculate accuracy metrics"""
-        mae = mean_absolute_error(actual, predicted)
-        rmse = np.sqrt(mean_squared_error(actual, predicted))
-
-        # Calculate accuracy as percentage
-        mape = np.mean(np.abs((actual - predicted) / np.where(actual != 0, actual, 1))) * 100
-        accuracy = max(0, 100 - mape)
-
-        return {
-            'accuracy': min(accuracy, 99.9),
-            'mae': mae,
-            'rmse': rmse
-        }
+        """
+        Calculate metrics with extensive error handling and logging.
+        """
+        logger.debug(f"calculate_metrics called: actual shape={actual.shape}, predicted shape={predicted.shape}")
+        
+        try:
+            # Ensure same length
+            min_len = min(len(actual), len(predicted))
+            if len(actual) != len(predicted):
+                logger.warning(f"Length mismatch: truncating to {min_len}")
+                actual = actual[:min_len]
+                predicted = predicted[:min_len]
+            
+            # Ensure float type
+            actual = np.asarray(actual, dtype=float)
+            predicted = np.asarray(predicted, dtype=float)
+            
+            # Check for NaN/Inf
+            if np.any(np.isnan(actual)) or np.any(np.isnan(predicted)):
+                logger.error("NaN values detected in input arrays")
+                return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
+            
+            if np.any(np.isinf(actual)) or np.any(np.isinf(predicted)):
+                logger.error("Inf values detected in input arrays")
+                return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
+            
+            # Calculate MAE
+            mae = float(np.mean(np.abs(actual - predicted)))
+            
+            # Calculate RMSE
+            rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
+            
+            # Calculate MAPE
+            mask = actual != 0
+            num_nonzero = int(np.sum(mask))
+            
+            logger.debug(f"Non-zero actuals: {num_nonzero}/{len(actual)}")
+            
+            if num_nonzero > 0:
+                pct_errors = np.abs((actual[mask] - predicted[mask]) / actual[mask])
+                mape = float(np.mean(pct_errors) * 100)
+                logger.debug(f"MAPE calculated from {num_nonzero} non-zero values: {mape:.2f}%")
+            else:
+                mape = 100.0
+                logger.warning("All actual values are zero - MAPE set to 100%")
+            
+            # Cap MAPE
+            mape = min(float(mape), 100.0)
+            
+            # Calculate accuracy
+            accuracy = max(0.0, 100.0 - mape)
+            
+            result = {
+                'accuracy': round(accuracy, 2),
+                'mae': round(mae, 2),
+                'rmse': round(rmse, 2),
+                'mape': round(mape, 2)
+            }
+            
+            logger.debug(f"Calculated metrics: {result}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Exception in calculate_metrics: {str(e)}", exc_info=True)
+            return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
 
     @staticmethod
     def _prepare_external_factors(

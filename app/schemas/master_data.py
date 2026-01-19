@@ -50,12 +50,14 @@ class MasterDataFieldsResponse(BaseModel):
 
 class FieldValuesResponse(BaseModel):
     """Response schema for field values."""
-    field_values: Dict[str, List[Any]] = Field(..., description="Map of field name to its values")
+    field_name: str = Field(..., description="The field these values belong to")
+    values: List[FieldValue] = Field(..., description="List of distinct values with counts")
+    total_count: int = Field(..., description="Total number of distinct values")
 
 
 class MultipleFieldValuesResponse(BaseModel):
     """Response schema for multiple field values with cross-filtering."""
-    field_values: Dict[str, List[Any]] = Field(
+    field_values: Dict[str, List[FieldValue]] = Field(
         ...,
         description="Dictionary mapping field names to their value lists"
     )
