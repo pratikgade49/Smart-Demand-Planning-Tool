@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from app.core.database import get_db_manager
 from app.core.exceptions import AppException, DatabaseException, ValidationException, NotFoundException
 from app.core.sales_data_service import SalesDataService
-from app.schemas.sales_data import SalesDataQueryRequest
+from app.schemas.sales_data import SalesDataQueryRequest, AggregatedDataQueryRequest
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +366,155 @@ class DashboardService:
             logger.error(f"Error in get_all_data_ui: {str(e)}")
             raise DatabaseException(
                 f"Failed to retrieve dashboard data: {str(e)}"
+            )
+
+    @staticmethod
+    def get_aggregated_data_ui(
+        database_name: str,
+        request: AggregatedDataQueryRequest,
+    ) -> Dict[str, Any]:
+        """
+        Retrieve aggregated master data based on aggregated_fields and fetch
+        aggregated sales/forecast/final plan records.
+        """
+        db_manager = get_db_manager()
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+
+                date_field, target_field = SalesDataService._get_field_names(
+                    cursor
+                )
+
+                start_date = request.from_date if request.from_date else "2025-01-01"
+                end_date = request.to_date if request.to_date else "2026-03-31"
+
+                # Build where clause for master data filters
+                master_where = "WHERE 1=1"
+                master_params: List[Any] = []
+                if request.filters:
+                    for f in request.filters:
+                        if f.values:
+                            placeholders = ",".join(["%s"] * len(f.values))
+                            master_where += (
+                                f' AND "{f.field_name}" IN ({placeholders})'
+                            )
+                            master_params.extend(f.values)
+
+                # Identify aggregated fields
+                agg_fields = request.aggregated_fields
+                if not agg_fields:
+                    raise ValidationException("aggregated_fields are required")
+
+                agg_fields_str = ",".join([f'"{f}"' for f in agg_fields])
+
+                # Count unique combinations of aggregated fields
+                count_query = f"""
+                    SELECT COUNT(*) FROM (
+                        SELECT {agg_fields_str}
+                        FROM public.master_data
+                        {master_where}
+                        GROUP BY {agg_fields_str}
+                    ) as agg_groups
+                """
+                cursor.execute(count_query, master_params)
+                total_groups_count = cursor.fetchone()[0]
+
+                # Paginate groups
+                offset = (request.page - 1) * request.page_size
+                groups_query = f"""
+                    SELECT {agg_fields_str}
+                    FROM public.master_data
+                    {master_where}
+                    GROUP BY {agg_fields_str}
+                    ORDER BY {agg_fields_str}
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(
+                    groups_query,
+                    master_params + [request.page_size, offset],
+                )
+                groups = cursor.fetchall()
+
+                if not groups:
+                    return {"records": [], "total_count": total_groups_count}
+
+                results = []
+                for group in groups:
+                    group_data = dict(zip(agg_fields, group))
+                    
+                    # Find all master_ids for this group
+                    group_conditions = []
+                    group_vals = []
+                    for f, val in group_data.items():
+                        if val is None:
+                            group_conditions.append(f'"{f}" IS NULL')
+                        else:
+                            group_conditions.append(f'"{f}" = %s')
+                            group_vals.append(val)
+                    
+                    group_where = " AND ".join(group_conditions)
+                    master_id_query = f"""
+                        SELECT master_id
+                        FROM public.master_data
+                        {master_where} AND {group_where}
+                    """
+                    cursor.execute(master_id_query, master_params + group_vals)
+                    master_ids = [row[0] for row in cursor.fetchall()]
+
+                    if not master_ids:
+                        continue
+
+                    placeholders = ",".join(["%s"] * len(master_ids))
+                    
+                    entry = {
+                        "master_data": group_data,
+                        "sales_data": [],
+                        "forecast_data": [],
+                        "final_plan": [],
+                    }
+
+                    def add_aggregated_table_records(
+                        table_name: str,
+                        target_key: str,
+                    ) -> None:
+                        if not DashboardService._table_exists(cursor, table_name):
+                            return
+                        query = f"""
+                            SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(uom)
+                            FROM public.{table_name}
+                            WHERE master_id IN ({placeholders})
+                              AND "{date_field}" BETWEEN %s AND %s
+                            GROUP BY "{date_field}"
+                            ORDER BY "{date_field}" ASC
+                        """
+                        cursor.execute(query, master_ids + [start_date, end_date])
+                        for row in cursor.fetchall():
+                            data_date, quantity, uom = row
+                            entry[target_key].append(
+                                {
+                                    "date": str(data_date),
+                                    "UOM": uom,
+                                    "Quantity": float(quantity)
+                                    if quantity is not None
+                                    else 0.0,
+                                }
+                            )
+
+                    add_aggregated_table_records("sales_data", "sales_data")
+                    add_aggregated_table_records("forecast_data", "forecast_data")
+                    add_aggregated_table_records("final_plan", "final_plan")
+                    
+                    results.append(entry)
+
+                return {"records": results, "total_count": total_groups_count}
+
+        except AppException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Error in get_aggregated_data_ui: {str(e)}")
+            raise DatabaseException(
+                f"Failed to retrieve aggregated dashboard data: {str(e)}"
             )
 
     @staticmethod

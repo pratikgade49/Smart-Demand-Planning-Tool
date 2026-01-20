@@ -50,6 +50,14 @@ class SalesDataQueryRequest(BaseModel):
     )
 
 
+class AggregatedDataQueryRequest(SalesDataQueryRequest):
+    """Request schema for aggregated dashboard data."""
+    aggregated_fields: List[str] = Field(
+        ...,
+        description="Fields to aggregate data by (e.g., ['product', 'customer'])"
+    )
+
+
 class SalesDataRecord(BaseModel):
     """Individual sales data record."""
     sales_id: str

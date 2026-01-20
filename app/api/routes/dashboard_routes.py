@@ -16,7 +16,7 @@ from app.api.dependencies import get_tenant_database
 from app.core.dashboard_service import DashboardService
 from app.core.exceptions import AppException, ValidationException, NotFoundException
 from app.core.responses import ResponseHandler
-from app.schemas.sales_data import SalesDataQueryRequest
+from app.schemas.sales_data import SalesDataQueryRequest, AggregatedDataQueryRequest
 from app.core.master_data_service import MasterDataService
 from openpyxl import Workbook
 
@@ -67,6 +67,35 @@ async def get_dashboard_all_data(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error in get_dashboard_all_data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/aggregated-data", response_model=Dict[str, Any])
+async def get_dashboard_aggregated_data(
+    request: AggregatedDataQueryRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+):
+    """
+    Retrieve aggregated master data and their related sales, forecast, and final
+    plan records within the requested date range.
+    """
+    try:
+        result = DashboardService.get_aggregated_data_ui(
+            database_name=tenant_data["database_name"],
+            request=request,
+        )
+
+        return ResponseHandler.list_response(
+            data=result["records"],
+            page=request.page,
+            page_size=request.page_size,
+            total_count=result["total_count"],
+        )
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_dashboard_aggregated_data: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

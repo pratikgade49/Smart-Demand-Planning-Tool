@@ -41,10 +41,10 @@ def _get_algorithm_name_by_id(algorithm_id: int) -> str:
         11: "knn",
         12: "gaussian_process",
         13: "mlp_neural_network",
-        14: "simple_moving_average",
-        15: "seasonal_decomposition",
-        16: "moving_average",
-        17: "sarima",
+        14: "moving_average",
+        15: "sarima",
+        16: "random_forest",
+        17: "sarima",  # Fallback/Duplicate if needed
         999: "best_fit"
     }
 

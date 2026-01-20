@@ -1923,7 +1923,7 @@ This makes the trend robust to spikes and outliers
                 # Auto-select SARIMA parameters
                 auto_model = auto_arima(
                     y,
-                    start_p=0, start_q=0, max_p=2, max_q=2, max_d=1,
+                    start_p=0, start_q=0, max_p=3, max_q=3, max_d=2,
                     start_P=0, start_Q=0, max_P=2, max_Q=2, max_D=1,
                     seasonal=True, m=seasonal_period,
                     stepwise=True,
@@ -1931,6 +1931,9 @@ This makes the trend robust to spikes and outliers
                     error_action='ignore',
                     trace=False
                 )
+
+                logger.info(f"SARIMA selected model: {auto_model.summary()}")
+                logger.info(f"SARIMA seasonal period used: {seasonal_period}")
 
                 forecast = auto_model.predict(n_periods=periods)
                 forecast = np.maximum(forecast, 0)
@@ -2575,13 +2578,17 @@ This makes the trend robust to spikes and outliers
             return ForecastExecutionService.linear_regression_forecast(data, periods)
     
     @staticmethod
-    def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, float]:
+    def calculate_metrics(actual: Any, predicted: Any) -> Dict[str, float]:
         """
         Calculate metrics with extensive error handling and logging.
         """
-        logger.debug(f"calculate_metrics called: actual shape={actual.shape}, predicted shape={predicted.shape}")
-        
         try:
+            # Ensure they are numpy arrays for shape access and calculations
+            actual = np.asarray(actual)
+            predicted = np.asarray(predicted)
+            
+            logger.debug(f"calculate_metrics called: actual shape={actual.shape}, predicted shape={predicted.shape}")
+            
             # Ensure same length
             min_len = min(len(actual), len(predicted))
             if len(actual) != len(predicted):
@@ -2590,8 +2597,8 @@ This makes the trend robust to spikes and outliers
                 predicted = predicted[:min_len]
             
             # Ensure float type
-            actual = np.asarray(actual, dtype=float)
-            predicted = np.asarray(predicted, dtype=float)
+            actual = actual.astype(float)
+            predicted = predicted.astype(float)
             
             # Check for NaN/Inf
             if np.any(np.isnan(actual)) or np.any(np.isnan(predicted)):
