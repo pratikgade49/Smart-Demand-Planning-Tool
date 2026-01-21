@@ -15,7 +15,7 @@ from app.schemas.sales_data import (
 from app.core.sales_data_service import SalesDataService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_tenant_database
+from app.api.dependencies import get_tenant_database, require_object_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,8 @@ router = APIRouter(prefix="/sales-data", tags=["Sales Data"])
 @router.post("/records", response_model=Dict[str, Any])
 async def get_sales_data_records(
     request: SalesDataQueryRequest,
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Sales Data"))
 ):
     """
     Retrieve sales data records with flexible filtering and pagination.
@@ -59,7 +60,8 @@ async def get_sales_data_summary(
     filters: Optional[List[SalesDataFilter]] = None,
     from_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
     to_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Sales Data"))
 ):
     """
     Get summary statistics for sales data with optional filtering.
@@ -110,7 +112,8 @@ async def get_sales_data_records_simple(
     # Sorting
     sort_by: Optional[str] = Query(None, description="Sort field"),
     sort_order: str = Query("asc", regex="^(asc|desc)$", description="Sort order"),
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Sales Data"))
 ):
     """
     Simplified GET endpoint for sales data records.

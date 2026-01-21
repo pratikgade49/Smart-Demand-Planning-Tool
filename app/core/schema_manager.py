@@ -148,27 +148,91 @@ class SchemaManager:
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_master_data_deleted ON master_data(deleted_at) WHERE deleted_at IS NULL")
                     
                     # ========================================================================
+                    # ========================================================================
+                    # Create RBAC tables
+                    # ========================================================================
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS roles (
+                            role_id SERIAL PRIMARY KEY,
+                            role_name VARCHAR(255) NOT NULL UNIQUE,
+                            description TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS objects (
+                            object_id SERIAL PRIMARY KEY,
+                            object_type VARCHAR(255),
+                            object_name VARCHAR(255) NOT NULL UNIQUE,
+                            description TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS roles_assignment (
+                            assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                            role_id INTEGER NOT NULL REFERENCES roles(role_id) ON DELETE CASCADE,
+                            object_id INTEGER NOT NULL REFERENCES objects(object_id) ON DELETE CASCADE,
+                            reporting_to UUID REFERENCES users(user_id),
+                            assigned_by UUID NOT NULL REFERENCES users(user_id),
+                            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            is_active BOOLEAN DEFAULT TRUE,
+                            CONSTRAINT unique_user_object_role UNIQUE(user_id, object_id, role_id)
+                        )
+                    """)
+
+                    # Create indexes for RBAC tables
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_roles_assignment_user ON roles_assignment(user_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_roles_assignment_role ON roles_assignment(role_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_roles_assignment_object ON roles_assignment(object_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_roles_assignment_reporting ON roles_assignment(reporting_to)")
+
+                    logger.info(" Created RBAC tables: roles, objects, roles_assignment")
+
                     # Create triggers for auto-updating updated_at
                     # ========================================================================
                     cursor.execute("""
                         CREATE OR REPLACE FUNCTION update_updated_at_column()
-                        RETURNS TRIGGER AS $$
-                        BEGIN
-                            NEW.updated_at = CURRENT_TIMESTAMP;
-                            RETURN NEW;
-                        END;
-                        $$ language 'plpgsql';
+                        RETURNS TRIGGER AS
+                        'BEGIN NEW.updated_at = CURRENT_TIMESTAMP; RETURN NEW; END;'
+                        LANGUAGE plpgsql;
                     """)
-                    
+
                     cursor.execute("""
                         DROP TRIGGER IF EXISTS update_users_updated_at ON users;
                     """)
                     cursor.execute("""
-                        CREATE TRIGGER update_users_updated_at 
+                        CREATE TRIGGER update_users_updated_at
                             BEFORE UPDATE ON users
                             FOR EACH ROW
                             EXECUTE FUNCTION update_updated_at_column();
                     """)
+
+                    cursor.execute("""
+                        DROP TRIGGER IF EXISTS update_roles_updated_at ON roles;
+                    """)
+                    cursor.execute("""
+                        CREATE TRIGGER update_roles_updated_at
+                            BEFORE UPDATE ON roles
+                            FOR EACH ROW
+                            EXECUTE FUNCTION update_updated_at_column();
+                    """)
+
+                    cursor.execute("""
+                        DROP TRIGGER IF EXISTS update_objects_updated_at ON objects;
+                    """)
+                    cursor.execute("""
+                        CREATE TRIGGER update_objects_updated_at
+                            BEFORE UPDATE ON objects
+                            FOR EACH ROW
+                            EXECUTE FUNCTION update_updated_at_column();
+                    """)
+
                     logger.info(" Created auto-update triggers")
                     
                     conn.commit()
@@ -178,6 +242,7 @@ class SchemaManager:
                     SchemaManager.initialize_forecasting_tables(tenant_id, database_name)
                     SchemaManager.seed_default_algorithms(tenant_id, database_name)
                     SchemaManager.seed_default_versions(tenant_id, database_name, created_by="system")
+                    SchemaManager.seed_rbac_defaults(tenant_id, database_name)
 
                     return True
                     
@@ -883,3 +948,66 @@ class SchemaManager:
         except Exception as e:
             logger.error(f"Failed to seed versions for {database_name}: {str(e)}")
             raise DatabaseException(f"Failed to seed versions: {str(e)}")
+
+    @staticmethod
+    def seed_rbac_defaults(tenant_id: str, database_name: str) -> bool:
+        """
+        Seed default RBAC roles and objects for tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+
+        Returns:
+            True if seeding successful
+
+        Raises:
+            DatabaseException: If seeding fails
+        """
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Seed default roles
+                    roles_data = [
+                        (1, 'View', 'Read-only access to objects'),
+                        (2, 'Edit', 'Read and modify access to objects'),
+                        (3, 'Delete', 'Full access including deletion of objects')
+                    ]
+
+                    for role_id, role_name, description in roles_data:
+                        cursor.execute("""
+                            INSERT INTO roles (role_id, role_name, description)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (role_id) DO NOTHING
+                        """, (role_id, role_name, description))
+
+                    # Seed default objects - matching the main UI objects and data access
+                    objects_data = [
+                        (1, 'system', 'Planning Attributes', 'Planning attributes and master data setup'),
+                        (2, 'planner', 'Sales Data', 'Sales data upload and management'),
+                        (3, None, 'Forecast', 'Forecasting execution and results'),
+                        (4, None, 'Dashboard', 'Analytics and reporting views'),
+                        (5, None, 'Home', 'Landing page and navigation'),
+                        (6, 'data', 'Master Data', 'Access to master data records')
+                    ]
+
+                    for object_id, object_type, object_name, description in objects_data:
+                        cursor.execute("""
+                            INSERT INTO objects (object_id, object_type, object_name, description)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (object_id) DO NOTHING
+                        """, (object_id, object_type, object_name, description))
+
+                    conn.commit()
+                    logger.info(f"✅ Default RBAC data seeded for tenant: {tenant_id}")
+                    return True
+
+                finally:
+                    cursor.close()
+
+        except Exception as e:
+            logger.error(f"Failed to seed RBAC defaults for {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to seed RBAC defaults: {str(e)}")

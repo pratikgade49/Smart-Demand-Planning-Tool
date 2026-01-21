@@ -27,7 +27,7 @@ from app.core.exceptions import AppException, ValidationException, NotFoundExcep
 from app.core.algorithm_parameters import AlgorithmParametersService
 from app.core.forecast_job_service import ForecastJobService
 from app.core.background_forecast_executor import BackgroundForecastExecutor
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, require_object_access
 
 import logging
 
@@ -55,7 +55,8 @@ class DirectForecastExecutionRequest(BaseModel):
 async def execute_forecast_async(
     request_data: Dict[str, Any],  # Your request model here
     background_tasks: BackgroundTasks,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Asynchronously execute a forecast in the background with resource monitoring.
@@ -169,7 +170,8 @@ async def execute_forecast_async(
 @monitor_endpoint("Forecast Job Status Check", warn_threshold=2.0)
 async def get_forecast_job_status(
     job_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Get the status and results of a forecast job with performance metrics.
@@ -224,7 +226,8 @@ async def get_forecast_job_history(
         alias="timezone",
         description="IANA timezone name (e.g. Asia/Kolkata)"
     ),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Get the history of forecast jobs for the current user.
@@ -289,7 +292,8 @@ async def get_forecast_job_history(
 @router.get("/results/get", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def get_forecast_results(
     job_id: str = Query(..., description="Forecast job ID"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Get forecast results for a job ID by combining job result data and
@@ -316,7 +320,8 @@ async def get_forecast_results(
 @router.get("/mappingid/get", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def get_forecast_mapping_details(
     mapping_id: str = Query(..., description="Forecast algorithm mapping ID"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Get forecast algorithm mapping details for a mapping ID.
@@ -341,7 +346,8 @@ async def get_forecast_mapping_details(
 @router.post("/versions", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
 async def create_forecast_version(
     request: ForecastVersionCreate,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Create a new forecast version.
@@ -373,7 +379,8 @@ async def list_forecast_versions(
     version_type: Optional[str] = Query(None, pattern="^(Baseline|Simulation|Final)$"),
     is_active: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100)
+    page_size: int = Query(50, ge=1, le=100),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     List all forecast versions for the tenant.
@@ -408,7 +415,8 @@ async def list_forecast_versions(
 @router.get("/versions/{version_id}", response_model=Dict[str, Any])
 async def get_forecast_version(
     version_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """Get forecast version details by ID."""
     try:
@@ -430,7 +438,8 @@ async def get_forecast_version(
 async def update_forecast_version(
     version_id: str,
     request: ForecastVersionUpdate,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Update forecast version.
@@ -463,7 +472,8 @@ async def update_forecast_version(
 @router.post("/external-factors", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
 async def create_external_factor(
     request: ExternalFactorCreate,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Create a new external factor record.
@@ -499,7 +509,8 @@ async def list_external_factors(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100)
+    page_size: int = Query(50, ge=1, le=100),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     List external factors with optional filters.
@@ -535,7 +546,8 @@ async def list_external_factors(
 
 @router.get("/aggregation-levels", response_model=Dict[str, Any])
 async def get_aggregation_levels(
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Get available aggregation levels based on tenant's master data structure.
@@ -572,7 +584,8 @@ async def compare_forecast_results(
         "future_forecast", 
         description="Type of results to compare",
         pattern="^(testing_actual|testing_forecast|future_forecast)$"
-    )
+    ),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Compare results across all algorithms for a forecast run.
@@ -660,7 +673,8 @@ async def compare_forecast_results(
 @router.get("/algorithms", response_model=Dict[str, Any])
 async def list_algorithms(
     tenant_data: Dict = Depends(get_current_tenant),
-    algorithm_type: Optional[str] = Query(None, pattern="^(ML|Statistic|Hybrid)$")
+    algorithm_type: Optional[str] = Query(None, pattern="^(ML|Statistic|Hybrid)$"),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     List available forecasting algorithms.
@@ -756,7 +770,8 @@ class CopyForecastRequest(BaseModel):
 @router.post("/save-forecast", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def save_forecast(
     request: SaveForecastRequest,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Save forecast results into forecast_data table.
@@ -794,7 +809,8 @@ async def save_forecast(
 @router.post("/copy-forecast", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
 async def copy_forecast(
     request: CopyForecastRequest,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
     Copy forecast results for all runs in a job into forecast_data table.

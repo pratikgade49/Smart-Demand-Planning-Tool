@@ -13,6 +13,7 @@ import logging
 from app.core.database import get_db_manager
 from app.core.schema_manager import SchemaManager
 from app.core.user_sync_service import UserSyncService
+from app.core.rbac_service import RBACService
 from app.core.exceptions import (
     AuthenticationException,
     ValidationException,
@@ -305,7 +306,28 @@ class AuthService:
                     
                     conn.commit()
                     logger.info(f"User {request.email} created in tenant database: {database_name}")
-                    
+
+                    # Check if this is the first user for the tenant
+                    cursor.execute("SELECT COUNT(*) FROM users WHERE tenant_id = %s", (tenant_id,))
+                    user_count = cursor.fetchone()[0]
+
+                    # Assign full admin permissions to first user
+                    if user_count == 1:  # This is the first user
+                        # Get all objects
+                        objects = RBACService.get_all_objects(database_name)
+
+                        # Assign "Delete" role (full access) to all objects for the first user
+                        for obj in objects:
+                            RBACService.assign_role_to_user(
+                                user_id=user_id,
+                                role_id=3,  # Delete role (full access)
+                                object_id=obj["object_id"],
+                                assigned_by=user_id,  # Self-assigned
+                                database_name=database_name
+                            )
+
+                        logger.info(f"Assigned full admin permissions to first user {request.email}")
+
                 finally:
                     cursor.close()
             

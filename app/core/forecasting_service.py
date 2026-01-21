@@ -759,7 +759,7 @@ class ForecastingService:
             cursor = conn.cursor()
             try:
                 cursor.execute("""
-                    SELECT target_field_name, date_field_name
+                    SELECT date_field_name, target_field_name
                     FROM field_catalogue_metadata
                 """)
                 
@@ -770,8 +770,8 @@ class ForecastingService:
                         "Field catalogue not finalized. Please finalize your field catalogue first."
                     )
                 
-                target_field, date_field = result[0], result[1]
-                logger.debug(f"Retrieved field names - Target: '{target_field}', Date: '{date_field}'")
+                date_field, target_field = result[0], result[1]
+                logger.debug(f"Retrieved field names - Date: '{date_field}', Target: '{target_field}'")
                 return target_field, date_field
                 
             finally:

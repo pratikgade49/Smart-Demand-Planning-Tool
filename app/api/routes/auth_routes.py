@@ -4,7 +4,7 @@ Tenant registration and login endpoints.
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from app.schemas.auth import (
     TenantLoginRequest,
     TenantLoginResponse,
@@ -17,9 +17,10 @@ from app.schemas.auth import (
     TenantListResponse
 )
 from app.core.auth_service import AuthService
+from app.core.rbac_service import RBACService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, get_current_user
 import logging
 
 logger = logging.getLogger(__name__)
@@ -233,4 +234,137 @@ async def verify_user_token(token: str):
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error in verify_user_token: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/user/accessible-objects", response_model=Dict[str, Any])
+async def get_user_accessible_objects(current_user: Dict = Depends(get_current_user)):
+    """
+    Get list of objects the current user has access to.
+    Used by Flutter UI to show/hide menu items.
+    """
+    try:
+        accessible_objects = RBACService.get_user_accessible_objects(
+            current_user["user_id"],
+            current_user["database_name"]
+        )
+
+        return ResponseHandler.success(data={
+            "accessible_objects": accessible_objects
+        })
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_user_accessible_objects: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/rbac/roles", response_model=Dict[str, Any], tags=["RBAC Management"])
+async def get_all_roles(current_user: Dict = Depends(get_current_user)):
+    """
+    Get all available roles for assignment.
+    """
+    try:
+        roles = RBACService.get_all_roles(current_user["database_name"])
+
+        return ResponseHandler.success(data={"roles": roles})
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_all_roles: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/rbac/objects", response_model=Dict[str, Any], tags=["RBAC Management"])
+async def get_all_objects(current_user: Dict = Depends(get_current_user)):
+    """
+    Get all available objects for assignment.
+    """
+    try:
+        objects = RBACService.get_all_objects(current_user["database_name"])
+
+        return ResponseHandler.success(data={"objects": objects})
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_all_objects: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/rbac/assign", response_model=Dict[str, Any], tags=["RBAC Management"])
+async def assign_role_to_user(
+    user_id: str,
+    role_id: int,
+    object_id: int,
+    reporting_to: Optional[str] = None,
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Assign a role-object combination to a user.
+    Admin operation.
+    """
+    try:
+        result = RBACService.assign_role_to_user(
+            user_id=user_id,
+            role_id=role_id,
+            object_id=object_id,
+            assigned_by=current_user["user_id"],
+            database_name=current_user["database_name"],
+            reporting_to=reporting_to
+        )
+
+        return ResponseHandler.success(data=result, status_code=201)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in assign_role_to_user: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/rbac/assignment/{assignment_id}", response_model=Dict[str, Any], tags=["RBAC Management"])
+async def revoke_assignment(
+    assignment_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """
+    Revoke a role assignment.
+    Admin operation.
+    """
+    try:
+        success = RBACService.revoke_assignment(
+            assignment_id=assignment_id,
+            revoked_by=current_user["user_id"],
+            database_name=current_user["database_name"]
+        )
+
+        return ResponseHandler.success(data={
+            "assignment_id": assignment_id,
+            "message": "Assignment revoked successfully"
+        })
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in revoke_assignment: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/rbac/assignments", response_model=Dict[str, Any], tags=["RBAC Management"])
+async def get_assignments_for_admin(current_user: Dict = Depends(get_current_user)):
+    """
+    Get all assignments for admin management.
+    """
+    try:
+        assignments = RBACService.get_assignments_for_admin(current_user["database_name"])
+
+        return ResponseHandler.success(data={"assignments": assignments})
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_assignments_for_admin: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")

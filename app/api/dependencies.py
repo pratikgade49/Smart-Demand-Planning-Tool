@@ -91,37 +91,166 @@ async def validate_tenant_access(
         )
     return True
 
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> Dict[str, Any]:
+    """
+    Dependency to get current authenticated user from JWT token.
+
+    Args:
+        credentials: HTTP Bearer token credentials
+
+    Returns:
+        Dictionary containing user information including database_name
+
+    Raises:
+        HTTPException: If authentication fails
+    """
+    try:
+        token = credentials.credentials
+        payload = AuthService.verify_user_token(token)
+
+        user_id = payload.get("user_id")
+        tenant_id = payload.get("tenant_id")
+        database_name = payload.get("database_name")
+
+        if not user_id or not tenant_id or not database_name:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing user_id, tenant_id, or database_name",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        return {
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "tenant_identifier": payload.get("tenant_identifier"),
+            "email": payload.get("email"),
+            "database_name": database_name,
+            "role": payload.get("role", "user")  # From user table, but may be overridden by assignments
+        }
+
+    except AuthenticationException as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except Exception as e:
+        logger.error(f"User authentication error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+
 async def get_tenant_database(
     current_tenant: Dict = Depends(get_current_tenant)
 ) -> Dict[str, Any]:
     """
     Dependency to get and validate tenant database connection.
-    
+
     Args:
         current_tenant: Current authenticated tenant
-        
+
     Returns:
         Dictionary with tenant and database information
-        
+
     Raises:
         HTTPException: If database is not accessible
     """
     try:
         from app.core.database import get_db_manager
         db_manager = get_db_manager()
-        
+
         # Validate connection
         db_manager.validate_tenant_connection(current_tenant["database_name"])
-        
+
         return {
             "tenant_id": current_tenant["tenant_id"],
             "database_name": current_tenant["database_name"],
             "email": current_tenant["email"]
         }
-        
+
     except Exception as e:
         logger.error(f"Database validation failed: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection unavailable"
         )
+
+
+async def get_user_database(
+    current_user: Dict = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Dependency to get and validate user database connection.
+
+    Args:
+        current_user: Current authenticated user
+
+    Returns:
+        Dictionary with user and database information
+
+    Raises:
+        HTTPException: If database is not accessible
+    """
+    try:
+        from app.core.database import get_db_manager
+        db_manager = get_db_manager()
+
+        # Validate connection
+        db_manager.validate_tenant_connection(current_user["database_name"])
+
+        return {
+            "user_id": current_user["user_id"],
+            "tenant_id": current_user["tenant_id"],
+            "database_name": current_user["database_name"],
+            "email": current_user["email"]
+        }
+
+    except Exception as e:
+        logger.error(f"Database validation failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection unavailable"
+        )
+
+
+def require_object_access(object_name: str):
+    """
+    Factory function to create a dependency that checks if user has access to a specific object.
+
+    Args:
+        object_name: Object name to check access for
+
+    Returns:
+        Async dependency function
+    """
+    async def dependency(current_user: Dict = Depends(get_current_user)):
+        from app.core.rbac_service import RBACService
+
+        try:
+            has_access = RBACService.check_user_access(
+                current_user["user_id"],
+                object_name,
+                current_user["database_name"]
+            )
+
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied to {object_name}"
+                )
+
+            return current_user
+
+        except Exception as e:
+            logger.error(f"Access check failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+
+    return dependency

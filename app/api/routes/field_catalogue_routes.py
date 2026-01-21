@@ -12,7 +12,7 @@ from app.schemas.field_catalogue import (
 from app.core.field_catalogue_service import FieldCatalogueService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_tenant_database, get_current_tenant
+from app.api.dependencies import get_user_database, get_current_user, require_object_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,8 @@ router = APIRouter(prefix="/field-catalogue", tags=["Field Catalogue"])
 @router.post("", response_model=Dict[str, Any])
 async def create_field_catalogue(
     request: FieldCatalogueRequest,
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_user_database),
+    _: Dict = Depends(require_object_access("Planning Attributes"))
 ):
     """
     Create a new field catalogue in DRAFT status.
@@ -74,7 +75,8 @@ async def create_field_catalogue(
 @router.post("/{catalogue_id}/finalize", response_model=Dict[str, Any])
 async def finalize_field_catalogue(
     catalogue_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Planning Attributes"))
 ):
     """
     Finalize a field catalogue and create master data table.
@@ -98,7 +100,8 @@ async def finalize_field_catalogue(
 @router.get("/{catalogue_id}", response_model=Dict[str, Any])
 async def get_field_catalogue(
     catalogue_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Planning Attributes"))
 ):
     """Get field catalogue details by ID."""
     try:
@@ -117,7 +120,8 @@ async def get_field_catalogue(
 
 @router.get("", response_model=Dict[str, Any])
 async def list_field_catalogues(
-    tenant_data: Dict = Depends(get_current_tenant),
+    tenant_data: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Planning Attributes")),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Records per page")
 ):

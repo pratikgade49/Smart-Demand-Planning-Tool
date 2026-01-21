@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_tenant_database
+from app.api.dependencies import get_tenant_database, require_object_access
 from app.core.dashboard_service import DashboardService
 from app.core.exceptions import AppException, ValidationException, NotFoundException
 from app.core.responses import ResponseHandler
@@ -45,6 +45,7 @@ class SaveFinalPlanRequest(BaseModel):
 async def get_dashboard_all_data(
     request: SalesDataQueryRequest,
     tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard")),
 ):
     """
     Retrieve paginated master data and their related sales, forecast, and final
@@ -74,6 +75,7 @@ async def get_dashboard_all_data(
 async def get_dashboard_aggregated_data(
     request: AggregatedDataQueryRequest,
     tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard")),
 ):
     """
     Retrieve aggregated master data and their related sales, forecast, and final
@@ -103,6 +105,7 @@ async def get_dashboard_aggregated_data(
 async def save_final_plan(
     request: SaveFinalPlanRequest,
     tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard")),
 ):
     """
     Save or update final plan data.
@@ -153,6 +156,7 @@ async def save_final_plan(
 async def export_dashboard_xlsx(
     request: SalesDataQueryRequest,
     tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard")),
 ):
     """
     Export dashboard data as an Excel file (no pagination).

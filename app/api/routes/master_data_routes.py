@@ -15,7 +15,7 @@ from app.schemas.master_data import (
 from app.core.master_data_service import MasterDataService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_tenant_database
+from app.api.dependencies import get_user_database, require_object_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,8 @@ router = APIRouter(prefix="/master-data", tags=["Master Data"])
 
 @router.get("/fields", response_model=Dict[str, Any])
 async def get_master_data_fields(
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_user_database),
+    _: Dict = Depends(require_object_access("Master Data"))
 ):
     """
     Get all available fields from master_data table for dropdown selection.
@@ -58,7 +59,8 @@ async def get_master_data_fields(
 @router.post("/field-values", response_model=Dict[str, Any])
 async def get_field_values(
     request: FieldValuesRequest,
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_user_database),
+    _: Dict = Depends(require_object_access("Master Data"))
 ):
     """
     Get distinct values for a specific field, optionally filtered by other fields.
@@ -98,7 +100,8 @@ async def get_field_values(
 @router.post("/multiple-field-values", response_model=Dict[str, Any])
 async def get_multiple_field_values(
     request: MultipleFieldValuesRequest,
-    tenant_data: Dict = Depends(get_tenant_database)
+    tenant_data: Dict = Depends(get_user_database),
+    _: Dict = Depends(require_object_access("Master Data"))
 ):
     """
     Get distinct values for multiple fields with cross-filtering.
@@ -134,7 +137,8 @@ async def get_multiple_field_values(
 @router.get("/field-values/{field_name}", response_model=Dict[str, Any])
 async def get_field_values_simple(
     field_name: str,
-    tenant_data: Dict = Depends(get_tenant_database),
+    tenant_data: Dict = Depends(get_user_database),
+    _: Dict = Depends(require_object_access("Master Data")),
     filters: str = Query(None, description="JSON string of filters for other fields")
 ):
     """
