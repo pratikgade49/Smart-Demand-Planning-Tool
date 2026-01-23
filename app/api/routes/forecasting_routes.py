@@ -56,7 +56,7 @@ async def execute_forecast_async(
     request_data: Dict[str, Any],  # Your request model here
     background_tasks: BackgroundTasks,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Asynchronously execute a forecast in the background with resource monitoring.
@@ -347,7 +347,7 @@ async def get_forecast_mapping_details(
 async def create_forecast_version(
     request: ForecastVersionCreate,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Create a new forecast version.
@@ -439,7 +439,7 @@ async def update_forecast_version(
     version_id: str,
     request: ForecastVersionUpdate,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Update forecast version.
@@ -473,7 +473,7 @@ async def update_forecast_version(
 async def create_external_factor(
     request: ExternalFactorCreate,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Create a new external factor record.
@@ -771,7 +771,7 @@ class CopyForecastRequest(BaseModel):
 async def save_forecast(
     request: SaveForecastRequest,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Save forecast results into forecast_data table.
@@ -810,7 +810,7 @@ async def save_forecast(
 async def copy_forecast(
     request: CopyForecastRequest,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecast"))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Copy forecast results for all runs in a job into forecast_data table.

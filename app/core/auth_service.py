@@ -326,7 +326,7 @@ class AuthService:
                                 database_name=database_name
                             )
 
-                        logger.info(f"Assigned full admin permissions to first user {request.email}")
+                        logger.info(f"Assigned full admin permissions to first user {request.email}. Total objects: {len(objects)}")
 
                 finally:
                     cursor.close()

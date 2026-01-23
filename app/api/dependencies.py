@@ -218,12 +218,14 @@ async def get_user_database(
         )
 
 
-def require_object_access(object_name: str):
+def require_object_access(object_name: str, min_role_id: int = 1):
     """
-    Factory function to create a dependency that checks if user has access to a specific object.
+    Factory function to create a dependency that checks if user has access to a specific object
+    with sufficient role level.
 
     Args:
         object_name: Object name to check access for
+        min_role_id: Minimum required role_id (1=View, 2=Edit, 3=Delete)
 
     Returns:
         Async dependency function
@@ -232,16 +234,19 @@ def require_object_access(object_name: str):
         from app.core.rbac_service import RBACService
 
         try:
-            has_access = RBACService.check_user_access(
+            has_access = RBACService.check_user_role_access(
                 current_user["user_id"],
                 object_name,
+                min_role_id,
                 current_user["database_name"]
             )
 
             if not has_access:
+                role_names = {1: "View", 2: "Edit", 3: "Delete"}
+                role_name = role_names.get(min_role_id, f"Role {min_role_id}")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Access denied to {object_name}"
+                    detail=f"Access denied to {object_name}. Requires {role_name} role."
                 )
 
             return current_user

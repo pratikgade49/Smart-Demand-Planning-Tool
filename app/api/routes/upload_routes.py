@@ -8,7 +8,7 @@ from typing import Dict, Any
 from app.core.excel_upload_service import ExcelUploadService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, require_object_access
 from app.schemas.upload import ExcelSampleResponse
 import logging
 
@@ -22,7 +22,8 @@ async def upload_excel_file(
     file: UploadFile = File(...),
     upload_type: str = Form(..., pattern="^(mixed_data)$"),
     catalogue_id: str = Form(...),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
 
     try:
@@ -68,7 +69,8 @@ async def preview_excel_file(
     file: UploadFile = File(...),
     catalogue_id: str = Form(...),
     sample_size: int = Form(10),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
     """
     Preview sample data from Excel file before upload.
@@ -123,6 +125,7 @@ async def preview_excel_file(
 @router.get("/history", response_model=Dict[str, Any])
 async def get_upload_history(
     tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2)),
     page: int = 1,
     page_size: int = 50
 ):
@@ -192,7 +195,8 @@ async def get_upload_history(
 @router.get("/history/{upload_id}", response_model=Dict[str, Any])
 async def get_upload_details(
     upload_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
     """
     Get detailed information about a specific upload.

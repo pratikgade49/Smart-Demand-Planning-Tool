@@ -11,7 +11,7 @@ import logging
 from app.core.sap_ibp_ingestion_service import SapIbpIngestionService, ingest_sap_ibp_data
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, require_object_access
 from app.core.sap_ibp_client import DynamicODataClient, ConnectionConfig, ReadConfig, parse_ibp_date
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,8 @@ class ReadDataRequest(BaseModel):
 @router.post("/read", response_model=Dict[str, Any])
 async def read_sap_ibp_data(
     request: ReadDataRequest,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
     """
     Read data from SAP IBP using dynamic configuration.
@@ -135,7 +136,8 @@ async def read_sap_ibp_data(
 async def ingest_sap_ibp_data_endpoint(
     request: IngestionRequest,
     background_tasks: BackgroundTasks,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
     """
     Ingest data from SAP IBP into master_data and sales_data tables with field mapping.
@@ -723,7 +725,8 @@ async def _insert_sales_data_with_mapping(
 async def get_ingestion_history(
     tenant_data: Dict = Depends(get_current_tenant),
     page: int = 1,
-    page_size: int = 50
+    page_size: int = 50,
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=1))
 ):
     """
     Get SAP IBP ingestion history for the tenant.

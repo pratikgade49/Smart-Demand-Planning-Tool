@@ -99,6 +99,60 @@ class RBACService:
         return object_name in accessible_objects
 
     @staticmethod
+    def check_user_role_access(user_id: str, object_name: str, min_role_id: int, database_name: str) -> bool:
+        """
+        Check if user has access to a specific object with role level >= min_role_id.
+
+        Args:
+            user_id: User ID
+            object_name: Object name to check
+            min_role_id: Minimum required role_id (1=View, 2=Edit, 3=Delete)
+            database_name: Tenant database name
+
+        Returns:
+            True if access granted with sufficient role level
+        """
+        logger.info(f"Checking role access for user {user_id} to object '{object_name}' with min_role_id {min_role_id}")
+
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # First, get all user's assignments for debugging
+                    cursor.execute("""
+                        SELECT ra.role_id, o.object_name, ra.is_active
+                        FROM roles_assignment ra
+                        JOIN objects o ON ra.object_id = o.object_id
+                        WHERE ra.user_id = %s
+                        ORDER BY ra.object_id
+                    """, (user_id,))
+                    user_assignments = cursor.fetchall()
+                    logger.info(f"User {user_id} assignments: {[(row[0], row[1], row[2]) for row in user_assignments]}")
+
+                    # Now check specific access
+                    cursor.execute("""
+                        SELECT ra.role_id
+                        FROM roles_assignment ra
+                        JOIN objects o ON ra.object_id = o.object_id
+                        WHERE ra.user_id = %s AND o.object_name = %s AND ra.role_id >= %s AND ra.is_active = TRUE
+                        LIMIT 1
+                    """, (user_id, object_name, min_role_id))
+
+                    result = cursor.fetchone()
+                    access_granted = result is not None
+                    logger.info(f"Access check for user {user_id} to '{object_name}' (min_role {min_role_id}): {access_granted}")
+                    return access_granted
+
+                finally:
+                    cursor.close()
+
+        except Exception as e:
+            logger.error(f"Failed to check user role access for {user_id}: {str(e)}")
+            raise DatabaseException(f"Failed to check user role access: {str(e)}")
+
+    @staticmethod
     def assign_role_to_user(
         user_id: str,
         role_id: int,

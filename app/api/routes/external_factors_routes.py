@@ -11,7 +11,7 @@ from app.core.external_factors_service import ExternalFactorsService
 from app.core.fred_api_service import FREDAPIService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, require_object_access
 from app.config import settings
 import logging
 
@@ -50,7 +50,8 @@ class ForecastFactorsRequest(BaseModel):
 
 @router.get("/fred/common-series", response_model=Dict[str, Any])
 async def get_fred_common_series(
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=1))
 ):
     """
     Get list of commonly used FRED series.
@@ -74,7 +75,8 @@ async def get_fred_common_series(
 async def search_fred_series(
     search_text: str = Query(..., min_length=2, description="Search keyword"),
     limit: int = Query(10, ge=1, le=50, description="Maximum results"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=1))
 ):
     """
     Search for FRED series by keyword.
@@ -110,7 +112,8 @@ async def search_fred_series(
 @router.get("/fred/series/{series_id}/info", response_model=Dict[str, Any])
 async def get_fred_series_info(
     series_id: str,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=1))
 ):
     """
     Get detailed information about a FRED series.
@@ -140,7 +143,8 @@ async def get_fred_series_info(
 @router.post("/fred/import", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
 async def bulk_import_from_fred(
     request: BulkFREDImportRequest,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
 ):
     """
     Bulk import external factors from FRED API.
@@ -200,7 +204,8 @@ async def bulk_import_from_fred(
 @router.post("/forecast-future", response_model=Dict[str, Any])
 async def forecast_future_factors(
     request: ForecastFactorsRequest,
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=2))
 ):
     """
     Forecast future values for external factors.
@@ -252,7 +257,8 @@ async def forecast_future_factors(
 
 @router.get("/available", response_model=Dict[str, Any])
 async def get_available_factors(
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=1))
 ):
     """
     Get list of all available external factors for the tenant.
@@ -312,7 +318,8 @@ async def list_external_factors(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100)
+    page_size: int = Query(50, ge=1, le=100),
+    _: Dict = Depends(require_object_access("Forecasting", min_role_id=1))
 ):
     """
     List external factors with optional filters.

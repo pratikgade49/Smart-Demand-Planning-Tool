@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Optional
 from app.core.forecast_comparison_service import ForecastComparisonService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant
+from app.api.dependencies import get_current_tenant, require_object_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,8 @@ async def compare_forecasts(
     aggregation_level: str = Query(..., description="Aggregation level (e.g., 'product', 'product-location')"),
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$", description="Time interval"),
     forecast_run_ids: Optional[str] = Query(None, description="Comma-separated list of forecast_run_ids to compare"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=1))
 ):
     """
     Compare forecast scenarios for a specific entity.
@@ -99,7 +100,8 @@ async def get_comparison_summary(
     entity_identifier: str = Query(..., description="Entity identifier"),
     aggregation_level: str = Query(..., description="Aggregation level"),
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=1))
 ):
     """
     Get a summary of available forecasts for comparison without full data.
@@ -220,7 +222,8 @@ async def export_comparison(
     interval: str = Query(..., pattern="^(DAILY|WEEKLY|MONTHLY|QUARTERLY|YEARLY)$"),
     forecast_run_ids: str = Query(..., description="Comma-separated list of forecast_run_ids"),
     format: str = Query("json", pattern="^(json|csv)$", description="Export format"),
-    tenant_data: Dict = Depends(get_current_tenant)
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Export comparison data in JSON or CSV format.

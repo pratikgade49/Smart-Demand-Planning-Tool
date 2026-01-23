@@ -20,7 +20,7 @@ from app.core.auth_service import AuthService
 from app.core.rbac_service import RBACService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
-from app.api.dependencies import get_current_tenant, get_current_user
+from app.api.dependencies import get_user_database, get_current_user, get_current_tenant, require_object_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -261,7 +261,10 @@ async def get_user_accessible_objects(current_user: Dict = Depends(get_current_u
 
 
 @router.get("/rbac/roles", response_model=Dict[str, Any], tags=["RBAC Management"])
-async def get_all_roles(current_user: Dict = Depends(get_current_user)):
+async def get_all_roles(
+    current_user: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=3))
+):
     """
     Get all available roles for assignment.
     """
@@ -278,7 +281,10 @@ async def get_all_roles(current_user: Dict = Depends(get_current_user)):
 
 
 @router.get("/rbac/objects", response_model=Dict[str, Any], tags=["RBAC Management"])
-async def get_all_objects(current_user: Dict = Depends(get_current_user)):
+async def get_all_objects(
+    current_user: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=3))
+):
     """
     Get all available objects for assignment.
     """
@@ -300,7 +306,8 @@ async def assign_role_to_user(
     role_id: int,
     object_id: int,
     reporting_to: Optional[str] = None,
-    current_user: Dict = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=3))
 ):
     """
     Assign a role-object combination to a user.
@@ -328,7 +335,8 @@ async def assign_role_to_user(
 @router.delete("/rbac/assignment/{assignment_id}", response_model=Dict[str, Any], tags=["RBAC Management"])
 async def revoke_assignment(
     assignment_id: str,
-    current_user: Dict = Depends(get_current_user)
+    current_user: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=3))
 ):
     """
     Revoke a role assignment.
@@ -354,7 +362,10 @@ async def revoke_assignment(
 
 
 @router.get("/rbac/assignments", response_model=Dict[str, Any], tags=["RBAC Management"])
-async def get_assignments_for_admin(current_user: Dict = Depends(get_current_user)):
+async def get_assignments_for_admin(
+    current_user: Dict = Depends(get_current_user),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=3))
+):
     """
     Get all assignments for admin management.
     """

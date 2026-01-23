@@ -986,12 +986,13 @@ class SchemaManager:
 
                     # Seed default objects - matching the main UI objects and data access
                     objects_data = [
-                        (1, 'system', 'Planning Attributes', 'Planning attributes and master data setup'),
-                        (2, 'planner', 'Sales Data', 'Sales data upload and management'),
-                        (3, None, 'Forecast', 'Forecasting execution and results'),
-                        (4, None, 'Dashboard', 'Analytics and reporting views'),
-                        (5, None, 'Home', 'Landing page and navigation'),
-                        (6, 'data', 'Master Data', 'Access to master data records')
+                        (1, 'Planning Attributes', 'Planning Attributes', 'Planning attributes View and configuration'),
+                        (2, 'Sales Data', 'Sales Data', 'Sales data View'),
+                        (3, 'Forecasting', 'Forecast', 'Forecasting execution and results'),
+                        (4, 'Dashboard', 'Dashboard', 'Analytics and reporting views'),
+                        (5, 'Home', 'Home', 'Landing page and navigation'),
+                        (6, 'Master Data', 'Master Data', 'Access to master data records'),
+                        (7, 'Allow Edit', 'Allow Edit', 'Permission to upload and Edit data')
                     ]
 
                     for object_id, object_type, object_name, description in objects_data:

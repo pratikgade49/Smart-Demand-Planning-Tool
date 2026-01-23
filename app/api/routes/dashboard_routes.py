@@ -105,7 +105,7 @@ async def get_dashboard_aggregated_data(
 async def save_final_plan(
     request: SaveFinalPlanRequest,
     tenant_data: Dict = Depends(get_tenant_database),
-    _: Dict = Depends(require_object_access("Dashboard")),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
 ):
     """
     Save or update final plan data.

@@ -24,7 +24,7 @@ router = APIRouter(prefix="/field-catalogue", tags=["Field Catalogue"])
 async def create_field_catalogue(
     request: FieldCatalogueRequest,
     tenant_data: Dict = Depends(get_user_database),
-    _: Dict = Depends(require_object_access("Planning Attributes"))
+    _: Dict = Depends(require_object_access("Planning Attributes", min_role_id=2))
 ):
     """
     Create a new field catalogue in DRAFT status.
@@ -76,7 +76,7 @@ async def create_field_catalogue(
 async def finalize_field_catalogue(
     catalogue_id: str,
     tenant_data: Dict = Depends(get_current_user),
-    _: Dict = Depends(require_object_access("Planning Attributes"))
+    _: Dict = Depends(require_object_access("Planning Attributes", min_role_id=2))
 ):
     """
     Finalize a field catalogue and create master data table.
