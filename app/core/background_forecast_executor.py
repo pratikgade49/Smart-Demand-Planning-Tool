@@ -421,7 +421,8 @@ class BackgroundForecastExecutor:
                                 successful_runs += len([r for r in entity_result["results"] if r["status"] == "Completed"])
                                 failed_runs += len([r for r in entity_result["results"] if r["status"] == "Failed"])
                             else:
-                                failed_runs += len(entity_result["results"])
+                                # Count as failure if the entire entity processing failed
+                                failed_runs += max(1, len(entity_result.get("results", [])))
                         
                         except Exception as e:
                             entity_name = '-'.join([f"{k}={v}" for k, v in entity_filter.items()]) if entity_filter else "all"
@@ -483,19 +484,32 @@ class BackgroundForecastExecutor:
                     }
                 }
                 
+                # Determine final status - FAIL if everything failed, otherwise COMPLETE
+                final_status = JobStatus.COMPLETED
+                error_message = None
+                
+                if len(entity_combinations) > 0 and successful_runs == 0:
+                    final_status = JobStatus.FAILED
+                    error_message = f"Forecast failed for all {len(entity_combinations)} entities. Check individual run logs for details."
+                elif len(entity_combinations) == 0:
+                    final_status = JobStatus.FAILED
+                    error_message = "No data found for the selected filters. No forecast generated."
+
                 # Update job with results
                 ForecastJobService.update_job_status(
                     tenant_id=tenant_id,
                     database_name=database_name,
                     job_id=job_id,
-                    status=JobStatus.COMPLETED,
-                    result_data=result
+                    status=final_status,
+                    result_data=result,
+                    error_message=error_message
                 )
                 
                 logger.info(
-                    f"Job {job_id} completed successfully: {successful_runs}/{len(forecast_runs)} runs successful",
+                    f"Job {job_id} {final_status.value}: {successful_runs}/{len(forecast_runs)} runs successful",
                     extra={
                         'job_id': job_id,
+                        'status': final_status.value,
                         'duration_seconds': round(duration, 2),
                         'end_resources': end_resources,
                         'resource_warnings': resource_warnings

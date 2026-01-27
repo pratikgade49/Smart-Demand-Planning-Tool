@@ -3,7 +3,7 @@ Sales Data API Routes.
 Endpoints for retrieving sales data records with flexible filtering.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Dict, Any, List, Optional
 from datetime import date
 from app.schemas.sales_data import (

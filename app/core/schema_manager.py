@@ -98,24 +98,10 @@ class SchemaManager:
                      # ========================================================================
                     # Create Final Plan table with PARTIAL AUDIT (created only - immutable)
                     # ========================================================================
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS final_plan (
-                            final_plan_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                            master_id UUID NOT NULL REFERENCES master_data(master_id),
-                            date DATE NOT NULL,
-                            quantity DECIMAL(18, 2) NOT NULL,
-                            uom VARCHAR(20) NOT NULL,
-                            unit_price DECIMAL(18, 2),
-                            
-                            -- Audit fields (created only - transactions are immutable)
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            created_by VARCHAR(255) NOT NULL,
-                            updated_at TIMESTAMP,
-                            updated_by VARCHAR(255),
-                            deleted_at TIMESTAMP
-                        )
-                    """)
-                    logger.info(" Created sales_data table with partial audit trail")
+                    # Note: final_plan table is created dynamically in migrations
+                    # This placeholder is for backwards compatibility
+                    # ========================================================================
+                    logger.info(" final_plan table will be created dynamically during field catalogue setup")
 
                     # ========================================================================
                     # Create users table with FULL AUDIT TRAIL
@@ -455,9 +441,30 @@ class SchemaManager:
                         )
                     """)
 
+                    # ====================================================================
+                    # Create final_plan table with dynamic columns (SIMILAR TO sales_data)
+                    # ====================================================================
+                    cursor.execute(f"""
+                        CREATE TABLE IF NOT EXISTS final_plan (
+                            final_plan_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            master_id UUID NOT NULL REFERENCES master_data(master_id),
+                            "{date_field.field_name}" {date_sql_type} NOT NULL,
+                            "{target_field.field_name}" {target_sql_type} NOT NULL,
+                            uom VARCHAR(20) NOT NULL,
+                            unit_price DECIMAL(18, 2),
+
+                            -- Audit fields (created only - transactions are immutable)
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) NOT NULL,
+                            updated_at TIMESTAMP,
+                            updated_by VARCHAR(255)
+                        )
+                    """)
+
                     # Add unique constraint for batch upsert functionality
                     cursor.execute(f'ALTER TABLE sales_data ADD CONSTRAINT sales_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
                     cursor.execute(f'ALTER TABLE forecast_data ADD CONSTRAINT forecast_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
+                    cursor.execute(f'ALTER TABLE final_plan ADD CONSTRAINT final_plan_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
 
                     # Create indexes on sales_data and forecast_data
                     cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
@@ -465,6 +472,9 @@ class SchemaManager:
                     
                     cursor.execute(f'CREATE INDEX idx_forecast_data_date ON forecast_data("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_forecast_data_master_id ON forecast_data(master_id)')
+                    
+                    cursor.execute(f'CREATE INDEX idx_final_plan_date ON final_plan("{date_field.field_name}")')
+                    cursor.execute(f'CREATE INDEX idx_final_plan_master_id ON final_plan(master_id)')
                     
                     # Store metadata about target and date fields
                     cursor.execute("""
@@ -1010,6 +1020,107 @@ class SchemaManager:
         except Exception as e:
             logger.error(f"Failed to seed versions for {database_name}: {str(e)}")
             raise DatabaseException(f"Failed to seed versions: {str(e)}")
+
+    @staticmethod
+    def migrate_final_plan_to_dynamic_columns(tenant_id: str, database_name: str) -> bool:
+        """
+        Migrate final_plan table from static columns (date, quantity) to dynamic columns
+        based on field_catalogue_metadata.
+        
+        This handles existing databases that have the old schema.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            
+        Returns:
+            True if migration successful
+            
+        Raises:
+            DatabaseException: If migration fails
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Check if final_plan table exists with old schema (has "date" column)
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'final_plan' AND column_name = 'date'
+                        )
+                    """)
+                    has_old_schema = bool(cursor.fetchone()[0])
+                    
+                    if not has_old_schema:
+                        # Already migrated or doesn't exist
+                        logger.info(f"final_plan table already has dynamic schema or doesn't exist in {database_name}")
+                        return True
+                    
+                    # Get field names from metadata
+                    cursor.execute("""
+                        SELECT date_field_name, target_field_name 
+                        FROM field_catalogue_metadata 
+                        LIMIT 1
+                    """)
+                    result = cursor.fetchone()
+                    if not result:
+                        raise DatabaseException("field_catalogue_metadata not found")
+                    
+                    date_field, target_field = result
+                    
+                    # Create temporary table with new schema
+                    cursor.execute(f"""
+                        CREATE TABLE final_plan_new (
+                            final_plan_id UUID PRIMARY KEY,
+                            master_id UUID NOT NULL REFERENCES master_data(master_id),
+                            "{date_field}" DATE NOT NULL,
+                            "{target_field}" DECIMAL(18, 2) NOT NULL,
+                            uom VARCHAR(20) NOT NULL,
+                            unit_price DECIMAL(18, 2),
+                            created_at TIMESTAMP,
+                            created_by VARCHAR(255) NOT NULL,
+                            updated_at TIMESTAMP,
+                            updated_by VARCHAR(255)
+                        )
+                    """)
+                    
+                    # Copy data from old table to new table
+                    cursor.execute(f"""
+                        INSERT INTO final_plan_new 
+                        (final_plan_id, master_id, "{date_field}", "{target_field}", uom, unit_price, 
+                         created_at, created_by, updated_at, updated_by)
+                        SELECT final_plan_id, master_id, date, quantity, uom, unit_price,
+                               created_at, created_by, updated_at, updated_by
+                        FROM final_plan
+                    """)
+                    
+                    # Drop old table and rename new table
+                    cursor.execute("DROP TABLE IF EXISTS final_plan")
+                    cursor.execute("ALTER TABLE final_plan_new RENAME TO final_plan")
+                    
+                    # Add unique constraint
+                    cursor.execute(f"""
+                        ALTER TABLE final_plan 
+                        ADD CONSTRAINT final_plan_master_date_unique 
+                        UNIQUE (master_id, "{date_field}")
+                    """)
+                    
+                    # Create indexes
+                    cursor.execute(f'CREATE INDEX idx_final_plan_date ON final_plan("{date_field}")')
+                    cursor.execute(f'CREATE INDEX idx_final_plan_master_id ON final_plan(master_id)')
+                    
+                    conn.commit()
+                    logger.info(f"Successfully migrated final_plan table to dynamic schema in {database_name}")
+                    return True
+                    
+                finally:
+                    cursor.close()
+        except Exception as e:
+            logger.error(f"Failed to migrate final_plan table in {database_name}: {str(e)}")
+            raise DatabaseException(f"Failed to migrate final_plan table: {str(e)}")
 
     @staticmethod
     def seed_rbac_defaults(tenant_id: str, database_name: str) -> bool:
