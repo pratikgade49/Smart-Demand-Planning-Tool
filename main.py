@@ -3,9 +3,9 @@ Main FastAPI Application with Enhanced Logging.
 Entry point for the Smart Demand Planning Tool API.
 """
 
-from fastapi import FastAPI, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, status # type: ignore
+from fastapi.middleware.cors import CORSMiddleware # type: ignore
+from fastapi.responses import JSONResponse # type: ignore
 from contextlib import asynccontextmanager
 import time
 from datetime import datetime
@@ -29,6 +29,7 @@ from app.api.routes import sales_data_routes
 from app.api.routes import dashboard_routes
 from app.api.routes import master_data_routes
 from app.api.middleware.monitoring_middleware import ResourceMonitoringMiddleware
+from app.api.middleware.request_audit_middleware import RequestAuditMiddleware
 
 
 
@@ -111,6 +112,15 @@ app.add_middleware(
 )
 
 app.add_middleware(ResourceMonitoringMiddleware)
+app.add_middleware(
+    RequestAuditMiddleware,
+    exclude_paths=[
+        "/api/docs",
+        "/api/openapi.json",
+        "/api/redoc",
+        "/api/v1/metrics",
+    ],
+)
 
 logger.info("CORS middleware configured")
 
@@ -287,7 +297,7 @@ async def health_check():
         db_healthy = pool_status["master_pool"]["initialized"]
         
         # Get performance metrics
-        import psutil
+        import psutil # type: ignore
         process = psutil.Process()
         memory_info = process.memory_info()
         cpu_percent = process.cpu_percent(interval=0.1)
@@ -343,7 +353,7 @@ if settings.DEBUG:
         """Debug endpoint for performance metrics."""
         logger.debug("Performance debug endpoint accessed")
         
-        import psutil
+        import psutil # type: ignore
         import tracemalloc
         
         process = psutil.Process()
@@ -374,7 +384,7 @@ if settings.DEBUG:
 
 
 if __name__ == "__main__":
-    import uvicorn
+    import uvicorn # type: ignore
     
     logger.info(f"Starting server on {settings.HOST}:{settings.PORT}")
     

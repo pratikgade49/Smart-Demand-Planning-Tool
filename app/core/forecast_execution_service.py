@@ -519,6 +519,15 @@ class ForecastExecutionService:
                     how='left'
                 )
             
+            # Get aggregation level from forecast run
+            from app.core.forecasting_service import ForecastingService
+            forecast_run = ForecastingService.get_forecast_run(
+                tenant_id, database_name, forecast_run_id
+            )
+            aggregation_level = forecast_run.get('forecast_filters', {}).get('aggregation_level')
+            
+            logger.info(f"Aggregation level: {aggregation_level}")
+            
             # Train-test split
             train_ratio = 0.85
             n = len(historical_data)
@@ -564,13 +573,16 @@ class ForecastExecutionService:
                 logger.info(f"Training on: {len(train_data)} periods")
                 logger.info(f"Predicting: {test_periods} future periods")
                 
-                # Call algorithm
+                # Call algorithm with tenant context
                 test_forecast_result, train_metrics = ForecastExecutionService._route_algorithm(
                     algorithm_id=algorithm_id,
                     algorithm_name=algorithm_name,
                     data=train_data,
                     periods=test_periods,
-                    custom_params=custom_params
+                    custom_params=custom_params,
+                    tenant_id=tenant_id,
+                    database_name=database_name,
+                    aggregation_level=aggregation_level
                 )
                 
                 test_forecast = np.array(test_forecast_result)
@@ -611,12 +623,16 @@ class ForecastExecutionService:
             logger.info(f"Training on: {len(historical_data)} periods (ALL historical data)")
             logger.info(f"Predicting: {future_periods} future periods")
             
+            # Call algorithm with tenant context
             future_forecast_result, future_metrics = ForecastExecutionService._route_algorithm(
                 algorithm_id=algorithm_id,
                 algorithm_name=algorithm_name,
                 data=historical_data,
                 periods=future_periods,
-                custom_params=custom_params
+                custom_params=custom_params,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
             )
             
             future_forecast = np.array(future_forecast_result)
@@ -689,9 +705,27 @@ class ForecastExecutionService:
         algorithm_name: str,
         data: pd.DataFrame,
         periods: int,
-        custom_params: Dict[str, Any]
+        custom_params: Dict[str, Any],
+        tenant_id: str = None,
+        database_name: str = None,
+        aggregation_level: str = None
     ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """Route to appropriate algorithm based on ID."""
+        """
+        Route to appropriate algorithm based on ID.
+        
+        Args:
+            algorithm_id: Algorithm identifier
+            algorithm_name: Algorithm name
+            data: Historical data
+            periods: Number of periods to forecast
+            custom_params: Custom parameters for the algorithm
+            tenant_id: Tenant identifier (for dynamic field detection)
+            database_name: Database name (for dynamic field detection)
+            aggregation_level: Current aggregation level (e.g., "product")
+            
+        Returns:
+            Tuple of (forecast_array, metrics_dict)
+        """
         
         # All algorithm methods return (forecast_array, metrics_dict)
         if algorithm_id == 1:  # ARIMA
@@ -1390,37 +1424,73 @@ This makes the trend robust to spikes and outliers
         return forecast, metrics 
 
     @staticmethod
-    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
+    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float]]:
         """Prophet forecasting using Facebook's Prophet library."""
         try:
             if Prophet is None:
                 logger.warning("Prophet library not installed, falling back to Exponential Smoothing")
                 return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
-            # Prepare data for Prophet
-            if 'total_quantity' in data.columns:
-                y_values = data['total_quantity'].values
-            elif 'quantity' in data.columns:
-                y_values = data['quantity'].values
+            # Clean the input data
+            data_clean = data.copy().reset_index(drop=True)
+            logger.info(f"Prophet DEBUG: Initial data shape: {data_clean.shape}, columns: {list(data_clean.columns)}")
+            
+            # Prepare quantity values
+            if 'total_quantity' in data_clean.columns:
+                y_col = 'total_quantity'
+            elif 'quantity' in data_clean.columns:
+                y_col = 'quantity'
             else:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
-            # Get dates from data if available, otherwise create sequential dates
-            if 'period' in data.columns:
-                dates = pd.to_datetime(data['period'])
+            # Get date column
+            if 'period' in data_clean.columns:
+                date_col = 'period'
+            elif 'date' in data_clean.columns:
+                date_col = 'date'
             else:
-                # Create dates starting from today
-                dates = pd.date_range(end=datetime.now(), periods=len(y_values), freq='MS')
+                # Create sequential dates if no date column
+                data_clean['period'] = pd.date_range(end=datetime.now(), periods=len(data_clean), freq='MS')
+                date_col = 'period'
 
-            # Create Prophet dataframe
-            prophet_data = pd.DataFrame({
-                'ds': dates,
-                'y': y_values
+            logger.info(f"Prophet DEBUG: Using date_col='{date_col}', y_col='{y_col}'")
+
+            # ✅ STEP 1: Select only required columns first
+            # Use iloc to select only the first occurrence if multiple columns have same name
+            if date_col in data_clean.columns:
+                ds_data = data_clean[date_col]
+                if isinstance(ds_data, pd.DataFrame):
+                    ds_data = ds_data.iloc[:, 0]
+            else:
+                raise ValueError(f"Date column '{date_col}' not found")
+                
+            if y_col in data_clean.columns:
+                y_data = data_clean[y_col]
+                if isinstance(y_data, pd.DataFrame):
+                    y_data = y_data.iloc[:, 0]
+            else:
+                raise ValueError(f"Quantity column '{y_col}' not found")
+
+            data_subset = pd.DataFrame({
+                'ds': ds_data.values,
+                'y': y_data.values
             })
+            
+            # ✅ STEP 2: Drop NaN values
+            # data_subset = data_subset.dropna()
+            
+            if len(data_subset) < 3:
+                raise ValueError(f"Need at least 3 data points for Prophet, got {len(data_subset)}")
 
-            n = len(prophet_data)
-            if n < 3:
-                raise ValueError("Need at least 3 historical data points for Prophet")
+            # ✅ STEP 3: Convert dates with error handling
+            data_subset['ds'] = pd.to_datetime(data_subset['ds'], errors='coerce')
+            data_subset = data_subset.dropna(subset=['ds'])
+            
+            if len(data_subset) < 3:
+                raise ValueError(f"After cleaning dates, only {len(data_subset)} data points remain")
+
+            n = len(data_subset)
+            logger.info(f"Prophet: Training on {n} periods, forecasting {periods} periods")
 
             # Initialize and fit Prophet model
             model = Prophet(
@@ -1433,37 +1503,48 @@ This makes the trend robust to spikes and outliers
             )
             
             # Suppress Prophet's verbose output
+            import logging as py_logging
+            py_logging.getLogger('prophet').setLevel(py_logging.WARNING)
+            py_logging.getLogger('cmdstanpy').setLevel(py_logging.WARNING)
+            
             with pd.option_context('mode.chained_assignment', None):
-                model.fit(prophet_data)
+                model.fit(data_subset)
 
-            # Create future dataframe
+            # Create future dataframe and predict
             future = model.make_future_dataframe(periods=periods, freq='MS')
             forecast_df = model.predict(future)
 
-            # Extract forecast values
+            logger.info(f"Prophet: Prediction complete - forecast_df has {len(forecast_df)} rows")
+
+            # Extract future forecast: last 'periods' rows
             forecast = forecast_df['yhat'].values[-periods:]
-            forecast = np.maximum(forecast, 0)  # Ensure non-negative
+            forecast = np.maximum(forecast, 0)
 
-            # Calculate metrics on historical data
+            # Extract fitted values: first n rows
             fitted_values = forecast_df['yhat'].values[:n]
-            metrics = ForecastExecutionService.calculate_metrics(y_values, fitted_values)
+            y_actual = prophet_data['y'].values
+            
+            # Final safety check
+            if len(fitted_values) != len(y_actual):
+                logger.warning(f"Prophet: Length mismatch in metrics - fitted={len(fitted_values)}, actual={len(y_actual)}")
+                min_len = min(len(fitted_values), len(y_actual))
+                fitted_values = fitted_values[:min_len]
+                y_actual = y_actual[:min_len]
 
-            # Prepare test forecast
-            test_results = {
-                'test_forecast': fitted_values,
-                'test_dates': data['period'].tolist() if 'period' in data.columns else []
-            }
+            # Calculate metrics
+            metrics = ForecastExecutionService.calculate_metrics(y_actual, fitted_values)
 
-            logger.info(f"Prophet forecast completed with {periods} periods")
-            return forecast, metrics 
+            logger.info(f"Prophet: Completed - MAE={metrics['mae']:.2f}, Accuracy={metrics['accuracy']:.2f}%")
+            return forecast, metrics
 
         except ImportError:
             logger.warning("Prophet library not available, falling back to Exponential Smoothing")
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
         except Exception as e:
             logger.warning(f"Prophet forecasting failed: {str(e)}, falling back to Exponential Smoothing")
+            logger.debug("Prophet error traceback:", exc_info=True)
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
-
+        
     @staticmethod
     def lstm_forecast(data: pd.DataFrame, periods: int, sequence_length: int = 12, epochs: int = 50, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """LSTM Neural Network forecasting."""
@@ -1962,65 +2043,84 @@ This makes the trend robust to spikes and outliers
         return ForecastExecutionService.arima_forecast(data, periods)
 
     @staticmethod
-    def _get_external_factor_columns(data: pd.DataFrame, tenant_id: str = None, database_name: str = None) -> List[str]:
+    def _get_external_factor_columns(
+        data: pd.DataFrame, 
+        tenant_id: str = None, 
+        database_name: str = None,
+        aggregation_level: str = None
+    ) -> List[str]:
         """
-        Identify external factor columns in the data.
-        External factors are columns not in the standard set (period, total_quantity, quantity, date).
-        Also excludes aggregation columns and calculated fields.
-
+        Identify external factor columns in the data using field catalogue metadata.
+        
         Args:
             data: DataFrame with historical data and potentially merged external factors
-            tenant_id: Tenant identifier (optional, for dynamic field detection)
-            database_name: Database name (optional, for dynamic field detection)
-
+            tenant_id: Tenant identifier (required for dynamic field detection)
+            database_name: Database name (required for dynamic field detection)
+            aggregation_level: Current aggregation level being used (e.g., "product")
+            
         Returns:
             List of external factor column names
         """
-        # Standard columns from sales data and aggregation
+        if not tenant_id or not database_name:
+            logger.warning("tenant_id and database_name required for dynamic field detection")
+            return []
+        
+        # Standard columns that are NEVER external factors
         standard_columns = {
+            'period', 'date', 'total_quantity', 'quantity',
             'transaction_count', 'avg_price', 'uom'
         }
-
-        # Get dynamic field names from database if available
+        
         try:
-            if tenant_id and database_name:
-                from app.core.forecasting_service import ForecastingService
-                target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
-                # Add the actual tenant-specific field names
-                standard_columns.update({target_field, date_field})
-                logger.info(f"Excluding tenant-specific fields: target='{target_field}', date='{date_field}'")
-            else:
-                # Fallback: exclude common patterns if we don't have tenant info
-                dynamic_date_fields = {'test_period', 'date', 'period', 'total_quantity', 'quantity'}
-                standard_columns.update(dynamic_date_fields)
-                logger.warning("No tenant info provided - using fallback field exclusions")
-        except Exception as e:
-            logger.warning(f"Could not get dynamic field names: {str(e)}, using fallback exclusions")
-            # Fallback: exclude common patterns
-            dynamic_date_fields = {'test_period', 'date', 'period', 'total_quantity', 'quantity'}
-            standard_columns.update(dynamic_date_fields)
-
-        # Exclude any column that could be a master data aggregation field
-        # These would typically be string/categorical columns used for grouping
-        external_factors = []
-        for col in data.columns:
-            if col not in standard_columns:
-                # Check if it's likely a categorical aggregation column
-                # (typically has few unique values relative to data size)
-                if col in data.columns:
-                    dtype = data[col].dtype
-                    # Exclude datetime columns (likely the date field)
-                    if pd.api.types.is_datetime64_any_dtype(dtype):
-                        continue
-
-                    if dtype == 'object' or dtype.name == 'category':
-                        unique_ratio = data[col].nunique() / len(data) if len(data) > 0 else 0
-                        if unique_ratio < 0.1:  # Less than 10% unique values = aggregation field
-                            continue
-                # Otherwise, treat as external factor
+            # Get dynamic field names from metadata
+            from app.core.forecasting_service import ForecastingService
+            target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
+            standard_columns.update({target_field, date_field})
+            
+            # Get all dimension fields from field catalogue
+            dimension_fields = ForecastingService._get_dimension_fields(tenant_id, database_name)
+            
+            # Parse aggregation level to get fields being used for aggregation
+            agg_fields = set()
+            if aggregation_level:
+                agg_fields = set(field.strip() for field in aggregation_level.split('-'))
+                logger.info(f"Current aggregation fields: {agg_fields}")
+            
+            # Build exclusion set: standard columns + dimension fields + aggregation fields
+            exclude_columns = standard_columns | set(dimension_fields) | agg_fields
+            
+            logger.info(f"Excluding columns: {exclude_columns}")
+            
+            # Find external factors: columns that are NOT in exclusion set
+            external_factors = []
+            for col in data.columns:
+                # Skip if in exclusion list
+                if col in exclude_columns:
+                    continue
+                
+                # Skip datetime columns
+                if pd.api.types.is_datetime64_any_dtype(data[col]):
+                    continue
+                
+                # If column has only 1 unique value, it's likely a filter - skip it
+                if data[col].nunique() == 1:
+                    logger.info(f"Excluding '{col}' - single unique value (likely a filter)")
+                    continue
+                
+                # If we get here, treat as external factor
                 external_factors.append(col)
-
-        return external_factors
+                logger.info(f"Including '{col}' as external factor")
+            
+            if not external_factors:
+                logger.info("No external factors identified in data")
+            else:
+                logger.info(f"Identified {len(external_factors)} external factors: {external_factors}")
+            
+            return external_factors
+            
+        except Exception as e:
+            logger.error(f"Failed to identify external factors: {str(e)}", exc_info=True)
+            return []
 
     @staticmethod
     def _extract_features_with_factors(data: pd.DataFrame, window: int, external_factors: List[str]) -> Tuple[np.ndarray, np.ndarray]:
@@ -2045,76 +2145,93 @@ This makes the trend robust to spikes and outliers
         X = []
         y_target = []
 
-        # Preprocess external factors: factorize categorical columns to numeric codes
+        # Preprocess external factors: convert ALL columns to numeric
         encoded_columns = {}
         for factor_name in external_factors:
             if factor_name in data.columns:
-                col = data[factor_name].fillna('__NA__')
-                if not np.issubdtype(col.dtype, np.number):
-                    codes, uniques = pd.factorize(col)
-                    # store encoded series as float
-                    encoded_columns[factor_name] = codes.astype(float)
+                col = data[factor_name]
+                
+                # Handle different data types
+                if pd.api.types.is_numeric_dtype(col):
+                    # Numeric column: fill NaN with 0
+                    encoded_columns[factor_name] = col.fillna(0.0).astype(float).values
                 else:
-                    # numeric column: convert NaN to 0.0 and keep
-                    encoded_columns[factor_name] = col.astype(float).fillna(0.0).values
+                    # Categorical/String column: use factorize
+                    # Fill NaN with a placeholder first
+                    col_filled = col.fillna('__MISSING__').astype(str)
+                    codes, _ = pd.factorize(col_filled)
+                    encoded_columns[factor_name] = codes.astype(float)
+                    logger.info(f"Encoded categorical factor '{factor_name}' with {len(set(codes))} unique values")
 
+        # Build feature matrix
         for i in range(window, len(data)):
             lags = y[i-window:i]
             time_idx = i
             features = list(lags) + [time_idx]
 
+            # Add encoded external factors
             for factor_name in external_factors:
-                if factor_name in data.columns:
-                    # use precomputed encoded value when available
-                    if factor_name in encoded_columns:
-                        factor_value = encoded_columns[factor_name][i]
-                    else:
-                        factor_value = data[factor_name].iloc[i]
-                        if pd.isna(factor_value):
-                            factor_value = 0.0
-                        else:
-                            try:
-                                factor_value = float(factor_value)
-                            except Exception:
-                                # last resort: use hash-based deterministic encoding
-                                factor_value = float(abs(hash(str(factor_value))) % 1000000) / 1000.0
-
+                if factor_name in encoded_columns:
+                    factor_value = encoded_columns[factor_name][i]
                     features.append(float(factor_value))
+                else:
+                    features.append(0.0)
 
             X.append(features)
             y_target.append(y[i])
 
-        return np.array(X), np.array(y_target)
+        X_array = np.array(X, dtype=np.float64)
+        y_array = np.array(y_target, dtype=np.float64)
+        
+        # Final validation: ensure no NaN or Inf
+        if np.any(np.isnan(X_array)) or np.any(np.isinf(X_array)):
+            logger.warning("NaN/Inf detected in features, replacing with 0")
+            X_array = np.nan_to_num(X_array, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        if np.any(np.isnan(y_array)) or np.any(np.isinf(y_array)):
+            logger.warning("NaN/Inf detected in targets, replacing with 0")
+            y_array = np.nan_to_num(y_array, nan=0.0, posinf=0.0, neginf=0.0)
+
+        return X_array, y_array
 
     @staticmethod
-    def _prepare_future_features_with_factors(recent_lags: List[float], n: int, idx: int, window: int, external_factors: List[str], last_factor_values: Dict[str, float]) -> np.ndarray:
+    def _prepare_future_features_with_factors(
+        recent_lags: List[float], 
+        n: int, 
+        idx: int, 
+        window: int, 
+        external_factors: List[str], 
+        last_factor_values: Dict[str, float]
+    ) -> np.ndarray:
         """
         Prepare features for future prediction including external factors.
         For external factors, use the last known values.
-        
-        Args:
-            recent_lags: Recent lagged values
-            n: Current data length
-            idx: Forecast index
-            window: Window size for lags
-            external_factors: List of external factor column names
-            last_factor_values: Dictionary of last known external factor values
-            
-        Returns:
-            Feature array for prediction
         """
-        features = recent_lags + [n + idx]
+        features = list(recent_lags) + [n + idx]
         
         for factor_name in external_factors:
             if factor_name in last_factor_values:
-                features.append(last_factor_values[factor_name])
+                features.append(float(last_factor_values[factor_name]))
             else:
                 features.append(0.0)
         
-        return np.array(features)
+        # Ensure all features are valid floats
+        features_array = np.array(features, dtype=np.float64)
+        features_array = np.nan_to_num(features_array, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        return features_array
 
     @staticmethod
-    def xgboost_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: int = 6, learning_rate: float = 0.1) -> Tuple[np.ndarray, Dict[str, float]]:
+    def xgboost_forecast(
+        data: pd.DataFrame, 
+        periods: int, 
+        n_estimators: int = 100, 
+        max_depth: int = 6, 
+        learning_rate: float = 0.1,
+        tenant_id: str = None,
+        database_name: str = None,
+        aggregation_level: str = None
+    ):
         """
         XGBoost forecasting - uses ALL data for training (no internal split).
 
@@ -2150,7 +2267,12 @@ This makes the trend robust to spikes and outliers
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            external_factors = ForecastExecutionService._get_external_factor_columns(
+                data,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
+            )
 
             if external_factors:
                 logger.info(f"XGBoost: Using external factors: {external_factors}")
@@ -2238,7 +2360,7 @@ This makes the trend robust to spikes and outliers
 
 
     @staticmethod
-    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf') -> Tuple[np.ndarray, Dict[str, float]]:
+    def svr_forecast(data: pd.DataFrame, periods: int, C: float = 1.0, epsilon: float = 0.1, kernel: str = 'rbf',tenant_id: str = None,database_name: str = None,aggregation_level: str = None):
         """
         Support Vector Regression forecasting - uses ALL data for training (no internal split).
         
@@ -2276,7 +2398,12 @@ This makes the trend robust to spikes and outliers
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            external_factors = ForecastExecutionService._get_external_factor_columns(
+                data,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
+            )
             
             if external_factors:
                 logger.info(f"SVR: Using external factors: {external_factors}")
@@ -2361,7 +2488,7 @@ This makes the trend robust to spikes and outliers
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
     @staticmethod
-    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5) -> Tuple[np.ndarray, Dict[str, float]]:
+    def knn_forecast(data: pd.DataFrame, periods: int, n_neighbors: int = 5,tenant_id: str = None,database_name: str = None,aggregation_level: str = None) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         K-Nearest Neighbors forecasting - uses ALL data for training (no internal split).
         
@@ -2388,7 +2515,12 @@ This makes the trend robust to spikes and outliers
 
             # Feature engineering: create lag features, time index, and external factors
             window = min(5, n - 1)
-            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            external_factors = ForecastExecutionService._get_external_factor_columns(
+                data,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
+            )
             
             if external_factors:
                 logger.info(f"KNN: Using external factors: {external_factors}")
@@ -2471,8 +2603,18 @@ This makes the trend robust to spikes and outliers
             logger.warning(f"KNN failed: {str(e)}, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
 
-    staticmethod
-    def random_forest_forecast(data: pd.DataFrame, periods: int, n_estimators: int = 100, max_depth: Optional[int] = None, min_samples_split: int = 2, min_samples_leaf: int = 1) -> Tuple[np.ndarray, Dict[str, float]]:
+    @staticmethod
+    def random_forest_forecast(
+        data: pd.DataFrame, 
+        periods: int, 
+        n_estimators: int = 100, 
+        max_depth: Optional[int] = None, 
+        min_samples_split: int = 2, 
+        min_samples_leaf: int = 1,
+        tenant_id: str = None,
+        database_name: str = None,
+        aggregation_level: str = None
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         Random Forest regression forecasting - uses ALL data for training (no internal split).
         
@@ -2483,6 +2625,9 @@ This makes the trend robust to spikes and outliers
             max_depth: Maximum tree depth
             min_samples_split: Minimum samples to split
             min_samples_leaf: Minimum samples in leaf
+            tenant_id: Tenant identifier (for dynamic field detection)
+            database_name: Database name (for dynamic field detection)
+            aggregation_level: Current aggregation level (e.g., "product")
             
         Returns:
             Tuple of (forecast_array, metrics_dict)
@@ -2508,7 +2653,12 @@ This makes the trend robust to spikes and outliers
                 raise ValueError("Need at least 10 historical data points for Random Forest")
 
             window = min(5, n - 1)
-            external_factors = ForecastExecutionService._get_external_factor_columns(data)
+            external_factors = ForecastExecutionService._get_external_factor_columns(
+                data,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
+            )
             
             if external_factors:
                 logger.info(f"Random Forest: Using external factors: {external_factors}")
@@ -2548,8 +2698,19 @@ This makes the trend robust to spikes and outliers
             if external_factors and len(data) > 0:
                 for factor_name in external_factors:
                     if factor_name in data.columns:
-                        factor_value = data[factor_name].iloc[-1]
-                        last_factor_values[factor_name] = 0.0 if pd.isna(factor_value) else float(factor_value)
+                        factor_value_raw = data[factor_name].iloc[-1]
+                        if pd.isna(factor_value_raw):
+                            val = 0.0
+                        else:
+                            try:
+                                val = float(factor_value_raw)
+                            except Exception:
+                                try:
+                                    codes, uniques = pd.factorize(data[factor_name].fillna('__NA__'))
+                                    val = float(codes[-1])
+                                except Exception:
+                                    val = float(abs(hash(str(factor_value_raw))) % 1000000) / 1000.0
+                        last_factor_values[factor_name] = val
 
             for i in range(periods):
                 if external_factors:
@@ -2939,7 +3100,10 @@ This makes the trend robust to spikes and outliers
     def generate_forecast(
         historical_data: pd.DataFrame,
         config: Dict[str, Any],
-        process_log: List[str] = None
+        process_log: List[str] = None,
+        tenant_id: str = None,
+        database_name: str = None,
+        aggregation_level: str = None
     ) -> Dict[str, Any]:
         """
         Generate forecast using best_fit algorithm selection.
@@ -2949,6 +3113,9 @@ This makes the trend robust to spikes and outliers
             historical_data: Historical data with quantity column
             config: Configuration dict with interval and other settings
             process_log: Optional list to append process logs
+            tenant_id: Tenant identifier (for dynamic field detection)
+            database_name: Database name (for dynamic field detection)
+            aggregation_level: Current aggregation level (e.g., "product")
             
         Returns:
             Dictionary with forecast results including selected algorithm, metrics, and predictions
@@ -2981,7 +3148,8 @@ This makes the trend robust to spikes and outliers
             "simple_moving_average",
             "seasonal_decomposition",
             "moving_average",
-            "sarima"
+            "sarima",
+            "random_forest"
         ]
         
         algorithm_results = []
@@ -3005,7 +3173,11 @@ This makes the trend robust to spikes and outliers
                     ForecastExecutionService._run_algorithm_safe,
                     algorithm,
                     historical_data.copy(),
-                    periods
+                    periods,
+                    'total_quantity',
+                    tenant_id,
+                    database_name,
+                    aggregation_level
                 )
                 future_to_algorithm[future] = algorithm
             
@@ -3035,17 +3207,15 @@ This makes the trend robust to spikes and outliers
                     process_log.append(f"❌ Algorithm {algorithm_name} failed: {str(exc)}")
                     logger.warning(f"Algorithm {algorithm_name} failed: {str(exc)}")
         
-        # Filter out failed results: prefer positive accuracy and non-empty forecasts
+        # Filter out failed results
         successful_results = [res for res in algorithm_results if res.get('accuracy', 0) > 0 and res.get('forecast')]
 
-        # If none have positive accuracy, fall back to any algorithm that produced a non-empty forecast
         if not successful_results:
             fallback_results = [res for res in algorithm_results if res.get('forecast')]
             if fallback_results:
                 successful_results = fallback_results
                 process_log.append("No algorithm produced positive accuracy; using algorithms with non-empty forecasts as fallback")
             else:
-                # Final fallback: use a simple moving average forecast
                 process_log.append("All algorithms failed to produce forecasts; using simple moving average fallback")
                 sma_forecast, sma_metrics = ForecastExecutionService.simple_moving_average(historical_data, periods=periods)
                 return {
@@ -3142,7 +3312,10 @@ This makes the trend robust to spikes and outliers
         algorithm_name: str,
         data: pd.DataFrame,
         periods: int,
-        target_column: str = 'total_quantity'
+        target_column: str = 'total_quantity',
+        tenant_id: str = None,
+        database_name: str = None,
+        aggregation_level: str = None
     ) -> Dict[str, Any]:
         """
         Safely run an algorithm and return results.
@@ -3152,6 +3325,9 @@ This makes the trend robust to spikes and outliers
             data: Historical data (must have target_column)
             periods: Number of periods to forecast
             target_column: Name of the target column to forecast
+            tenant_id: Tenant identifier (for dynamic field detection)
+            database_name: Database name (for dynamic field detection)
+            aggregation_level: Current aggregation level (e.g., "product")
 
         Returns:
             Dictionary with algorithm results
@@ -3161,12 +3337,22 @@ This makes the trend robust to spikes and outliers
             target_column = 'total_quantity'
 
         try:
+            # ✅ CRITICAL: Ensure no duplicate columns before proceeding
+            # Duplicate columns (like multiple 'total_quantity' or 'period') can crash algorithms
+            if data.columns.duplicated().any():
+                logger.info(f"Algorithm {algorithm_name}: Found duplicate columns {data.columns[data.columns.duplicated()].unique().tolist()}, keeping only first occurrence")
+                data = data.loc[:, ~data.columns.duplicated()].copy()
+
             # Debug: Log data information
             logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
             logger.info(f"Algorithm {algorithm_name}: Data shape: {data.shape}")
 
             # Ensure we have target_column (rename if needed)
             if 'quantity' in data.columns and target_column not in data.columns:
+                data = data.rename(columns={'quantity': target_column})
+            elif 'quantity' in data.columns and target_column in data.columns:
+                # If both exist, drop the old target_column first to avoid duplicates
+                data = data.drop(columns=[target_column])
                 data = data.rename(columns={'quantity': target_column})
             
             algorithm_map = {
@@ -3198,8 +3384,17 @@ This makes the trend robust to spikes and outliers
                 if target_data is None or target_data.empty:
                     target_data = data
                 
-                # Call the algorithm - it should return (forecast, metrics)
-                result = algorithm_func(target_data, max(1, horizon))
+                # Call the algorithm with tenant context for ML algorithms
+                if algorithm_name in ['xgboost', 'svr', 'knn', 'random_forest']:
+                    result = algorithm_func(
+                        target_data, 
+                        max(1, horizon),
+                        tenant_id=tenant_id,
+                        database_name=database_name,
+                        aggregation_level=aggregation_level
+                    )
+                else:
+                    result = algorithm_func(target_data, max(1, horizon))
                 
                 # Ensure we have exactly 2 return values
                 if isinstance(result, tuple):

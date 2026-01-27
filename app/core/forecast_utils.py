@@ -196,10 +196,13 @@ def _process_entity_forecast(
                 if algo_config.algorithm_id == 999:
                     # Best Fit algorithm (Single-pass)
                     forecast_result = ForecastExecutionService.generate_forecast(
-                        historical_data=historical_data,
-                        config={'interval': interval, 'periods': periods},
-                        process_log=[]
-                    )
+                    historical_data=historical_data,
+                    config={'interval': interval, 'periods': periods},
+                    process_log=[],
+                    tenant_id=tenant_data["tenant_id"],
+                    database_name=tenant_data["database_name"],
+                    aggregation_level=aggregation_level
+                )
                     algo_name_for_result = "best_fit"
                     algo_accuracy = forecast_result.get('accuracy')
                     algo_forecast = forecast_result['forecast']
@@ -238,9 +241,11 @@ def _process_entity_forecast(
                         algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
                         data=historical_data.copy(),
                         periods=periods,
-                        target_column='total_quantity'
+                        target_column='total_quantity',
+                        tenant_id=tenant_data["tenant_id"],
+                        database_name=tenant_data["database_name"],
+                        aggregation_level=aggregation_level
                     )
-
                     if algorithm_name_result['accuracy'] == 0 and not algorithm_name_result.get('forecast'):
                         logger.warning(f"Algorithm {algo_config.algorithm_id} failed, skipping")
                         return None

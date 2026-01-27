@@ -95,6 +95,28 @@ class SchemaManager:
                     """)
                     logger.info(" Created sales_data table with partial audit trail")
                     
+                     # ========================================================================
+                    # Create Final Plan table with PARTIAL AUDIT (created only - immutable)
+                    # ========================================================================
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS final_plan (
+                            final_plan_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            master_id UUID NOT NULL REFERENCES master_data(master_id),
+                            date DATE NOT NULL,
+                            quantity DECIMAL(18, 2) NOT NULL,
+                            uom VARCHAR(20) NOT NULL,
+                            unit_price DECIMAL(18, 2),
+                            
+                            -- Audit fields (created only - transactions are immutable)
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) NOT NULL,
+                            updated_at TIMESTAMP,
+                            updated_by VARCHAR(255),
+                            deleted_at TIMESTAMP
+                        )
+                    """)
+                    logger.info(" Created sales_data table with partial audit trail")
+
                     # ========================================================================
                     # Create users table with FULL AUDIT TRAIL
                     # ========================================================================
@@ -235,8 +257,47 @@ class SchemaManager:
 
                     logger.info(" Created auto-update triggers")
                     
-                    conn.commit()
+                    
                     logger.info(f" Database initialized successfully for tenant: {tenant_id}")
+
+                    # ====================================================================
+                    # Create api_request_logs table for endpoint performance tracking
+                    # ====================================================================
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS api_request_logs (
+                            log_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            request_path VARCHAR(500) NOT NULL,
+                            request_method VARCHAR(12) NOT NULL,
+                            start_time TIMESTAMP NOT NULL,
+                            end_time TIMESTAMP NOT NULL,
+                            duration_seconds DECIMAL(18, 6) NOT NULL,
+                            request_payload JSONB,
+                            response_status INT,
+                            success BOOLEAN,
+                            message TEXT,
+                            error_message TEXT,
+                            response_output JSONB,
+                            tenant_id UUID,
+                            user_id UUID,
+                            client_ip VARCHAR(64),
+                            user_agent TEXT,
+                            headers JSONB
+                        )
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_api_request_logs_time
+                        ON api_request_logs(start_time DESC)
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_api_request_logs_tenant
+                        ON api_request_logs(tenant_id)
+                    """)
+                    cursor.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_api_request_logs_user
+                        ON public.api_request_logs(user_id)
+                    """)
+                    conn.commit()
+                    logger.info(" Created/verified api_request_logs table")
 
                     # Initialize forecasting tables and seed default data
                     SchemaManager.initialize_forecasting_tables(tenant_id, database_name)
@@ -428,7 +489,8 @@ class SchemaManager:
                             INSERT INTO field_catalogue_metadata (target_field_name, date_field_name)
                             VALUES (%s, %s)
                         """, (target_field.field_name, date_field.field_name))
-                    
+
+                   
                     conn.commit()
                     logger.info(
                         f" Created master_data and sales_data tables in {database_name} with "

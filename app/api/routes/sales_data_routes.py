@@ -3,7 +3,7 @@ Sales Data API Routes.
 Endpoints for retrieving sales data records with flexible filtering.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query # type: ignore
 from typing import Dict, Any, List, Optional
 from datetime import date
 from app.schemas.sales_data import (
@@ -111,7 +111,7 @@ async def get_sales_data_records_simple(
     page_size: int = Query(100, ge=1, le=1000, description="Records per page"),
     # Sorting
     sort_by: Optional[str] = Query(None, description="Sort field"),
-    sort_order: str = Query("asc", regex="^(asc|desc)$", description="Sort order"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$", description="Sort order"),
     tenant_data: Dict = Depends(get_tenant_database),
     _: Dict = Depends(require_object_access("Sales Data"))
 ):

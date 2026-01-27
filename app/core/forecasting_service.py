@@ -507,6 +507,66 @@ class ForecastingService:
             raise DatabaseException(f"Failed to get aggregation combinations: {str(e)}")
 
     @staticmethod
+    def _get_dimension_fields(tenant_id: str, database_name: str) -> List[str]:
+        """
+        Get all dimension fields (non-characteristic, non-target, non-date) from field catalogue.
+        These are the fields that can be used for aggregation.
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            
+        Returns:
+            List of dimension field names
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Get finalized field catalogue
+                    cursor.execute("""
+                        SELECT fields_json
+                        FROM field_catalogue
+                        WHERE status = 'FINALIZED'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """)
+                    
+                    result = cursor.fetchone()
+                    if not result:
+                        logger.warning("No finalized field catalogue found")
+                        return []
+                    
+                    import json
+                    fields_json = result[0]
+                    if isinstance(fields_json, str):
+                        fields = json.loads(fields_json)
+                    else:
+                        fields = fields_json
+                    
+                    # Get all base dimension fields (non-characteristic, non-target, non-date)
+                    dimension_fields = []
+                    for field in fields:
+                        is_characteristic = field.get("is_characteristic", False)
+                        is_target = field.get("is_target_variable", False)
+                        is_date = field.get("is_date_field", False)
+                        
+                        # Only include base dimensions (not characteristics, target, or date)
+                        if not is_characteristic and not is_target and not is_date:
+                            dimension_fields.append(field["field_name"])
+                    
+                    logger.info(f"Retrieved {len(dimension_fields)} dimension fields: {dimension_fields}")
+                    return dimension_fields
+                    
+                finally:
+                    cursor.close()
+                    
+        except Exception as e:
+            logger.error(f"Failed to get dimension fields: {str(e)}")
+            return []
+    @staticmethod
     def prepare_aggregated_data(
         tenant_id: str,
         database_name: str,

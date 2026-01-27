@@ -84,11 +84,9 @@ async def get_field_values(
         )
 
         response_data = FieldValuesResponse(
-            field_name=request.field_name,
-            values=values,
-            total_count=len(values)
+            field_values={request.field_name: [v["value"] for v in values]}
         )
-        return ResponseHandler.success(data=response_data.dict())
+        return ResponseHandler.success(data=response_data.field_values)
 
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -118,14 +116,20 @@ async def get_multiple_field_values(
                 detail="Master data not found. Please ensure field catalogue is finalized and data is uploaded."
             )
 
-        field_values = MasterDataService.get_multiple_field_values(
+        field_values_raw = MasterDataService.get_multiple_field_values(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             field_selections=request.field_selections
         )
 
-        response_data = MultipleFieldValuesResponse(field_values=field_values)
-        return ResponseHandler.success(data=response_data.dict())
+        # Transform to field_name: [values] format
+        transformed_values = {
+            field_name: [v["value"] for v in values]
+            for field_name, values in field_values_raw.items()
+        }
+
+        response_data = MultipleFieldValuesResponse(field_values=transformed_values)
+        return ResponseHandler.success(data=response_data.field_values)
 
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -175,11 +179,9 @@ async def get_field_values_simple(
         )
 
         response_data = FieldValuesResponse(
-            field_name=field_name,
-            values=values,
-            total_count=len(values)
+            field_values={field_name: [v["value"] for v in values]}
         )
-        return ResponseHandler.success(data=response_data.dict())
+        return ResponseHandler.success(data=response_data.field_values)
 
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
