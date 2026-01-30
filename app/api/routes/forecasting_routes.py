@@ -13,7 +13,8 @@ from app.schemas.forecasting import (
     ForecastVersionUpdate,
     ExternalFactorCreate,
     ExternalFactorUpdate,
-    DisaggregationRequest
+    DisaggregationRequest,
+    DisaggregateDataRequest
 )
 
 
@@ -898,3 +899,76 @@ async def copy_forecast(
     except Exception as e:
         logger.error(f"Error copying forecast: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.post("/disaggregate-data", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def disaggregate_data(
+    request: DisaggregateDataRequest,
+    page: int = Query(1, ge=1, description="Page number for pagination"),
+    page_size: int = Query(50, ge=1, le=100, description="Records per page"),
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
+):
+    """
+    Disaggregate sales, forecast, and final plan data to a more granular level.
+    
+    This endpoint takes aggregated data (e.g., by Product) and breaks it down
+    to a finer granularity (e.g., Product-Location) using historical sales distribution.
+    
+    **Process:**
+    1. Calculates historical distribution ratios from sales_data
+    2. Returns granular sales data (already at target level)
+    3. Disaggregates forecast_data using calculated ratios
+    4. Disaggregates final_plan using calculated ratios
+    
+    **Example Request:**
+```json
+    {
+        "aggregation_level": ["product", "location"],
+        "filters": {
+            "product": "19191"
+        },
+        "date_from": "2025-01-01",
+        "date_to": "2025-12-31",
+        "interval": "MONTHLY"
+    }
+```
+    
+    **Response Format (Same as /aggregated-data):**
+    - `records`: Array of dimension groups with their sales, forecast, and final plan data
+    - `total_count`: Total number of unique dimension combinations
+    - Each record contains:
+      - `master_data`: The dimension values for this group
+      - `sales_data`: Array with date, UOM, Quantity
+      - `forecast_data`: Array with date, UOM, Quantity
+      - `final_plan`: Array with date, UOM, Quantity
+    
+    **Use Case:**
+    View Product 19191's sales, forecast, and final plan broken down by location
+    in the dashboard, with values calculated based on historical location distribution.
+    """
+    try:
+        logger.info(
+            f"Disaggregating data to level {request.aggregation_level} "
+            f"for tenant {tenant_data['tenant_id']} (Page {page}, Size {page_size})"
+        )
+        
+        result = ForecastingService.disaggregate_data(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            request=request,
+            page=page,
+            page_size=page_size
+        )
+        
+        return ResponseHandler.list_response(
+            data=result["records"],
+            page=page,
+            page_size=page_size,
+            total_count=result["total_count"]
+        )
+    
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error in disaggregate-data endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

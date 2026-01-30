@@ -7,6 +7,7 @@ Changes:
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict
+from app.schemas.sales_data import SalesDataFilter
 
 # Parameter Schema Models
 class ParameterDefinition(BaseModel):
@@ -138,3 +139,19 @@ class DisaggregationRequest(BaseModel):
     history_start: Optional[str] = None
     history_end: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
+
+class DisaggregateDataRequest(BaseModel):
+    """Request for disaggregating sales, forecast, and final plan data"""
+    aggregation_level: List[str] = Field(..., description="Target aggregation level fields, e.g. ['product', 'location']")
+    filters: Optional[List[SalesDataFilter]] = Field(None, description="List of filters to apply. Each filter specifies a field and its values.")
+    date_from: Optional[str] = Field(None, description="Start date in YYYY-MM-DD format")
+    date_to: Optional[str] = Field(None, description="End date in YYYY-MM-DD format")
+    interval: str = Field("MONTHLY", description="Time interval: WEEKLY, MONTHLY, QUARTERLY, YEARLY")
+
+class DisaggregateDataResponse(BaseModel):
+    """Response containing disaggregated data"""
+    aggregation_level: List[str]
+    date_range: Dict[str, str]
+    interval: str
+    disaggregated_data: List[Dict[str, Any]]
+    summary: Dict[str, Any]
