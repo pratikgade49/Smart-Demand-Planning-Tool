@@ -4,9 +4,8 @@
       "field_name": "product",
       "data_type": "Char",
       "field_length": 50,
-      "is_characteristic": true,
+      "is_characteristic": false,
       "is_unique_key": true,
-      "parent_field_name": "product_group",
       "description": "Product identifier"
     },
     {
@@ -16,7 +15,7 @@
       "is_characteristic": true,
       "description": "Product group"
     },
-
+ 
     {
       "field_name": "product_heirarchy",
       "data_type": "Char",
@@ -29,8 +28,8 @@
       "field_name": "customer",
       "data_type": "Char",
       "field_length": 50,
-      "is_characteristic": true,
       "is_unique_key": true,
+      "is_characteristic": false,
       "description": "Customer identifier"
     },
     {
@@ -40,7 +39,7 @@
       "is_characteristic": true,
       "description": "Customer group"
     },
-
+ 
     {
       "field_name": "customer_region",
       "data_type": "Char",
@@ -64,7 +63,7 @@
       "is_characteristic": true,
       "description": "Location region"
     },
-
+ 
     {
       "field_name": "ship_to_party",
       "data_type": "Char",
@@ -104,8 +103,48 @@
     {
       "field_name": "unit_price",
       "data_type": "Decimal",
-      "is_characteristic": false,
+      "is_characteristic": true,
       "description": "Unit price"
     }
   ]
+}
+
+
+{
+  "version_id": "09e4a66e-d39d-4322-bee4-0ff27bc7864d",
+  "forecast_filters": {
+    "aggregation_level": "product",
+    "interval": "MONTHLY",
+    "product": ["19191"]
+  },
+  "forecast_start": "2025-06-01",
+  "forecast_end": "2025-12-01"
+}
+
+{
+  "cpu_size": "4-core",
+  "db_space": "100GB",
+  "network_load_gb_month": 100.5,
+  "no_of_users": 50,
+  "subscription": "Enterprise",
+  "subscription_end_date": "2024-12-31",
+  "subscription_start_date": "2024-01-01",
+  "tenant_identifier": "sekhmet_pharmaventures",
+  "tenant_name": "sekhmet_pharmaventures"
+}
+
+
+{
+  "email": "test@yash.com",
+  "first_name": "John",
+  "last_name": "Doe",
+  "password": "test@123",
+  "role": "manager",
+  "tenant_id": "a32e8a2f-1513-4889-b801-8056ca93c733"
+}
+
+{
+  "email": "test@yash.com",
+  "password": "test@123",
+  "tenant_identifier": "sekhmet_pharmaventures"
 }

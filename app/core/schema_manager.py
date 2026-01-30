@@ -453,6 +453,12 @@ class SchemaManager:
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
 
+                            -- Disaggregation tracking columns
+                            type VARCHAR(20) DEFAULT 'manual',
+                            disaggregation_level VARCHAR(255),
+                            source_aggregation_level VARCHAR(255),
+                            source_forecast_run_id UUID,
+
                             -- Audit fields (created only - transactions are immutable)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL,
@@ -475,7 +481,9 @@ class SchemaManager:
                     
                     cursor.execute(f'CREATE INDEX idx_final_plan_date ON final_plan("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_final_plan_master_id ON final_plan(master_id)')
-                    
+                    cursor.execute('CREATE INDEX idx_final_plan_type ON final_plan(type)')
+                    cursor.execute('CREATE INDEX idx_final_plan_source_forecast_run_id ON final_plan(source_forecast_run_id)')
+                    cursor.execute('CREATE INDEX idx_final_plan_disaggregation_level ON final_plan(disaggregation_level)')
                     # Store metadata about target and date fields
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue_metadata (

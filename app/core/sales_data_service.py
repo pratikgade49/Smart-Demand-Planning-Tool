@@ -41,9 +41,11 @@ class SalesDataService:
                 LIMIT 1
             """)
             result = cursor.fetchone()
-            if not result:
+            if not result or len(result) < 2:
                 raise NotFoundException("Field catalogue metadata not found. Please create a field catalogue first.")
             return result[0], result[1]
+        except NotFoundException:
+            raise
         except Exception as e:
             logger.error(f"Error retrieving field names from metadata: {str(e)}")
             raise DatabaseException(f"Failed to retrieve field catalogue metadata: {str(e)}")

@@ -637,7 +637,7 @@ class ForecastComparisonService:
                 """)
 
                 result = cursor.fetchone()
-                if not result:
+                if not result or len(result) < 2:
                     raise ValidationException(
                         "Field catalogue not finalized. Please finalize your field catalogue first."
                     )

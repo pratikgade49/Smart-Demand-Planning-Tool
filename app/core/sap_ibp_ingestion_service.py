@@ -501,7 +501,7 @@ class SapIbpIngestionService:
                     LIMIT 1
                 """)
                 result = cursor.fetchone()
-                if result:
+                if result and len(result) >= 2:
                     return result[0], result[1]
                 else:
                     # Default fallback if no metadata exists

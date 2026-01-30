@@ -12,7 +12,8 @@ from app.schemas.forecasting import (
     ForecastVersionCreate,
     ForecastVersionUpdate,
     ExternalFactorCreate,
-    ExternalFactorUpdate
+    ExternalFactorUpdate,
+    DisaggregationRequest
 )
 
 
@@ -341,6 +342,64 @@ async def get_forecast_mapping_details(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Error getting mapping details: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@router.post("/disaggregate", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def disaggregate_forecast(
+    request: DisaggregationRequest,
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
+):
+    """
+    Disaggregate an aggregated forecast run into a more granular level
+    based on historical distribution patterns.
+    """
+    try:
+        logger.info(f"Disaggregating forecast run {request.forecast_run_id} to {request.target_aggregation_level}")
+        result = ForecastingService.disaggregate_forecast(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            request=request,
+            user_email=tenant_data["email"]
+        )
+        return ResponseHandler.success(data=result, status_code=200)
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error in disaggregation endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@router.get("/disaggregated/get", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+async def get_disaggregated_forecast(
+    forecast_run_id: str = Query(..., description="Forecast run ID"),
+    aggregation_level: Optional[str] = Query(None, description="Filter by aggregation level"),
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Forecast"))
+):
+    """
+    Get disaggregated forecast data for a forecast run.
+    
+    - **forecast_run_id**: ID of the forecast run
+    - **aggregation_level**: Optional filter by aggregation level (e.g., 'product', 'region')
+    
+    Returns disaggregated forecast results with detailed breakdown by dimensions.
+    """
+    try:
+        if not forecast_run_id.strip():
+            raise HTTPException(status_code=400, detail="forecast_run_id is required")
+        
+        logger.info(f"Retrieving disaggregated forecast for run {forecast_run_id}")
+        result = ForecastingService.get_disaggregated_forecast_data(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            forecast_run_id=forecast_run_id,
+            aggregation_level=aggregation_level
+        )
+        return ResponseHandler.success(data=result, status_code=200)
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error retrieving disaggregated forecast: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.post("/versions", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)

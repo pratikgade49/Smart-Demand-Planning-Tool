@@ -26,7 +26,8 @@ from app.schemas.forecasting import (
     ForecastRunCreate,
     ForecastRunResponse,
     AlgorithmMappingResponse,
-    ForecastResultResponse
+    ForecastResultResponse,
+    DisaggregationRequest
 )
 
 logger = logging.getLogger(__name__)
@@ -1008,6 +1009,231 @@ class ForecastingService:
             raise DatabaseException(f"Failed to save forecast results: {str(e)}")
 
     @staticmethod
+    def calculate_historical_ratios(
+        tenant_id: str,
+        database_name: str,
+        source_aggregation_level: str,
+        target_aggregation_level: str,
+        interval: str = "MONTHLY",
+        history_start: Optional[str] = None,
+        history_end: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> pd.DataFrame:
+        """
+        Calculate historical split ratios from source level to target level.
+        
+        Args:
+            interval: Forecast interval (WEEKLY, MONTHLY, QUARTERLY, YEARLY) to match the forecast granularity
+        """
+        # Get target level aggregated data using the same interval as the forecast
+        df_target, _ = ForecastingService.prepare_aggregated_data(
+            tenant_id=tenant_id,
+            database_name=database_name,
+            aggregation_level=target_aggregation_level,
+            interval=interval,
+            filters=filters,
+            history_start=history_start,
+            history_end=history_end
+        )
+
+        if df_target.empty:
+            return pd.DataFrame()
+
+        # Source columns
+        source_cols = ForecastingService._get_aggregation_columns(
+            tenant_id, database_name, source_aggregation_level
+        )
+        
+        # Target columns
+        target_cols = ForecastingService._get_aggregation_columns(
+            tenant_id, database_name, target_aggregation_level
+        )
+
+        # Group by source columns and calculate total volume
+        source_totals = df_target.groupby(source_cols)['total_quantity'].sum().reset_index()
+        source_totals.rename(columns={'total_quantity': 'source_total_volume'}, inplace=True)
+
+        # Group by target columns and calculate total volume
+        target_totals = df_target.groupby(target_cols)['total_quantity'].sum().reset_index()
+        target_totals.rename(columns={'total_quantity': 'target_total_volume'}, inplace=True)
+
+        # Join to calculate ratios
+        ratios_df = pd.merge(target_totals, source_totals, on=source_cols)
+        ratios_df['allocation_factor'] = ratios_df['target_total_volume'] / ratios_df['source_total_volume']
+        
+        # Handle division by zero
+        ratios_df['allocation_factor'] = ratios_df['allocation_factor'].fillna(0)
+
+        return ratios_df
+
+    @staticmethod
+    def disaggregate_forecast(
+        tenant_id: str,
+        database_name: str,
+        request: DisaggregationRequest,
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Disaggregate an existing forecast run to a more granular level.
+        """
+        # 1. Get original forecast run to understand source level
+        forecast_run = ForecastingService.get_forecast_run(
+            tenant_id, database_name, request.forecast_run_id
+        )
+        
+        source_filters = forecast_run.get('forecast_filters', {})
+        source_level = source_filters.get('aggregation_level', 'product')
+        source_interval = source_filters.get('interval', 'MONTHLY')
+        
+        # 2. Calculate historical ratios using the same interval as the source forecast
+        ratios_df = ForecastingService.calculate_historical_ratios(
+            tenant_id=tenant_id,
+            database_name=database_name,
+            source_aggregation_level=source_level,
+            target_aggregation_level=request.target_aggregation_level,
+            interval=source_interval,
+            history_start=request.history_start,
+            history_end=request.history_end,
+            filters=request.filters
+        )
+        
+        if ratios_df.empty:
+            raise ValidationException("No historical data found to calculate disaggregation ratios")
+
+        db_manager = get_db_manager()
+        disaggregated_count = 0
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Get date_field and target_field from field catalogue
+                    from app.core.sales_data_service import SalesDataService
+                    date_field, target_field = SalesDataService._get_field_names(cursor)
+                    
+                    # 3. Get best algorithm results for this run
+                    # We only disaggregate the best performing results (or all?)
+                    # Usually disaggregation is applied to the 'final' or 'best' forecast.
+                    cursor.execute("""
+                        SELECT fam.mapping_id, fam.algorithm_id
+                        FROM forecast_algorithms_mapping fam
+                        LEFT JOIN forecast_results fr ON fam.mapping_id = fr.mapping_id
+                        WHERE fam.forecast_run_id = %s
+                          AND fam.execution_status = 'Completed'
+                        GROUP BY fam.mapping_id, fam.algorithm_id
+                        ORDER BY AVG(fr.accuracy_metric) DESC
+                        LIMIT 1
+                    """, (request.forecast_run_id,))
+                    
+                    mapping_row = cursor.fetchone()
+                    if not mapping_row:
+                        raise NotFoundException("Forecast Results", request.forecast_run_id)
+                    
+                    mapping_id, algorithm_id = mapping_row
+                    
+                    # 4. Fetch aggregated results (only future forecast as requested)
+                    cursor.execute("""
+                        SELECT date, value, type, metadata
+                        FROM forecast_results
+                        WHERE mapping_id = %s
+                          AND type = 'future_forecast'
+                    """, (mapping_id,))
+                    
+                    agg_results = cursor.fetchall()
+                    
+                    source_cols = ForecastingService._get_aggregation_columns(
+                        tenant_id, database_name, source_level
+                    )
+                    target_cols = ForecastingService._get_aggregation_columns(
+                        tenant_id, database_name, request.target_aggregation_level
+                    )
+
+                    import json
+                    for row in agg_results:
+                        f_date, f_value, f_type, f_metadata = row
+                        if isinstance(f_metadata, str):
+                            f_metadata = json.loads(f_metadata)
+                        
+                        entity_filter = f_metadata.get('entity_filter', {})
+                        
+                        # Match this aggregated result with relevant ratios
+                        # Filter ratios_df by entity_filter (which contains source level values)
+                        mask = pd.Series(True, index=ratios_df.index)
+                        for col, val in entity_filter.items():
+                            if col in ratios_df.columns:
+                                mask &= (ratios_df[col].astype(str) == str(val))
+                        
+                        relevant_ratios = ratios_df[mask]
+                        
+                        for _, ratio_row in relevant_ratios.iterrows():
+                            disagg_value = float(f_value) * float(ratio_row['allocation_factor'])
+                            
+                            # Create new granular entity filter to resolve master_id
+                            new_entity_filter = {col: ratio_row[col] for col in target_cols}
+                            
+                            # Resolve master_id for the granular entity
+                            master_id = ForecastingService._resolve_master_id(
+                                cursor, new_entity_filter
+                            )
+                            
+                            # Get UOM from sales_data
+                            cursor.execute(
+                                """
+                                SELECT uom, unit_price
+                                FROM sales_data
+                                WHERE master_id = %s
+                                ORDER BY created_at DESC LIMIT 1
+                                """,
+                                (master_id,),
+                            )
+                            sales_row = cursor.fetchone()
+                            uom = sales_row[0] if sales_row else 'EA'
+                            unit_price = sales_row[1] if sales_row else None
+                            
+                            # Insert granular result into final_plan table
+                            final_plan_id = str(uuid.uuid4())
+                            
+                            # Build disaggregation_level string from target columns
+                            disaggregation_level = '-'.join(target_cols)
+                            source_aggregation_level = '-'.join(source_cols)
+                            
+                            cursor.execute(f"""
+                                INSERT INTO final_plan
+                                (final_plan_id, master_id, "{date_field}", "{target_field}",
+                                 uom, unit_price, type, disaggregation_level, 
+                                 source_aggregation_level, source_forecast_run_id, created_by)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                final_plan_id,
+                                master_id,
+                                f_date,
+                                disagg_value,
+                                uom,
+                                unit_price,
+                                'disaggregated',
+                                disaggregation_level,
+                                source_aggregation_level,
+                                request.forecast_run_id,
+                                user_email
+                            ))
+                            disaggregated_count += 1
+                    
+                    conn.commit()
+                    return {
+                        "status": "success",
+                        "disaggregated_records": disaggregated_count,
+                        "message": f"Successfully disaggregated forecast into {disaggregated_count} granular records in final_plan table"
+                    }
+                    
+                finally:
+                    cursor.close()
+        except Exception as e:
+            logger.error(f"Disaggregation failed: {str(e)}")
+            if isinstance(e, (ValidationException, NotFoundException)):
+                raise
+            raise DatabaseException(f"Failed to disaggregate forecast: {str(e)}")
+
+    @staticmethod
     def _resolve_master_id(cursor, entity_filter: Dict[str, Any]) -> str:
         if not entity_filter:
             raise ValidationException("Entity filter is required for master data lookup")
@@ -1043,3 +1269,131 @@ class ForecastingService:
         uom = sales_row[0] if sales_row else "UNIT"
         unit_price = sales_row[1] if sales_row else 0
         return uom, unit_price
+    @staticmethod
+    def get_disaggregated_forecast_data(
+        tenant_id: str,
+        database_name: str,
+        forecast_run_id: str,
+        aggregation_level: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieve disaggregated forecast data for a given forecast run.
+        
+        Returns detailed forecast records with dimension breakdowns.
+        """
+        db_manager = get_db_manager()
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Get forecast run details
+                    cursor.execute("""
+                        SELECT forecast_run_id, version_id, forecast_filters, 
+                               created_at, run_status
+                        FROM forecast_runs
+                        WHERE forecast_run_id = %s
+                    """, (forecast_run_id,))
+                    
+                    run_info = cursor.fetchone()
+                    if not run_info:
+                        raise NotFoundException("Forecast Run", forecast_run_id)
+                    
+                    run_id, version_id, forecast_filters, created_at, run_status = run_info
+                    
+                    # Get disaggregated results
+                    query = """
+                        SELECT 
+                            fr.result_id,
+                            fr.date,
+                            fr.value,
+                            fr.type,
+                            fr.metadata,
+                            fam.algorithm_id,
+                            a.algorithm_name,
+                            fr.accuracy_metric,
+                            fr.created_at
+                        FROM forecast_results fr
+                        JOIN forecast_algorithms_mapping fam ON fr.mapping_id = fam.mapping_id
+                        JOIN algorithms a ON fam.algorithm_id = a.algorithm_id
+                        WHERE fr.forecast_run_id = %s
+                          AND fr.metadata IS NOT NULL
+                    """
+                    
+                    params = [forecast_run_id]
+                    
+                    # Apply optional aggregation level filter
+                    if aggregation_level:
+                        query += " AND fr.metadata::jsonb->>'aggregation_level' = %s"
+                        params.append(aggregation_level)
+                    
+                    query += " ORDER BY fr.date, fr.value DESC"
+                    
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    
+                    import json
+                    
+                    disaggregated_records = []
+                    for row in results:
+                        result_id, date, value, f_type, metadata, algo_id, algo_name, accuracy, created_at = row
+                        
+                        # Parse metadata
+                        if isinstance(metadata, str):
+                            try:
+                                metadata_dict = json.loads(metadata)
+                            except json.JSONDecodeError:
+                                metadata_dict = {}
+                        else:
+                            metadata_dict = metadata if metadata else {}
+                        
+                        record = {
+                            "result_id": result_id,
+                            "date": date.isoformat() if hasattr(date, 'isoformat') else str(date),
+                            "value": float(value),
+                            "type": f_type,
+                            "algorithm_id": algo_id,
+                            "algorithm_name": algo_name,
+                            "accuracy_metric": float(accuracy) if accuracy else None,
+                            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else str(created_at),
+                            "dimensions": metadata_dict.get('entity_filter', {}),
+                            "disaggregated_from": metadata_dict.get('disaggregated_from'),
+                            "additional_metadata": {
+                                k: v for k, v in metadata_dict.items() 
+                                if k not in ['entity_filter', 'disaggregated_from']
+                            }
+                        }
+                        disaggregated_records.append(record)
+                    
+                    # Summary statistics
+                    if disaggregated_records:
+                        total_value = sum(r['value'] for r in disaggregated_records)
+                        avg_value = total_value / len(disaggregated_records)
+                        min_value = min(r['value'] for r in disaggregated_records)
+                        max_value = max(r['value'] for r in disaggregated_records)
+                    else:
+                        total_value = avg_value = min_value = max_value = 0
+                    
+                    return {
+                        "forecast_run_id": run_id,
+                        "status": run_status,
+                        "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else str(created_at),
+                        "record_count": len(disaggregated_records),
+                        "summary": {
+                            "total_value": total_value,
+                            "average_value": avg_value,
+                            "min_value": min_value,
+                            "max_value": max_value,
+                            "unique_dates": len(set(r['date'] for r in disaggregated_records)) if disaggregated_records else 0
+                        },
+                        "disaggregated_records": disaggregated_records
+                    }
+                    
+                finally:
+                    cursor.close()
+                    
+        except (ValidationException, NotFoundException):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to retrieve disaggregated forecast data: {str(e)}")
+            raise DatabaseException(f"Failed to retrieve disaggregated forecast data: {str(e)}")

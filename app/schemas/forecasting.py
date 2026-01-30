@@ -131,3 +131,10 @@ class ForecastResultResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     created_at: str
     created_by: str
+
+class DisaggregationRequest(BaseModel):
+    forecast_run_id: str
+    target_aggregation_level: str
+    history_start: Optional[str] = None
+    history_end: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
