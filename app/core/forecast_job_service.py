@@ -811,6 +811,14 @@ class ForecastJobService:
                             algo_id = request_data.get("algorithm_id")
                             if algo_id is not None:
                                 algorithm_ids.add(algo_id)
+                            algorithms = request_data.get("algorithms")
+                            if isinstance(algorithms, list):
+                                for algo in algorithms:
+                                    if not isinstance(algo, dict):
+                                        continue
+                                    list_algo_id = algo.get("algorithm_id")
+                                    if list_algo_id is not None:
+                                        algorithm_ids.add(list_algo_id)
 
                     algorithm_names = {}
                     if algorithm_ids:
@@ -844,6 +852,25 @@ class ForecastJobService:
                             if algo_id is not None and "algorithm_name" not in request_payload:
                                 request_payload = dict(request_payload)
                                 request_payload["algorithm_name"] = algorithm_names.get(algo_id)
+                            algorithms = request_payload.get("algorithms")
+                            if isinstance(algorithms, list):
+                                updated_algorithms = []
+                                for algo in algorithms:
+                                    if not isinstance(algo, dict):
+                                        continue
+                                    algo_id = algo.get("algorithm_id")
+                                    if algo_id is None:
+                                        updated_algorithms.append(algo)
+                                        continue
+                                    if "algorithm_name" in algo and algo["algorithm_name"]:
+                                        updated_algorithms.append(algo)
+                                        continue
+                                    updated_algo = dict(algo)
+                                    updated_algo["algorithm_name"] = algorithm_names.get(algo_id)
+                                    updated_algorithms.append(updated_algo)
+                                if updated_algorithms:
+                                    request_payload = dict(request_payload)
+                                    request_payload["algorithms"] = updated_algorithms
                         jobs.append({
                             "job_id": str(job_id),
                             "status": status,   

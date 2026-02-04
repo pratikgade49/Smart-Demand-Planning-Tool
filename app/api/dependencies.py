@@ -9,6 +9,7 @@ from typing import Dict, Any
 from app.core.auth_service import AuthService
 from app.core.exceptions import AuthenticationException
 import logging
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,8 @@ def require_object_access(object_name: str, min_role_id: int = 1):
         from app.core.rbac_service import RBACService
 
         try:
+            if settings.ENABLE_ROLE is False:
+                return current_user
             has_access = RBACService.check_user_role_access(
                 current_user["user_id"],
                 object_name,

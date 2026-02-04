@@ -526,8 +526,6 @@ class ForecastExecutionService:
             )
             aggregation_level = forecast_run.get('forecast_filters', {}).get('aggregation_level')
             
-            logger.info(f"Aggregation level: {aggregation_level}")
-            
             # Train-test split
             train_ratio = 0.85
             n = len(historical_data)
@@ -1398,99 +1396,122 @@ This makes the trend robust to spikes and outliers
         return forecast, metrics
 
 
-    @staticmethod
-    def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """Simple Moving Average forecast."""
-        y = data['total_quantity'].values if 'total_quantity' in data.columns else data['quantity'].values
 
-        # Calculate moving average
-        if len(y) < window:
-            avg = np.mean(y)
+    @staticmethod
+    def simple_moving_average(data: pd.DataFrame, periods: int, window: int = 3) -> tuple:
+        """
+        Improved moving average forecasting with trend adjustment.
+        Generates a proper forecast sequence by iteratively updating the moving average.
+        """
+        if 'total_quantity' in data.columns:
+            y = data['total_quantity'].values
+        elif 'quantity' in data.columns:
+            y = data['quantity'].values
         else:
-            avg = np.mean(y[-window:])
-
-        forecast = np.array([avg] * periods)
-
-        # Simple metrics
-        predicted = np.array([np.mean(y[max(0, i-window):i+1]) for i in range(len(y))])
-        metrics = ForecastExecutionService.calculate_metrics(y, predicted)
-
-        # Prepare test forecast
-        test_results = {
-            'test_forecast': predicted,
-            'test_dates': data['period'].tolist() if 'period' in data.columns else []
-        }
-
-        return forecast, metrics 
+            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+        
+        n = len(y)
+        window = min(max(3, window), n)
+        
+        logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
+        
+        # Calculate trend from recent data using linear regression
+        trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
+        recent_values = y[-trend_window:]
+        x_trend = np.arange(trend_window)
+        
+        from sklearn.linear_model import LinearRegression
+        trend_model = LinearRegression()
+        trend_model.fit(x_trend.reshape(-1, 1), recent_values)
+        trend_slope = float(trend_model.coef_[0])
+        
+        # Calculate base moving average
+        base_ma = float(np.mean(y[-window:]))
+        
+        # ✅ CRITICAL FIX: Generate forecast by rolling forward with trend
+        # Instead of just extrapolating, we update the moving average as we forecast
+        forecast = []
+        
+        # Start with the last 'window' actual values
+        current_values = list(y[-window:])
+        
+        for i in range(periods):
+            # Calculate moving average of current window
+            current_ma = np.mean(current_values)
+            
+            # Apply trend with dampening
+            damping = 0.95 ** i  # Exponential decay
+            trend_adjustment = trend_slope * damping
+            
+            # Next forecast = current MA + trend
+            next_value = current_ma + trend_adjustment
+            
+            # Apply reasonable bounds
+            y_min, y_max = float(np.min(y)), float(np.max(y))
+            min_bound = y_min * 0.5
+            max_bound = y_max * 1.5
+            next_value = np.clip(next_value, min_bound, max_bound)
+            next_value = max(0, next_value)
+            
+            forecast.append(next_value)
+            
+            # ✅ KEY: Update the rolling window with the new forecast
+            current_values = current_values[1:] + [next_value]
+        
+        forecast = np.array(forecast)
+        
+        # Calculate fitted values for metrics (simple moving averages on historical data)
+        fitted = []
+        for i in range(n):
+            start_idx = max(0, i - window + 1)
+            fitted.append(np.mean(y[start_idx:i+1]))
+        
+        fitted = np.array(fitted)
+        
+        # Calculate metrics (skip warm-up period)
+        if n > window:
+            metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
+        else:
+            metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+        
+        logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
+        logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
+        logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
+        
+        return forecast, metrics
 
     @staticmethod
-    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float]]:
+    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
         """Prophet forecasting using Facebook's Prophet library."""
         try:
             if Prophet is None:
                 logger.warning("Prophet library not installed, falling back to Exponential Smoothing")
                 return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
-            # Clean the input data
-            data_clean = data.copy().reset_index(drop=True)
-            logger.info(f"Prophet DEBUG: Initial data shape: {data_clean.shape}, columns: {list(data_clean.columns)}")
-            
-            # Prepare quantity values
-            if 'total_quantity' in data_clean.columns:
-                y_col = 'total_quantity'
-            elif 'quantity' in data_clean.columns:
-                y_col = 'quantity'
+            # Prepare data for Prophet
+            if 'total_quantity' in data.columns:
+                y_values = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y_values = data['quantity'].values
             else:
                 raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
 
-            # Get date column
-            if 'period' in data_clean.columns:
-                date_col = 'period'
-            elif 'date' in data_clean.columns:
-                date_col = 'date'
+            # Get dates from data if available, otherwise create sequential dates
+            if 'test_date' in data.columns:
+                dates = pd.to_datetime(data['period'])
             else:
-                # Create sequential dates if no date column
-                data_clean['period'] = pd.date_range(end=datetime.now(), periods=len(data_clean), freq='MS')
-                date_col = 'period'
+                # Create dates starting from today
+                dates = pd.date_range(end=datetime.now(), periods=len(y_values), freq='MS')
 
-            logger.info(f"Prophet DEBUG: Using date_col='{date_col}', y_col='{y_col}'")
-
-            # ✅ STEP 1: Select only required columns first
-            # Use iloc to select only the first occurrence if multiple columns have same name
-            if date_col in data_clean.columns:
-                ds_data = data_clean[date_col]
-                if isinstance(ds_data, pd.DataFrame):
-                    ds_data = ds_data.iloc[:, 0]
-            else:
-                raise ValueError(f"Date column '{date_col}' not found")
-                
-            if y_col in data_clean.columns:
-                y_data = data_clean[y_col]
-                if isinstance(y_data, pd.DataFrame):
-                    y_data = y_data.iloc[:, 0]
-            else:
-                raise ValueError(f"Quantity column '{y_col}' not found")
-
-            data_subset = pd.DataFrame({
-                'ds': ds_data.values,
-                'y': y_data.values
+            # Create Prophet dataframe
+            prophet_data = pd.DataFrame({
+                'ds': dates,
+                'y': y_values
             })
-            
-            # ✅ STEP 2: Drop NaN values
-            # data_subset = data_subset.dropna()
-            
-            if len(data_subset) < 3:
-                raise ValueError(f"Need at least 3 data points for Prophet, got {len(data_subset)}")
 
-            # ✅ STEP 3: Convert dates with error handling
-            data_subset['ds'] = pd.to_datetime(data_subset['ds'], errors='coerce')
-            data_subset = data_subset.dropna(subset=['ds'])
-            
-            if len(data_subset) < 3:
-                raise ValueError(f"After cleaning dates, only {len(data_subset)} data points remain")
-
-            n = len(data_subset)
-            logger.info(f"Prophet: Training on {n} periods, forecasting {periods} periods")
+            n = len(prophet_data)
+            if n < 3:
+                raise ValueError("Need at least 3 historical data points for Prophet")
 
             # Initialize and fit Prophet model
             model = Prophet(
@@ -1503,46 +1524,35 @@ This makes the trend robust to spikes and outliers
             )
             
             # Suppress Prophet's verbose output
-            import logging as py_logging
-            py_logging.getLogger('prophet').setLevel(py_logging.WARNING)
-            py_logging.getLogger('cmdstanpy').setLevel(py_logging.WARNING)
-            
             with pd.option_context('mode.chained_assignment', None):
-                model.fit(data_subset)
+                model.fit(prophet_data)
 
-            # Create future dataframe and predict
+            # Create future dataframe
             future = model.make_future_dataframe(periods=periods, freq='MS')
             forecast_df = model.predict(future)
 
-            logger.info(f"Prophet: Prediction complete - forecast_df has {len(forecast_df)} rows")
-
-            # Extract future forecast: last 'periods' rows
+            # Extract forecast values
             forecast = forecast_df['yhat'].values[-periods:]
-            forecast = np.maximum(forecast, 0)
+            forecast = np.maximum(forecast, 0)  # Ensure non-negative
 
-            # Extract fitted values: first n rows
+            # Calculate metrics on historical data
             fitted_values = forecast_df['yhat'].values[:n]
-            y_actual = prophet_data['y'].values
-            
-            # Final safety check
-            if len(fitted_values) != len(y_actual):
-                logger.warning(f"Prophet: Length mismatch in metrics - fitted={len(fitted_values)}, actual={len(y_actual)}")
-                min_len = min(len(fitted_values), len(y_actual))
-                fitted_values = fitted_values[:min_len]
-                y_actual = y_actual[:min_len]
+            metrics = ForecastExecutionService.calculate_metrics(y_values, fitted_values)
 
-            # Calculate metrics
-            metrics = ForecastExecutionService.calculate_metrics(y_actual, fitted_values)
+            # Prepare test forecast
+            test_results = {
+                'test_forecast': fitted_values,
+                'test_dates': data['period'].tolist() if 'period' in data.columns else []
+            }
 
-            logger.info(f"Prophet: Completed - MAE={metrics['mae']:.2f}, Accuracy={metrics['accuracy']:.2f}%")
-            return forecast, metrics
+            logger.info(f"Prophet forecast completed with {periods} periods")
+            return forecast, metrics 
 
         except ImportError:
             logger.warning("Prophet library not available, falling back to Exponential Smoothing")
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
         except Exception as e:
             logger.warning(f"Prophet forecasting failed: {str(e)}, falling back to Exponential Smoothing")
-            logger.debug("Prophet error traceback:", exc_info=True)
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
         
     @staticmethod
@@ -1944,7 +1954,10 @@ This makes the trend robust to spikes and outliers
 
     @staticmethod
     def moving_average_forecast(data: pd.DataFrame, periods: int, window: int = 3) -> tuple:
-        """Moving average forecasting"""
+        """
+        Improved moving average forecasting with trend adjustment.
+        Generates a proper forecast sequence by iteratively updating the moving average.
+        """
         if 'total_quantity' in data.columns:
             y = data['total_quantity'].values
         elif 'quantity' in data.columns:
@@ -1952,28 +1965,75 @@ This makes the trend robust to spikes and outliers
         else:
             raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
         
-        window = min(window, len(y))
+        n = len(y)
+        window = min(max(3, window), n)
         
-        # Calculate moving averages
-        moving_avg = []
-        for i in range(len(y)):
+        logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
+        
+        # Calculate trend from recent data using linear regression
+        trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
+        recent_values = y[-trend_window:]
+        x_trend = np.arange(trend_window)
+        
+        from sklearn.linear_model import LinearRegression
+        trend_model = LinearRegression()
+        trend_model.fit(x_trend.reshape(-1, 1), recent_values)
+        trend_slope = float(trend_model.coef_[0])
+        
+        # Calculate base moving average
+        base_ma = float(np.mean(y[-window:]))
+        
+        # ✅ CRITICAL FIX: Generate forecast by rolling forward with trend
+        # Instead of just extrapolating, we update the moving average as we forecast
+        forecast = []
+        
+        # Start with the last 'window' actual values
+        current_values = list(y[-window:])
+        
+        for i in range(periods):
+            # Calculate moving average of current window
+            current_ma = np.mean(current_values)
+            
+            # Apply trend with dampening
+            damping = 0.95 ** i  # Exponential decay
+            trend_adjustment = trend_slope * damping
+            
+            # Next forecast = current MA + trend
+            next_value = current_ma + trend_adjustment
+            
+            # Apply reasonable bounds
+            y_min, y_max = float(np.min(y)), float(np.max(y))
+            min_bound = y_min * 0.5
+            max_bound = y_max * 1.5
+            next_value = np.clip(next_value, min_bound, max_bound)
+            next_value = max(0, next_value)
+            
+            forecast.append(next_value)
+            
+            # ✅ KEY: Update the rolling window with the new forecast
+            current_values = current_values[1:] + [next_value]
+        
+        forecast = np.array(forecast)
+        
+        # Calculate fitted values for metrics (simple moving averages on historical data)
+        fitted = []
+        for i in range(n):
             start_idx = max(0, i - window + 1)
-            moving_avg.append(np.mean(y[start_idx:i+1]))
+            fitted.append(np.mean(y[start_idx:i+1]))
         
-        # Forecast using last moving average
-        last_avg = np.mean(y[-window:])
-        forecast = np.full(periods, last_avg)
+        fitted = np.array(fitted)
         
-        # Calculate metrics
-        metrics = ForecastExecutionService.calculate_metrics(y[window-1:], moving_avg[window-1:])
+        # Calculate metrics (skip warm-up period)
+        if n > window:
+            metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
+        else:
+            metrics = ForecastExecutionService.calculate_metrics(y, fitted)
         
-        # Prepare test forecast
-        test_results = {
-            'test_forecast': np.array(moving_avg[window-1:]),
-            'test_dates': data['period'].iloc[window-1:].tolist() if 'period' in data.columns else []
-        }
+        logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
+        logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
+        logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
         
-        return forecast, metrics 
+        return forecast, metrics
 
     @staticmethod
     def sarima_forecast(data: pd.DataFrame, periods: int) -> tuple:

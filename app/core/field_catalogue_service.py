@@ -187,7 +187,7 @@ class FieldCatalogueService:
                     SchemaManager.create_master_data_table(tenant_id, database_name, field_definitions)
                     
                     # Migrate final_plan table to dynamic columns if needed (for existing databases)
-                    SchemaManager.migrate_final_plan_to_dynamic_columns(tenant_id, database_name)
+                    # SchemaManager.migrate_final_plan_to_dynamic_columns(tenant_id, database_name)
                     
                     # Update catalogue status
                     cursor.execute("""

@@ -559,7 +559,6 @@ class ForecastingService:
                         if not is_characteristic and not is_target and not is_date:
                             dimension_fields.append(field["field_name"])
                     
-                    logger.info(f"Retrieved {len(dimension_fields)} dimension fields: {dimension_fields}")
                     return dimension_fields
                     
                 finally:
@@ -1415,22 +1414,8 @@ class ForecastingService:
     ) -> Dict[str, Any]:
         """
         Disaggregate sales, forecast, and final plan data to a more granular level.
-
-        This method:
-        1. Gets aggregated sales/forecast/final plan data based on filters
-        2. Calculates historical distribution ratios from sales_data
-        3. Applies ratios to disaggregate forecast_data and final_plan
-        4. Returns all three data types at the target aggregation level, grouped by master_data dimensions
-
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Tenant's database name
-            request: Disaggregation request with aggregation level and filters
-            page: Page number for pagination
-            page_size: Number of records per page
-
-        Returns:
-            Dictionary with disaggregated data grouped by master_data dimensions with separate arrays
+        
+        Returns data in dashboard format: grouped by master_data dimensions with separate arrays.
         """
         db_manager = get_db_manager()
 
@@ -1444,20 +1429,24 @@ class ForecastingService:
                 tenant_id, database_name, target_aggregation_level
             )
 
-            # Convert filters from list of SalesDataFilter to dict for internal processing
+            # ✅ FIXED: Properly convert filters
             filters_dict = {}
             if request.filters:
                 for filter_item in request.filters:
-                    filters_dict[filter_item.field_name] = filter_item.values
+                    # Handle both single values and lists
+                    if len(filter_item.values) == 1:
+                        filters_dict[filter_item.field_name] = filter_item.values[0]
+                    else:
+                        filters_dict[filter_item.field_name] = filter_item.values
 
             # Determine source aggregation level from filters
             source_columns = []
             if filters_dict:
                 for key in filters_dict.keys():
-                    if key not in ['interval', 'date_from', 'date_to'] and key in target_columns:
+                    if key in target_columns:
                         source_columns.append(key)
 
-            # If no source columns identified, assume we're disaggregating from the first target column
+            # If no source columns identified, use first target column
             if not source_columns:
                 source_columns = [target_columns[0]]
 
@@ -1465,17 +1454,10 @@ class ForecastingService:
 
             logger.info(f"Disaggregating from {source_aggregation_level} to {target_aggregation_level}")
 
-            # Build date filters
-            date_filters = {}
-            if request.date_from:
-                date_filters['date_from'] = request.date_from
-            if request.date_to:
-                date_filters['date_to'] = request.date_to
-            
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Step 1: Calculate historical ratios from sales_data
+                    # Step 1: Calculate historical ratios
                     ratios_df = ForecastingService._calculate_disaggregation_ratios(
                         conn=conn,
                         source_columns=source_columns,
@@ -1484,7 +1466,8 @@ class ForecastingService:
                         date_field=date_field,
                         target_field=target_field,
                         interval=request.interval,
-                        **date_filters
+                        date_from=request.date_from,
+                        date_to=request.date_to
                     )
                     
                     if ratios_df.empty:
@@ -1496,22 +1479,24 @@ class ForecastingService:
                             }
                         }
                     
-                    # Step 2: Get all unique target dimension combinations (paginated)
-                    target_cols_sql = ', '.join([f'"{col}"' for col in target_columns])
-                    
-                    # Build WHERE clause for filters
-                    where_clause = "WHERE 1=1"
+                    # Step 2: Build WHERE clause for filtering
+                    where_conditions = []
                     where_params = []
+                    
                     if filters_dict:
                         for col, val in filters_dict.items():
-                            if col not in ['interval', 'date_from', 'date_to']:
-                                if isinstance(val, list):
-                                    placeholders = ', '.join(['%s'] * len(val))
-                                    where_clause += f' AND m."{col}" IN ({placeholders})'
-                                    where_params.extend(val)
-                                else:
-                                    where_clause += f' AND m."{col}" = %s'
-                                    where_params.append(val)
+                            if isinstance(val, list):
+                                placeholders = ', '.join(['%s'] * len(val))
+                                where_conditions.append(f'm."{col}" IN ({placeholders})')
+                                where_params.extend(val)
+                            else:
+                                where_conditions.append(f'm."{col}" = %s')
+                                where_params.append(val)
+                    
+                    where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else "WHERE 1=1"
+                    
+                    # Step 3: Get all unique target dimension combinations (paginated)
+                    target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
                     
                     # Count total unique combinations
                     count_query = f"""
@@ -1545,42 +1530,41 @@ class ForecastingService:
                             }
                         }
                     
-                    # Step 3: Build results for each dimension group
-                    results = []
-                    
-                    # Build a mapping of ratios for quick lookup by target dimensions
-                    ratios_dict = {}  # {(tuple of target dims): {source_key: allocation_factor}}
+                    # Step 4: Build ratios lookup dictionary
+                    ratios_dict = {}  # {(target_dims): {(source_dims): allocation_factor}}
                     
                     for _, row in ratios_df.iterrows():
-                        # Create key from target columns
-                        target_key = tuple(row[col] for col in target_columns)
-                        
-                        # Create source key (for matching against source-level data)
-                        source_key = tuple(row[col] for col in source_columns)
-                        
+                        target_key = tuple(str(row[col]) for col in target_columns)
+                        source_key = tuple(str(row[col]) for col in source_columns)
                         allocation_factor = float(row['allocation_factor'])
                         
                         if target_key not in ratios_dict:
                             ratios_dict[target_key] = {}
                         ratios_dict[target_key][source_key] = allocation_factor
                     
+                    # Step 5: Build results for each dimension group
+                    results = []
+                    start_date = request.date_from or "1900-01-01"
+                    end_date = request.date_to or "2099-12-31"
+                    
                     for group in dimension_groups:
                         group_data = dict(zip(target_columns, group))
+                        target_key = tuple(str(v) for v in group)
                         
                         # Find all master_ids for this group
                         group_conditions = []
                         group_vals = []
                         for col, val in group_data.items():
                             if val is None:
-                                group_conditions.append(f'"{col}" IS NULL')
+                                group_conditions.append(f'm."{col}" IS NULL')
                             else:
-                                group_conditions.append(f'"{col}" = %s')
+                                group_conditions.append(f'm."{col}" = %s')
                                 group_vals.append(val)
                         
                         group_where = " AND ".join(group_conditions)
                         master_id_query = f"""
                             SELECT master_id
-                            FROM master_data
+                            FROM master_data m
                             WHERE {group_where}
                         """
                         cursor.execute(master_id_query, group_vals)
@@ -1597,15 +1581,13 @@ class ForecastingService:
                         }
                         
                         placeholders = ",".join(["%s"] * len(master_ids))
-                        start_date = request.date_from or "1900-01-01"
-                        end_date = request.date_to or "2099-12-31"
                         
-                        # Fetch sales_data directly (no disaggregation needed)
+                        # ✅ Fetch SALES data directly (no disaggregation needed)
                         sales_query = f"""
                             SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(uom)
                             FROM sales_data
                             WHERE master_id IN ({placeholders})
-                              AND "{date_field}" BETWEEN %s AND %s
+                            AND "{date_field}" BETWEEN %s AND %s
                             GROUP BY "{date_field}"
                             ORDER BY "{date_field}" ASC
                         """
@@ -1614,60 +1596,55 @@ class ForecastingService:
                             data_date, quantity, uom = row
                             entry["sales_data"].append({
                                 "date": str(data_date),
-                                "UOM": uom,
+                                "UOM": uom or "UNIT",
                                 "Quantity": float(quantity) if quantity is not None else 0.0,
                             })
                         
-                        # Fetch forecast_data at SOURCE level and disaggregate using ratios
+                        # ✅ FIXED: Fetch FORECAST data at SOURCE level and disaggregate
                         source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
                         
-                        # Get source-level forecast data
-                        forecast_query = f"""
-                            SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(fd.uom),
-                                   {source_cols_sql}
-                            FROM forecast_data fd
-                            JOIN master_data m ON fd.master_id = m.master_id
-                            WHERE fd.master_id IN (
-                                SELECT master_id FROM master_data m2
-                                WHERE 1=1
-                        """
+                        # Build proper filter for source-level query
+                        source_filter_conditions = []
+                        source_filter_params = []
                         
-                        # Apply request filters to find source-level master_ids
-                        forecast_params = []
                         if filters_dict:
                             for col, val in filters_dict.items():
-                                if col not in ['interval', 'date_from', 'date_to']:
+                                if col in source_columns:  # Only filter by source columns
                                     if isinstance(val, list):
                                         placeholders_f = ', '.join(['%s'] * len(val))
-                                        forecast_query += f' AND m2."{col}" IN ({placeholders_f})'
-                                        forecast_params.extend(val)
+                                        source_filter_conditions.append(f'm."{col}" IN ({placeholders_f})')
+                                        source_filter_params.extend(val)
                                     else:
-                                        forecast_query += f' AND m2."{col}" = %s'
-                                        forecast_params.append(val)
+                                        source_filter_conditions.append(f'm."{col}" = %s')
+                                        source_filter_params.append(val)
                         
-                        forecast_query += f"""
-                            )
-                              AND "{date_field}" BETWEEN %s AND %s
-                            GROUP BY "{date_field}", {source_cols_sql}
-                            ORDER BY "{date_field}" ASC
+                        source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
+                        
+                        forecast_query = f"""
+                            SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)), 
+                                MAX(f.uom), {source_cols_sql}
+                            FROM forecast_data f
+                            JOIN master_data m ON f.master_id = m.master_id
+                            WHERE {source_where}
+                            AND f."{date_field}" BETWEEN %s AND %s
+                            GROUP BY f."{date_field}", {source_cols_sql}
+                            ORDER BY f."{date_field}" ASC
                         """
                         
-                        forecast_params.extend([start_date, end_date])
-                        cursor.execute(forecast_query, forecast_params)
+                        cursor.execute(forecast_query, source_filter_params + [start_date, end_date])
                         
-                        # Apply disaggregation using ratios
+                        # Apply disaggregation
                         for row in cursor.fetchall():
+                            num_source_cols = len(source_columns)
                             data_date = row[0]
                             source_quantity = row[1]
                             uom = row[2]
-                            source_vals = row[3:]
+                            source_vals = row[3:3+num_source_cols]
                             
                             if source_quantity is None or source_quantity == 0:
                                 continue
                             
-                            # Match with ratios
-                            source_key = tuple(source_vals)
-                            target_key = tuple(group_data[col] for col in target_columns)
+                            source_key = tuple(str(v) for v in source_vals)
                             
                             if target_key in ratios_dict and source_key in ratios_dict[target_key]:
                                 allocation_factor = ratios_dict[target_key][source_key]
@@ -1675,57 +1652,36 @@ class ForecastingService:
                                 
                                 entry["forecast_data"].append({
                                     "date": str(data_date),
-                                    "UOM": uom,
+                                    "UOM": uom or "UNIT",
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
                         
-                        # Fetch final_plan at SOURCE level and disaggregate using ratios
+                        # ✅ FIXED: Fetch FINAL PLAN data at SOURCE level and disaggregate
                         final_plan_query = f"""
-                            SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(fp.uom),
-                                   {source_cols_sql}
+                            SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)), 
+                                MAX(fp.uom), {source_cols_sql}
                             FROM final_plan fp
                             JOIN master_data m ON fp.master_id = m.master_id
-                            WHERE fp.master_id IN (
-                                SELECT master_id FROM master_data m2
-                                WHERE 1=1
+                            WHERE {source_where}
+                            AND fp."{date_field}" BETWEEN %s AND %s
+                            GROUP BY fp."{date_field}", {source_cols_sql}
+                            ORDER BY fp."{date_field}" ASC
                         """
                         
-                        # Apply request filters to find source-level master_ids
-                        final_plan_params = []
-                        if filters_dict:
-                            for col, val in filters_dict.items():
-                                if col not in ['interval', 'date_from', 'date_to']:
-                                    if isinstance(val, list):
-                                        placeholders_fp = ', '.join(['%s'] * len(val))
-                                        final_plan_query += f' AND m2."{col}" IN ({placeholders_fp})'
-                                        final_plan_params.extend(val)
-                                    else:
-                                        final_plan_query += f' AND m2."{col}" = %s'
-                                        final_plan_params.append(val)
+                        cursor.execute(final_plan_query, source_filter_params + [start_date, end_date])
                         
-                        final_plan_query += f"""
-                            )
-                              AND "{date_field}" BETWEEN %s AND %s
-                            GROUP BY "{date_field}", {source_cols_sql}
-                            ORDER BY "{date_field}" ASC
-                        """
-                        
-                        final_plan_params.extend([start_date, end_date])
-                        cursor.execute(final_plan_query, final_plan_params)
-                        
-                        # Apply disaggregation using ratios
+                        # Apply disaggregation
                         for row in cursor.fetchall():
+                            num_source_cols = len(source_columns)
                             data_date = row[0]
                             source_quantity = row[1]
                             uom = row[2]
-                            source_vals = row[3:]
+                            source_vals = row[3:3+num_source_cols]
                             
                             if source_quantity is None or source_quantity == 0:
                                 continue
                             
-                            # Match with ratios
-                            source_key = tuple(source_vals)
-                            target_key = tuple(group_data[col] for col in target_columns)
+                            source_key = tuple(str(v) for v in source_vals)
                             
                             if target_key in ratios_dict and source_key in ratios_dict[target_key]:
                                 allocation_factor = ratios_dict[target_key][source_key]
@@ -1733,7 +1689,7 @@ class ForecastingService:
                                 
                                 entry["final_plan"].append({
                                     "date": str(data_date),
-                                    "UOM": uom,
+                                    "UOM": uom or "UNIT",
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
                         

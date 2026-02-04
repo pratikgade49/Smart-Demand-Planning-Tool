@@ -6,6 +6,8 @@ Aggregates sales, forecast, and final plan data for UI dashboards.
 import logging
 from typing import Dict, Any, List, Optional
 
+from psycopg2 import sql
+
 from app.core.database import get_db_manager
 from app.core.exceptions import AppException, DatabaseException, ValidationException, NotFoundException
 from app.core.sales_data_service import SalesDataService
@@ -136,6 +138,7 @@ class DashboardService:
                         "sales_data": [],
                         "forecast_data": [],
                         "final_plan": [],
+                        "product_manager": [],
                     }
                     results.append(entry)
                     results_map[master_id] = entry
@@ -187,6 +190,12 @@ class DashboardService:
                     id_column="final_plan_id",
                     target_key="final_plan",
                     id_key="final_plan_id",
+                )
+                add_table_records(
+                    table_name="product_manager",
+                    id_column="product_manager_id",
+                    target_key="product_manager",
+                    id_key="product_manager_id",
                 )
 
                 return {"records": results, "total_count": total_master_count}
@@ -307,6 +316,7 @@ class DashboardService:
                         "sales_data": [],
                         "forecast_data": [],
                         "final_plan": [],
+                        "product_manager": [],
                     }
                     results.append(entry)
                     results_map[master_id] = entry
@@ -358,6 +368,12 @@ class DashboardService:
                     id_column="final_plan_id",
                     target_key="final_plan",
                     id_key="final_plan_id",
+                )
+                add_table_records(
+                    table_name="product_manager",
+                    id_column="product_manager_id",
+                    target_key="product_manager",
+                    id_key="product_manager_id",
                 )
 
                 return {"records": results, "total_count": total_master_count}
@@ -472,6 +488,7 @@ class DashboardService:
                         "sales_data": [],
                         "forecast_data": [],
                         "final_plan": [],
+                        "product_manager": [],
                     }
 
                     def add_aggregated_table_records(
@@ -504,6 +521,7 @@ class DashboardService:
                     add_aggregated_table_records("sales_data", "sales_data")
                     add_aggregated_table_records("forecast_data", "forecast_data")
                     add_aggregated_table_records("final_plan", "final_plan")
+                    add_aggregated_table_records("product_manager", "product_manager")
                     
                     results.append(entry)
 
@@ -643,3 +661,394 @@ class DashboardService:
         except Exception as e:
             logger.error(f"Error saving final plan: {str(e)}")
             raise DatabaseException(f"Failed to save final plan: {str(e)}")
+
+    @staticmethod
+    def save_product_manager(
+        database_name: str,
+        user_email: str,
+        product_manager_id: Optional[str],
+        master_data: Optional[Dict[str, Any]],
+        plan_date,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        db_manager = get_db_manager()
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    if not DashboardService._table_exists(
+                        cursor, "product_manager"
+                    ):
+                        raise ValidationException(
+                            "product_manager table not found"
+                        )
+
+                    date_field, target_field = SalesDataService._get_field_names(
+                        cursor
+                    )
+
+                    if product_manager_id:
+                        cursor.execute(
+                            f"""
+                            UPDATE product_manager
+                            SET "{target_field}" = %s
+                            WHERE product_manager_id = %s
+                            RETURNING product_manager_id
+                            """,
+                            (quantity, product_manager_id),
+                        )
+                        row = cursor.fetchone()
+                        if not row:
+                            raise NotFoundException(
+                                "Product manager", product_manager_id
+                            )
+                        conn.commit()
+                        return {
+                            "status": "success",
+                            "message": "Product manager updated",
+                            "product_manager_id": str(row[0]),
+                        }
+
+                    if master_data is None or plan_date is None:
+                        raise ValidationException(
+                            "master_data and date are required"
+                        )
+
+                    master_id = DashboardService._resolve_master_id(
+                        cursor,
+                        master_data,
+                    )
+                    uom = master_data.get("uom") if master_data else None
+                    if not uom:
+                        uom, unit_price = DashboardService._resolve_sales_info(
+                            cursor, master_id
+                        )
+                    else:
+                        _, unit_price = DashboardService._resolve_sales_info(
+                            cursor, master_id
+                        )
+
+                    cursor.execute(
+                        f"""
+                        INSERT INTO product_manager
+                        (master_id, "{date_field}", "{target_field}",
+                         uom, unit_price, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING product_manager_id
+                        """,
+                        (
+                            master_id,
+                            plan_date,
+                            quantity,
+                            uom,
+                            unit_price,
+                            user_email,
+                        ),
+                    )
+                    row = cursor.fetchone()
+                    conn.commit()
+                    return {
+                        "status": "success",
+                        "message": "Product manager created",
+                        "product_manager_id": str(row[0]),
+                    }
+                finally:
+                    cursor.close()
+        except AppException:
+            raise
+        except Exception as e:
+            logger.error(f"Error saving product manager: {str(e)}")
+            raise DatabaseException(
+                f"Failed to save product manager: {str(e)}"
+            )
+
+    @staticmethod
+    def copy_forecast_to_final_plan(
+        database_name: str,
+        user_email: str,
+        filters: List[Any],
+        from_date,
+        to_date,
+    ) -> Dict[str, Any]:
+        """
+        Copy forecast_data records into final_plan with optional filters and date range.
+        """
+        db_manager = get_db_manager()
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    if not DashboardService._table_exists(cursor, "forecast_data"):
+                        raise ValidationException("forecast_data table not found")
+                    if not DashboardService._table_exists(cursor, "final_plan"):
+                        raise ValidationException("final_plan table not found")
+
+                    date_field, target_field = SalesDataService._get_field_names(
+                        cursor
+                    )
+
+                    where_clauses = [sql.SQL("1=1")]
+                    params: List[Any] = []
+
+                    if from_date:
+                        where_clauses.append(
+                            sql.SQL('fd.{} >= %s').format(
+                                sql.Identifier(date_field)
+                            )
+                        )
+                        params.append(from_date)
+                    if to_date:
+                        where_clauses.append(
+                            sql.SQL('fd.{} <= %s').format(
+                                sql.Identifier(date_field)
+                            )
+                        )
+                        params.append(to_date)
+
+                    if filters:
+                        for filter_obj in filters:
+                            values = getattr(filter_obj, "values", None)
+                            field_name = getattr(filter_obj, "field_name", None)
+                            if not values or not field_name:
+                                continue
+                            where_clauses.append(
+                                sql.SQL(
+                                    "fd.master_id IN (SELECT master_id FROM master_data WHERE {} = ANY(%s))"
+                                ).format(sql.Identifier(field_name))
+                            )
+                            params.append(list(values))
+
+                    where_sql = sql.SQL(" AND ").join(where_clauses)
+
+                    count_query = sql.SQL(
+                        "SELECT COUNT(*) FROM forecast_data fd WHERE {}"
+                    ).format(where_sql)
+                    cursor.execute(count_query, params)
+                    total_records = cursor.fetchone()[0]
+
+                    upsert_query = sql.SQL(
+                        """
+                        INSERT INTO final_plan
+                        (master_id, {date_field}, {target_field}, uom, unit_price,
+                         created_by, updated_at, updated_by)
+                        SELECT
+                            fd.master_id,
+                            fd.{date_field},
+                            fd.{target_field},
+                            fd.uom,
+                            fd.unit_price,
+                            %s,
+                            CURRENT_TIMESTAMP,
+                            %s
+                        FROM forecast_data fd
+                        WHERE {where_clause}
+                        ON CONFLICT (master_id, {date_field})
+                        DO UPDATE SET
+                            {target_field} = EXCLUDED.{target_field},
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price,
+                            updated_at = CURRENT_TIMESTAMP,
+                            updated_by = EXCLUDED.updated_by
+                        """
+                    ).format(
+                        date_field=sql.Identifier(date_field),
+                        target_field=sql.Identifier(target_field),
+                        where_clause=where_sql,
+                    )
+
+                    cursor.execute(
+                        upsert_query, [user_email, user_email, *params]
+                    )
+                    affected = cursor.rowcount
+                    conn.commit()
+
+                    return {
+                        "status": "success",
+                        "message": "Forecast copied to final plan",
+                        "filtered_records": total_records,
+                        "upserted_records": affected,
+                    }
+                finally:
+                    cursor.close()
+        except AppException:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error copying forecast to final plan: {str(e)}"
+            )
+            raise DatabaseException(
+                f"Failed to copy forecast to final plan: {str(e)}"
+            )
+
+    @staticmethod
+    def copy_dashboard_data(
+        database_name: str,
+        user_email: str,
+        copy_from: str,
+        copy_to: str,
+        filters: List[Any],
+        from_date,
+        to_date,
+    ) -> Dict[str, Any]:
+        """
+        Copy data between dashboard tables.
+
+        Supported:
+        - baseline_forecast -> product_manager
+        - product_manager -> final_consensus_plan
+        """
+        db_manager = get_db_manager()
+        source_map = {
+            "baseline_forecast": "forecast_data",
+            "product_manager": "product_manager",
+        }
+        target_map = {
+            "product_manager": "product_manager",
+            "final_consensus_plan": "final_plan",
+        }
+        source_table = source_map.get(copy_from)
+        target_table = target_map.get(copy_to)
+        if not source_table or not target_table:
+            raise ValidationException("Unsupported copy_from or copy_to value")
+        if source_table == target_table:
+            raise ValidationException("copy_from and copy_to cannot be same")
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    if not DashboardService._table_exists(
+                        cursor, source_table
+                    ):
+                        raise ValidationException(
+                            f"{source_table} table not found"
+                        )
+                    if not DashboardService._table_exists(
+                        cursor, target_table
+                    ):
+                        raise ValidationException(
+                            f"{target_table} table not found"
+                        )
+
+                    date_field, target_field = SalesDataService._get_field_names(
+                        cursor
+                    )
+
+                    # Ensure unique constraint for ON CONFLICT on target table
+                    constraint_name = (
+                        f"{target_table}_master_date_unique"
+                    )
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.table_constraints
+                        WHERE table_schema = 'public'
+                          AND table_name = %s
+                          AND constraint_name = %s
+                          AND constraint_type = 'UNIQUE'
+                        """,
+                        (target_table, constraint_name),
+                    )
+                    if cursor.fetchone() is None:
+                        cursor.execute(
+                            sql.SQL(
+                                'ALTER TABLE {table} ADD CONSTRAINT {constraint} UNIQUE (master_id, {date_field})'
+                            ).format(
+                                table=sql.Identifier(target_table),
+                                constraint=sql.Identifier(constraint_name),
+                                date_field=sql.Identifier(date_field),
+                            )
+                        )
+
+                    where_clauses = [sql.SQL("1=1")]
+                    params: List[Any] = []
+
+                    if from_date:
+                        where_clauses.append(
+                            sql.SQL("sd.{} >= %s").format(
+                                sql.Identifier(date_field)
+                            )
+                        )
+                        params.append(from_date)
+                    if to_date:
+                        where_clauses.append(
+                            sql.SQL("sd.{} <= %s").format(
+                                sql.Identifier(date_field)
+                            )
+                        )
+                        params.append(to_date)
+
+                    if filters:
+                        for filter_obj in filters:
+                            values = getattr(filter_obj, "values", None)
+                            field_name = getattr(filter_obj, "field_name", None)
+                            if not values or not field_name:
+                                continue
+                            where_clauses.append(
+                                sql.SQL(
+                                    "sd.master_id IN (SELECT master_id FROM master_data WHERE {} = ANY(%s))"
+                                ).format(sql.Identifier(field_name))
+                            )
+                            params.append(list(values))
+
+                    where_sql = sql.SQL(" AND ").join(where_clauses)
+
+                    count_query = sql.SQL(
+                        "SELECT COUNT(*) FROM {} sd WHERE {}"
+                    ).format(sql.Identifier(source_table), where_sql)
+                    cursor.execute(count_query, params)
+                    total_records = cursor.fetchone()[0]
+
+                    upsert_query = sql.SQL(
+                        """
+                        INSERT INTO {target_table}
+                        (master_id, {date_field}, {target_field}, uom, unit_price,
+                         created_by, updated_at, updated_by)
+                        SELECT
+                            sd.master_id,
+                            sd.{date_field},
+                            sd.{target_field},
+                            sd.uom,
+                            sd.unit_price,
+                            %s,
+                            CURRENT_TIMESTAMP,
+                            %s
+                        FROM {source_table} sd
+                        WHERE {where_clause}
+                        ON CONFLICT (master_id, {date_field})
+                        DO UPDATE SET
+                            {target_field} = EXCLUDED.{target_field},
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price,
+                            updated_at = CURRENT_TIMESTAMP,
+                            updated_by = EXCLUDED.updated_by
+                        """
+                    ).format(
+                        target_table=sql.Identifier(target_table),
+                        source_table=sql.Identifier(source_table),
+                        date_field=sql.Identifier(date_field),
+                        target_field=sql.Identifier(target_field),
+                        where_clause=where_sql,
+                    )
+
+                    cursor.execute(
+                        upsert_query, [user_email, user_email, *params]
+                    )
+                    affected = cursor.rowcount
+                    conn.commit()
+
+                    return {
+                        "status": "success",
+                        "message": f"Copied {copy_from} to {copy_to}",
+                        "filtered_records": total_records,
+                        "upserted_records": affected,
+                    }
+                finally:
+                    cursor.close()
+        except AppException:
+            raise
+        except Exception as e:
+            logger.error(f"Error copying dashboard data: {str(e)}")
+            raise DatabaseException(
+                f"Failed to copy dashboard data: {str(e)}"
+            )

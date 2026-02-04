@@ -13,12 +13,95 @@ from psycopg2.extras import Json
 
 from app.core.database import get_db_manager
 from app.core.exceptions import DatabaseException, NotFoundException, ValidationException
+from app.schemas.forecasting import ExternalFactorCreate
 
 logger = logging.getLogger(__name__)
 
 
 class ExternalFactorsService:
     """Enhanced service for external factors with FRED integration."""
+
+    @staticmethod
+    def create_factor(
+        tenant_id: str,
+        database_name: str,
+        request: ExternalFactorCreate,
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Create or update a single external factor record.
+        Uses upsert on (factor_name, date).
+        """
+        db_manager = get_db_manager()
+
+        try:
+            try:
+                record_date = datetime.fromisoformat(request.date).date()
+            except ValueError:
+                raise ValidationException("date must be in YYYY-MM-DD format")
+
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    factor_id = str(uuid.uuid4())
+                    cursor.execute("""
+                        INSERT INTO external_factors
+                        (factor_id, date, factor_name, factor_value, unit, source, created_by, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (factor_name, date)
+                        DO UPDATE SET
+                            factor_value = EXCLUDED.factor_value,
+                            unit = EXCLUDED.unit,
+                            source = EXCLUDED.source,
+                            updated_at = %s,
+                            updated_by = %s,
+                            deleted_at = NULL
+                    """, (
+                        factor_id,
+                        record_date,
+                        request.factor_name,
+                        request.factor_value,
+                        request.unit,
+                        request.source,
+                        user_email,
+                        datetime.utcnow(),
+                        datetime.utcnow(),
+                        user_email
+                    ))
+                    conn.commit()
+
+                    # Fetch and return the upserted record
+                    cursor.execute("""
+                        SELECT factor_id, date, factor_name, factor_value,
+                               unit, source, created_at, created_by, updated_at, updated_by
+                        FROM external_factors
+                        WHERE factor_name = %s AND date = %s
+                    """, (request.factor_name, record_date))
+                    row = cursor.fetchone()
+                    if not row:
+                        raise DatabaseException("Failed to retrieve created factor")
+
+                    return {
+                        "factor_id": str(row[0]),
+                        "date": row[1].isoformat() if row[1] else None,
+                        "factor_name": row[2],
+                        "factor_value": float(row[3]) if row[3] is not None else None,
+                        "unit": row[4],
+                        "source": row[5],
+                        "created_at": row[6].isoformat() if row[6] else None,
+                        "created_by": row[7],
+                        "updated_at": row[8].isoformat() if row[8] else None,
+                        "updated_by": row[9]
+                    }
+
+                finally:
+                    cursor.close()
+
+        except (ValidationException, NotFoundException):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to create external factor: {str(e)}")
+            raise DatabaseException(f"Failed to create external factor: {str(e)}")
 
     @staticmethod
     def bulk_import_from_fred(
@@ -540,6 +623,108 @@ class ExternalFactorsService:
             raise DatabaseException(f"Failed to get factors summary: {str(e)}")
 
     @staticmethod
+    def list_factors(
+        tenant_id: str,
+        database_name: str,
+        factor_name: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        List external factors with optional filters and pagination.
+
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            factor_name: Optional filter by factor name
+            date_from: Optional start date filter (YYYY-MM-DD)
+            date_to: Optional end date filter (YYYY-MM-DD)
+            page: Page number (1-based)
+            page_size: Number of records per page
+
+        Returns:
+            Tuple of (factors list, total count)
+        """
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Build WHERE conditions
+                    conditions = ["deleted_at IS NULL"]
+                    params = []
+
+                    if factor_name:
+                        conditions.append("factor_name = %s")
+                        params.append(factor_name)
+
+                    if date_from:
+                        conditions.append("date >= %s")
+                        params.append(date_from)
+
+                    if date_to:
+                        conditions.append("date <= %s")
+                        params.append(date_to)
+
+                    where_clause = " AND ".join(conditions)
+
+                    # Get total count
+                    count_query = f"SELECT COUNT(*) FROM external_factors WHERE {where_clause}"
+                    cursor.execute(count_query, params)
+                    total_count = cursor.fetchone()[0]
+
+                    # Get paginated results
+                    offset = (page - 1) * page_size
+                    query = f"""
+                        SELECT
+                            factor_id,
+                            date,
+                            factor_name,
+                            factor_value,
+                            unit,
+                            source,
+                            created_by,
+                            created_at,
+                            updated_by,
+                            updated_at
+                        FROM external_factors
+                        WHERE {where_clause}
+                        ORDER BY date DESC, factor_name, created_at DESC
+                        LIMIT %s OFFSET %s
+                    """
+                    params.extend([page_size, offset])
+
+                    cursor.execute(query, params)
+                    rows = cursor.fetchall()
+
+                    factors = []
+                    for row in rows:
+                        factors.append({
+                            "factor_id": row[0],
+                            "date": row[1].isoformat() if row[1] else None,
+                            "factor_name": row[2],
+                            "factor_value": float(row[3]) if row[3] is not None else None,
+                            "unit": row[4],
+                            "source": row[5],
+                            "created_by": row[6],
+                            "created_at": row[7].isoformat() if row[7] else None,
+                            "updated_by": row[8],
+                            "updated_at": row[9].isoformat() if row[9] else None
+                        })
+
+                    return factors, total_count
+
+                finally:
+                    cursor.close()
+
+        except Exception as e:
+            logger.error(f"Failed to list factors: {str(e)}")
+            raise DatabaseException(f"Failed to list factors: {str(e)}")
+
+    @staticmethod
     def delete_factor_by_name(
         tenant_id: str,
         database_name: str,
@@ -550,7 +735,7 @@ class ExternalFactorsService:
         Returns number of records deleted.
         """
         db_manager = get_db_manager()
-        
+
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
@@ -558,21 +743,19 @@ class ExternalFactorsService:
                     cursor.execute("""
                         UPDATE external_factors
                         SET deleted_at = %s
-                        WHERE factor_name = %s 
+                        WHERE factor_name = %s
                         AND deleted_at IS NULL
                     """, (datetime.utcnow(), factor_name))
-                    
+
                     deleted_count = cursor.rowcount
                     conn.commit()
-                    
+
                     logger.info(f"Soft deleted {deleted_count} records for factor '{factor_name}'")
                     return deleted_count
-                    
+
                 finally:
                     cursor.close()
-                    
+
         except Exception as e:
             logger.error(f"Failed to delete factor: {str(e)}")
             raise DatabaseException(f"Failed to delete factor: {str(e)}")
-        
-    

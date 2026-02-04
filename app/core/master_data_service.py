@@ -6,7 +6,7 @@ Handles retrieval of master data fields and their distinct values for UI dropdow
 import logging
 from typing import Dict, Any, List, Optional
 from app.core.database import get_db_manager
-from app.core.exceptions import ValidationException, NotFoundException
+from app.core.exceptions import ValidationException, NotFoundException, ConflictException
 
 logger = logging.getLogger(__name__)
 
@@ -227,3 +227,213 @@ class MasterDataService:
         except Exception as e:
             logger.error(f"Failed to validate master_data existence: {str(e)}")
             return False
+
+    @staticmethod
+    def create_master_data_record(
+        tenant_id: str,
+        database_name: str,
+        record: Dict[str, Any],
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Create a master data record.
+
+        Raises ConflictException if an identical record already exists.
+        """
+        if not isinstance(record, dict) or not record:
+            raise ValidationException("Record payload is required")
+
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Ensure master_data table exists
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_name = 'master_data'
+                            AND table_schema = 'public'
+                        )
+                    """)
+                    if not cursor.fetchone()[0]:
+                        raise NotFoundException("Master Data", "master_data table not found")
+
+                    # Fetch valid master data columns (exclude system columns)
+                    cursor.execute("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'master_data'
+                        AND table_schema = 'public'
+                        AND column_name NOT IN ('master_id','uom', 'tenant_id', 'created_at',
+                                               'created_by', 'updated_at', 'updated_by','deleted_at')
+                        ORDER BY ordinal_position
+                    """)
+                    columns = [row[0] for row in cursor.fetchall()]
+                    column_set = set(columns)
+
+                    invalid_fields = [key for key in record.keys() if key not in column_set]
+                    if invalid_fields:
+                        raise ValidationException(
+                            f"Invalid master data fields: {', '.join(invalid_fields)}"
+                        )
+
+                    # Normalize record values (treat empty strings as NULL)
+                    normalized_record = {
+                        key: (value if value not in ("", None) else None)
+                        for key, value in record.items()
+                    }
+
+                    # Check for existing identical record
+                    where_conditions = []
+                    params: List[Any] = []
+                    for column in columns:
+                        value = normalized_record.get(column)
+                        if value is None:
+                            where_conditions.append(f'"{column}" IS NULL')
+                        else:
+                            where_conditions.append(f'"{column}" = %s')
+                            params.append(value)
+
+                    where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+                    cursor.execute(
+                        f"SELECT master_id FROM master_data WHERE {where_clause} LIMIT 1",
+                        params
+                    )
+                    if cursor.fetchone():
+                        raise ConflictException("Record already exists")
+
+                    # Insert new record
+                    insert_columns = ['created_by']
+                    insert_values = [user_email]
+                    for key, value in normalized_record.items():
+                        insert_columns.append(f'"{key}"')
+                        insert_values.append(value)
+
+                    columns_str = ', '.join(insert_columns)
+                    placeholders = ', '.join(['%s'] * len(insert_values))
+                    insert_query = (
+                        f"INSERT INTO master_data ({columns_str}) "
+                        f"VALUES ({placeholders}) RETURNING master_id"
+                    )
+                    cursor.execute(insert_query, insert_values)
+                    master_id = cursor.fetchone()[0]
+                    conn.commit()
+
+                    logger.info(f"Created master data record {master_id} for tenant {tenant_id}")
+                    return {"master_id": str(master_id)}
+
+                finally:
+                    cursor.close()
+
+        except (ValidationException, NotFoundException, ConflictException):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to create master data record: {str(e)}")
+            raise ValidationException(f"Failed to create master data record: {str(e)}")
+
+    @staticmethod
+    def get_master_data_records(
+        tenant_id: str,
+        database_name: str,
+        filters: Dict[str, List[str]],
+        page: int = 1,
+        page_size: int = 100,
+        sort_by: Optional[str] = None,
+        sort_order: str = "asc"
+    ) -> tuple:
+        """
+        Retrieve actual master data records matching the provided filters.
+
+        Args:
+            tenant_id: The tenant identifier
+            database_name: The database to query
+            filters: Dict with field_name: [list of values]
+                    Example: {"customer": ["0100000034"], "location": ["LOC001"]}
+            page: Page number (1-indexed)
+            page_size: Number of records per page
+            sort_by: Field to sort by (optional)
+            sort_order: Sort order ('asc' or 'desc')
+
+        Returns:
+            Tuple of (records list, total count)
+        """
+        db_manager = get_db_manager()
+
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    # Build WHERE clause from filters
+                    where_conditions = []
+                    params = []
+
+                    if filters:
+                        for field_name, values in filters.items():
+                            if values:  # Only add if values exist
+                                # Validate filter field exists
+                                MasterDataService._validate_field_exists(cursor, field_name)
+
+                                placeholders = ', '.join(['%s'] * len(values))
+                                where_conditions.append(f'"{field_name}" IN ({placeholders})')
+                                params.extend(values)
+
+                    where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+
+                    # Get only relevant columns (exclude system columns)
+                    cursor.execute("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'master_data'
+                        AND table_schema = 'public'
+                        AND column_name NOT IN ('master_id', 'uom', 'tenant_id', 'created_at',
+                                               'created_by', 'updated_at', 'updated_by', 'deleted_at')
+                        ORDER BY ordinal_position
+                    """)
+                    columns = [row[0] for row in cursor.fetchall()]
+                    columns_str = ', '.join([f'"{col}"' for col in columns])
+
+                    # Get total count
+                    count_query = f"SELECT COUNT(*) FROM master_data {where_clause}"
+                    cursor.execute(count_query, params if params else None)
+                    total = cursor.fetchone()[0]
+
+                    # Build ORDER BY clause
+                    if sort_by and sort_by in columns:
+                        order_direction = "DESC" if sort_order.lower() == "desc" else "ASC"
+                        order_clause = f'ORDER BY "{sort_by}" {order_direction}'
+                    else:
+                        order_clause = "ORDER BY master_id ASC"
+
+                    # Calculate offset from page number
+                    offset = (page - 1) * page_size
+
+                    # Get paginated records with only relevant columns
+                    records_query = f"""
+                        SELECT {columns_str} FROM master_data
+                        {where_clause}
+                        {order_clause}
+                        LIMIT %s OFFSET %s
+                    """
+                    params_with_pagination = params + [page_size, offset]
+                    cursor.execute(records_query, params_with_pagination)
+
+                    # Get column names
+                    column_names = [desc[0] for desc in cursor.description]
+
+                    # Convert rows to list of dictionaries
+                    records = []
+                    for row in cursor.fetchall():
+                        record = dict(zip(column_names, row))
+                        records.append(record)
+
+                    logger.info(f"Retrieved {len(records)} master data records (total: {total}) with filters: {filters}")
+                    return records, total
+
+                finally:
+                    cursor.close()
+
+        except Exception as e:
+            logger.error(f"Failed to get master data records: {str(e)}")
+            raise ValidationException(f"Failed to retrieve master data records: {str(e)}")

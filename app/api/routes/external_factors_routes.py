@@ -205,7 +205,7 @@ async def bulk_import_from_fred(
 async def forecast_future_factors(
     request: ForecastFactorsRequest,
     tenant_data: Dict = Depends(get_current_tenant),
-    _: Dict = Depends(require_object_access("Forecasting", min_role_id=2))
+    _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
 ):
     """
     Forecast future values for external factors.

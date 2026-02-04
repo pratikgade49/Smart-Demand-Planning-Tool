@@ -16,7 +16,11 @@ from app.api.dependencies import get_tenant_database, require_object_access
 from app.core.dashboard_service import DashboardService
 from app.core.exceptions import AppException, ValidationException, NotFoundException
 from app.core.responses import ResponseHandler
-from app.schemas.sales_data import SalesDataQueryRequest, AggregatedDataQueryRequest
+from app.schemas.sales_data import (
+    SalesDataQueryRequest,
+    AggregatedDataQueryRequest,
+    SalesDataFilter,
+)
 from app.core.master_data_service import MasterDataService
 from openpyxl import Workbook
 
@@ -39,6 +43,60 @@ class SaveFinalPlanRequest(BaseModel):
         description="Final plan date (YYYY-MM-DD)",
     )
     quantity: float = Field(..., description="Final plan quantity")
+
+
+class SaveProductManagerRequest(BaseModel):
+    product_manager_id: Optional[str] = Field(
+        default=None,
+        description="Product manager primary key for updates",
+    )
+    master_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Master data fields to resolve master_id",
+    )
+    date: Optional[DateType] = Field(
+        default=None,
+        description="Product manager date (YYYY-MM-DD)",
+    )
+    quantity: float = Field(..., description="Product manager quantity")
+
+
+class CopyForecastToFinalPlanRequest(BaseModel):
+    filters: Optional[List[SalesDataFilter]] = Field(
+        default=None,
+        description="List of master data filters. Empty or omitted means all.",
+    )
+    from_date: Optional[DateType] = Field(
+        default=None,
+        description="Start date (inclusive) to copy forecast data.",
+    )
+    to_date: Optional[DateType] = Field(
+        default=None,
+        description="End date (inclusive) to copy forecast data.",
+    )
+
+
+class CopyDashboardDataRequest(BaseModel):
+    copy_from: str = Field(
+        ...,
+        description="Source data type: baseline_forecast or product_manager",
+    )
+    copy_to: str = Field(
+        ...,
+        description="Target data type: product_manager or final_consensus_plan",
+    )
+    filters: Optional[List[SalesDataFilter]] = Field(
+        default=None,
+        description="List of master data filters. Empty or omitted means all.",
+    )
+    from_date: Optional[DateType] = Field(
+        default=None,
+        description="Start date (inclusive) to copy data.",
+    )
+    to_date: Optional[DateType] = Field(
+        default=None,
+        description="End date (inclusive) to copy data.",
+    )
 
 
 @router.post("/alldata", response_model=Dict[str, Any])
@@ -152,6 +210,125 @@ async def save_final_plan(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.post("/save-product-manager", response_model=Dict[str, Any])
+async def save_product_manager(
+    request: SaveProductManagerRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Save or update product manager data.
+
+    - If product_manager_id is provided, updates quantity for that record.
+    - Otherwise inserts a new record using master_data, date, and quantity.
+    """
+    try:
+        product_manager_id = (
+            request.product_manager_id.strip()
+            if request.product_manager_id
+            else ""
+        )
+        if product_manager_id:
+            result = DashboardService.save_product_manager(
+                database_name=tenant_data["database_name"],
+                user_email=tenant_data["email"],
+                product_manager_id=product_manager_id,
+                master_data=None,
+                plan_date=None,
+                quantity=request.quantity,
+            )
+            return ResponseHandler.success(data=result)
+
+        if not request.master_data:
+            raise ValidationException("master_data is required")
+        if request.date is None:
+            raise ValidationException("date is required")
+
+        result = DashboardService.save_product_manager(
+            database_name=tenant_data["database_name"],
+            user_email=tenant_data["email"],
+            product_manager_id=None,
+            master_data=request.master_data,
+            plan_date=request.date,
+            quantity=request.quantity,
+        )
+
+        return ResponseHandler.success(data=result)
+
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in save_product_manager: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/copy-forecast-to-final-plan", response_model=Dict[str, Any])
+async def copy_forecast_to_final_plan(
+    request: CopyForecastToFinalPlanRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Copy forecast_data records into final_plan with optional filters and date range.
+    Existing final_plan rows with the same master_id and date are overwritten.
+    """
+    try:
+        result = DashboardService.copy_forecast_to_final_plan(
+            database_name=tenant_data["database_name"],
+            user_email=tenant_data["email"],
+            filters=request.filters or [],
+            from_date=request.from_date,
+            to_date=request.to_date,
+        )
+        return ResponseHandler.success(data=result)
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in copy_forecast_to_final_plan: {str(e)}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/copy-dashboard-data", response_model=Dict[str, Any])
+async def copy_dashboard_data(
+    request: CopyDashboardDataRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Copy data between dashboard tables based on requested source and target.
+    Supported:
+    - baseline_forecast -> product_manager
+    - product_manager -> final_consensus_plan
+    """
+    try:
+        result = DashboardService.copy_dashboard_data(
+            database_name=tenant_data["database_name"],
+            user_email=tenant_data["email"],
+            copy_from=request.copy_from,
+            copy_to=request.copy_to,
+            filters=request.filters or [],
+            from_date=request.from_date,
+            to_date=request.to_date,
+        )
+        return ResponseHandler.success(data=result)
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in copy_dashboard_data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.post("/export-xlsx")
 async def export_dashboard_xlsx(
     request: SalesDataQueryRequest,
@@ -231,9 +408,10 @@ async def export_dashboard_xlsx(
             ]
 
             for label, key in (
-                ("Sales", "sales_data"),
-                ("Forecast", "forecast_data"),
-                ("Final Plan", "final_plan"),
+                ("Sales history", "sales_data"),
+                ("Baseline forecast", "forecast_data"),
+                ("Product manager", "product_manager"),
+                ("Final consensus plan", "final_plan"),
             ):
                 values = record.get(key) or []
                 totals = summarize_values(values)

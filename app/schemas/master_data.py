@@ -59,3 +59,41 @@ class MultipleFieldValuesResponse(BaseModel):
         ...,
         description="Dictionary mapping field names to their value lists"
     )
+
+
+class MasterDataFilter(BaseModel):
+    """Single filter for master data records."""
+    field_name: str = Field(..., description="The field name to filter on", example="customer")
+    values: List[str] = Field(..., description="List of values to filter by", example=["0100000034"])
+
+
+class MasterDataRecordsRequest(BaseModel):
+    """Request schema for fetching filtered master data records (same format as Sales Data)."""
+    filters: List[MasterDataFilter] = Field(
+        default=[
+            {"field_name": "customer", "values": ["0100000034"]}
+        ],
+        description="List of filters to apply",
+        example=[
+            {"field_name": "customer", "values": ["0100000034"]},
+            {"field_name": "location", "values": ["3110"]}
+        ]
+    )
+    page: Optional[int] = Field(default=1, description="Page number (1-indexed)", example=1)
+    page_size: Optional[int] = Field(default=100, description="Number of records per page", example=100)
+    sort_by: Optional[str] = Field(default=None, description="Field to sort by", example="customer")
+    sort_order: Optional[str] = Field(default="asc", description="Sort order: 'asc' or 'desc'", example="asc")
+
+
+class MasterDataRecordsResponse(BaseModel):
+    """Response schema for master data records."""
+    records: List[Dict[str, Any]] = Field(..., description="List of master data records")
+    pagination: Dict[str, Any] = Field(..., description="Pagination information")
+
+
+class MasterDataCreateRequest(BaseModel):
+    """Request schema for creating a master data record."""
+    record: Dict[str, Any] = Field(
+        ...,
+        description="Master data field values keyed by field name"
+    )

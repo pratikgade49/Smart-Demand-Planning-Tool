@@ -53,6 +53,8 @@ class Settings(BaseSettings):
 
     # Parallel Processing Settings
     NUMBER_OF_THREADS: int = 10
+
+    ENABLE_ROLE: bool = False 
     
     model_config = ConfigDict(
         env_file=".env",

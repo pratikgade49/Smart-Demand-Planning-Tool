@@ -467,10 +467,31 @@ class SchemaManager:
                         )
                     """)
 
+                    # ====================================================================
+                    # Create product_manager table with dynamic columns (SIMILAR TO final_plan)
+                    # ====================================================================
+                    cursor.execute(f"""
+                        CREATE TABLE IF NOT EXISTS product_manager (
+                            product_manager_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            master_id UUID NOT NULL REFERENCES master_data(master_id),
+                            "{date_field.field_name}" {date_sql_type} NOT NULL,
+                            "{target_field.field_name}" {target_sql_type} NOT NULL,
+                            uom VARCHAR(20) NOT NULL,
+                            unit_price DECIMAL(18, 2),
+
+                            -- Audit fields (created only - transactions are immutable)
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) NOT NULL,
+                            updated_at TIMESTAMP,
+                            updated_by VARCHAR(255)
+                        )
+                    """)
+
                     # Add unique constraint for batch upsert functionality
                     cursor.execute(f'ALTER TABLE sales_data ADD CONSTRAINT sales_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
                     cursor.execute(f'ALTER TABLE forecast_data ADD CONSTRAINT forecast_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
                     cursor.execute(f'ALTER TABLE final_plan ADD CONSTRAINT final_plan_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
+                    cursor.execute(f'ALTER TABLE product_manager ADD CONSTRAINT product_manager_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
 
                     # Create indexes on sales_data and forecast_data
                     cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
@@ -481,9 +502,16 @@ class SchemaManager:
                     
                     cursor.execute(f'CREATE INDEX idx_final_plan_date ON final_plan("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_final_plan_master_id ON final_plan(master_id)')
+<<<<<<< HEAD
                     cursor.execute('CREATE INDEX idx_final_plan_type ON final_plan(type)')
                     cursor.execute('CREATE INDEX idx_final_plan_source_forecast_run_id ON final_plan(source_forecast_run_id)')
                     cursor.execute('CREATE INDEX idx_final_plan_disaggregation_level ON final_plan(disaggregation_level)')
+=======
+                    
+                    cursor.execute(f'CREATE INDEX idx_product_manager_date ON product_manager("{date_field.field_name}")')
+                    cursor.execute(f'CREATE INDEX idx_product_manager_master_id ON product_manager(master_id)')
+                    
+>>>>>>> 7f17dd526aad79e4449959f019d46b46bf132cda
                     # Store metadata about target and date fields
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue_metadata (
