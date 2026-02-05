@@ -1413,8 +1413,9 @@ class ForecastingService:
         page_size: int = 50
     ) -> Dict[str, Any]:
         """
-        Disaggregate sales, forecast, and final plan data to a more granular level.
-        
+        Disaggregate sales, forecast, and final plan data to the lowest granular level
+        and upsert results into the specified target table.
+
         Returns data in dashboard format: grouped by master_data dimensions with separate arrays.
         """
         db_manager = get_db_manager()
@@ -1423,11 +1424,9 @@ class ForecastingService:
             # Get field names from metadata
             target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
 
-            # Parse aggregation level
-            target_aggregation_level = '-'.join(request.aggregation_level)
-            target_columns = ForecastingService._get_aggregation_columns(
-                tenant_id, database_name, target_aggregation_level
-            )
+            # Auto-determine target aggregation level as all dimension fields
+            target_columns = ForecastingService._get_dimension_fields(tenant_id, database_name)
+            target_aggregation_level = '-'.join(target_columns)
 
             # ✅ FIXED: Properly convert filters
             filters_dict = {}
@@ -1452,7 +1451,7 @@ class ForecastingService:
 
             source_aggregation_level = '-'.join(source_columns)
 
-            logger.info(f"Disaggregating from {source_aggregation_level} to {target_aggregation_level}")
+            logger.info(f"Disaggregating from {source_aggregation_level} to lowest granularity ({target_aggregation_level}) and upserting to {request.target_table}")
 
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
@@ -1621,12 +1620,13 @@ class ForecastingService:
                         source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
                         
                         forecast_query = f"""
-                            SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)), 
+                            SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
                                 MAX(f.uom), {source_cols_sql}
                             FROM forecast_data f
                             JOIN master_data m ON f.master_id = m.master_id
                             WHERE {source_where}
                             AND f."{date_field}" BETWEEN %s AND %s
+                            AND (f.created_by IS NULL OR f.created_by != 'system')
                             GROUP BY f."{date_field}", {source_cols_sql}
                             ORDER BY f."{date_field}" ASC
                         """
@@ -1658,12 +1658,13 @@ class ForecastingService:
                         
                         # ✅ FIXED: Fetch FINAL PLAN data at SOURCE level and disaggregate
                         final_plan_query = f"""
-                            SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)), 
+                            SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)),
                                 MAX(fp.uom), {source_cols_sql}
                             FROM final_plan fp
                             JOIN master_data m ON fp.master_id = m.master_id
                             WHERE {source_where}
                             AND fp."{date_field}" BETWEEN %s AND %s
+                            AND (fp.type IS NULL OR fp.type != 'disaggregated')
                             GROUP BY fp."{date_field}", {source_cols_sql}
                             ORDER BY fp."{date_field}" ASC
                         """
@@ -1694,14 +1695,29 @@ class ForecastingService:
                                 })
                         
                         results.append(entry)
-                    
+
+                    # Step 6: Upsert disaggregated results into target table
+                    upserted_count = ForecastingService._upsert_disaggregated_data(
+                        cursor=cursor,
+                        results=results,
+                        target_table=request.target_table,
+                        target_columns=target_columns,
+                        date_field=date_field,
+                        target_field=target_field,
+                        user_email='system'  # TODO: Pass actual user email from request context
+                    )
+
+                    logger.info(f"Upserted {upserted_count} records into {request.target_table}")
+
                     return {
                         "records": results,
                         "total_count": total_combinations,
                         "summary": {
-                            "aggregation_level": request.aggregation_level,
+                            "aggregation_level": target_aggregation_level,  # Updated to show actual target level
                             "source_aggregation_level": source_aggregation_level,
                             "target_aggregation_level": target_aggregation_level,
+                            "target_table": request.target_table,
+                            "records_upserted": upserted_count,
                             "date_range": {
                                 "from": request.date_from,
                                 "to": request.date_to
@@ -1780,6 +1796,7 @@ class ForecastingService:
             JOIN master_data m ON s.master_id = m.master_id
             WHERE 1=1 {filter_clause}
             GROUP BY {target_cols_sql}
+            ORDER BY {target_cols_sql}
         """
         
         logger.debug(f"Ratio calculation query: {query}")
@@ -1798,348 +1815,161 @@ class ForecastingService:
         ratios_df = pd.merge(df_target, source_totals, on=source_columns)
         ratios_df['allocation_factor'] = ratios_df['target_volume'] / ratios_df['source_total_volume']
         ratios_df['allocation_factor'] = ratios_df['allocation_factor'].fillna(0)
-        
+
+        # Sort ratios_df for consistent processing order
+        sort_columns = target_columns + source_columns
+        ratios_df = ratios_df.sort_values(by=sort_columns).reset_index(drop=True)
+
         logger.info(f"Calculated {len(ratios_df)} disaggregation ratios")
-        
+
         return ratios_df
 
 
+
+
     @staticmethod
-    def _get_disaggregated_sales(
-        conn,
+    def _upsert_disaggregated_data(
+        cursor,
+        results: List[Dict[str, Any]],
+        target_table: str,
         target_columns: List[str],
-        filters: Optional[Dict[str, Any]],
         date_field: str,
         target_field: str,
-        interval: str,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        user_email: str
+    ) -> int:
         """
-        Get sales data at target aggregation level (already granular).
+        Upsert disaggregated data into the specified target table.
+
+        Args:
+            cursor: Database cursor
+            results: List of disaggregated result entries
+            target_table: Target table name (final_plan, product_manager, forecast_data)
+            target_columns: List of dimension columns
+            date_field: Date field name
+            target_field: Target field name
+            user_email: User email for auditing
+
+        Returns:
+            Number of records upserted
         """
-        # Build filter clause
-        filter_clause = ""
-        filter_params = []
+        upserted_count = 0
 
-        if filters:
-            filter_conditions = []
-            for col, val in filters.items():
-                if col not in ["interval", "date_from", "date_to"]:
-                    if isinstance(val, list):
-                        placeholders = ', '.join(['%s'] * len(val))
-                        filter_conditions.append(f'm."{col}" IN ({placeholders})')
-                        filter_params.extend(val)
-                    else:
-                        filter_conditions.append(f'm."{col}" = %s')
-                        filter_params.append(val)
+        for entry in results:
+            master_data = entry.get("master_data", {})
+            if not master_data:
+                continue
 
-            if filter_conditions:
-                filter_clause = "AND " + " AND ".join(filter_conditions)
-        
-        # Add date filters
-        if date_from:
-            filter_clause += f' AND s."{date_field}" >= %s'
-            filter_params.append(date_from)
-        
-        if date_to:
-            filter_clause += f' AND s."{date_field}" <= %s'
-            filter_params.append(date_to)
-        
-        date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field)
-        target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
-        
-        query = f"""
-            SELECT
-                {date_trunc} as date,
-                {target_cols_sql},
-                SUM(CAST(s."{target_field}" AS numeric)) as value
-            FROM sales_data s
-            JOIN master_data m ON s.master_id = m.master_id
-            WHERE 1=1 {filter_clause}
-            GROUP BY {date_trunc}, {target_cols_sql}
-            ORDER BY date, {target_cols_sql}
-        """
-        
-        df = pd.read_sql_query(query, conn, params=filter_params)
-        
-        # Convert to list of dictionaries
-        result = []
-        for _, row in df.iterrows():
-            record = {
-                'date': row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
-                'type': 'sales',
-                'value': float(row['value'])
-            }
-            # Add dimension columns
-            for col in target_columns:
-                record[col] = row[col]
-            
-            result.append(record)
-        
-        logger.info(f"Retrieved {len(result)} disaggregated sales records")
-        return result
+            # Resolve master_id for this dimension combination
+            try:
+                master_id = ForecastingService._resolve_master_id(cursor, master_data)
+            except ValidationException:
+                logger.warning(f"Could not resolve master_id for {master_data}, skipping")
+                continue
 
+            # Get UOM and unit_price from sales data
+            cursor.execute(
+                f"""
+                SELECT uom, unit_price
+                FROM sales_data
+                WHERE master_id = %s
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (master_id,),
+            )
+            sales_row = cursor.fetchone()
+            uom = sales_row[0] if sales_row else "UNIT"
+            unit_price = sales_row[1] if sales_row else 0.0
 
-    @staticmethod
-    def _get_and_disaggregate_forecast_data(
-        conn,
-        source_columns: List[str],
-        target_columns: List[str],
-        ratios_df: pd.DataFrame,
-        filters: Optional[Dict[str, Any]],
-        date_field: str,
-        target_field: str,
-        interval: str,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get forecast_data and disaggregate using ratios.
-        """
-        # Build filter clause
-        filter_clause = ""
-        filter_params = []
+            # Process each data type (forecast_data, final_plan)
+            for data_type in ["forecast_data", "final_plan"]:
+                data_list = entry.get(data_type, [])
+                if not data_list:
+                    continue
 
-        if filters:
-            filter_conditions = []
-            for col, val in filters.items():
-                if col not in ["interval", "date_from", "date_to"]:
-                    if isinstance(val, list):
-                        placeholders = ', '.join(['%s'] * len(val))
-                        filter_conditions.append(f'm."{col}" IN ({placeholders})')
-                        filter_params.extend(val)
-                    else:
-                        filter_conditions.append(f'm."{col}" = %s')
-                        filter_params.append(val)
+                for data_point in data_list:
+                    data_date = data_point.get("date")
+                    quantity = data_point.get("Quantity", 0)
 
-            if filter_conditions:
-                filter_clause = "AND " + " AND ".join(filter_conditions)
-        
-        # Add date filters - FIXED: Changed s. to f.
-        if date_from:
-            filter_clause += f' AND f."{date_field}" >= %s'
-            filter_params.append(date_from)
-        
-        if date_to:
-            filter_clause += f' AND f."{date_field}" <= %s'
-            filter_params.append(date_to)
-        
-        # FIXED: Changed the date_trunc call to use 'f' instead of 's'
-        date_trunc_expr = interval.upper()
-        if date_trunc_expr == "WEEKLY":
-            date_trunc = f"DATE_TRUNC('week', f.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "MONTHLY":
-            date_trunc = f"DATE_TRUNC('month', f.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "QUARTERLY":
-            date_trunc = f"DATE_TRUNC('quarter', f.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "YEARLY":
-            date_trunc = f"DATE_TRUNC('year', f.\"{date_field}\"::timestamp)::date"
-        else:
-            date_trunc = f"DATE_TRUNC('month', f.\"{date_field}\"::timestamp)::date"
-        
-        source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
-        
-        query = f"""
-            SELECT
-                {date_trunc} as date,
-                {source_cols_sql},
-                SUM(CAST(f."{target_field}" AS numeric)) as value
-            FROM forecast_data f
-            JOIN master_data m ON f.master_id = m.master_id
-            WHERE 1=1 {filter_clause}
-            GROUP BY {date_trunc}, {source_cols_sql}
-            ORDER BY date, {source_cols_sql}
-        """
-        
-        df_forecast = pd.read_sql_query(query, conn, params=filter_params)
-        
-        if df_forecast.empty:
-            logger.info("No forecast data found for disaggregation")
-            return []
-        
-        # Apply ratios to disaggregate
-        result = []
-        for _, forecast_row in df_forecast.iterrows():
-            # Find matching ratios
-            mask = pd.Series(True, index=ratios_df.index)
-            for col in source_columns:
-                if col in ratios_df.columns:
-                    mask &= (ratios_df[col].astype(str) == str(forecast_row[col]))
-            
-            relevant_ratios = ratios_df[mask]
-            
-            for _, ratio_row in relevant_ratios.iterrows():
-                disagg_value = float(forecast_row['value']) * float(ratio_row['allocation_factor'])
-                
-                record = {
-                    'date': forecast_row['date'].isoformat() if hasattr(forecast_row['date'], 'isoformat') else str(forecast_row['date']),
-                    'type': 'forecast',
-                    'value': disagg_value
-                }
-                
-                # Add dimension columns
-                for col in target_columns:
-                    record[col] = ratio_row[col]
-                
-                result.append(record)
-        
-        logger.info(f"Disaggregated {len(result)} forecast records")
-        return result
+                    if not data_date or quantity == 0:
+                        continue
 
+                    # Build upsert query based on target table
+                    if target_table == "final_plan":
+                        # Insert into final_plan table
+                        final_plan_id = str(uuid.uuid4())
+                        cursor.execute(f"""
+                            INSERT INTO final_plan
+                            (final_plan_id, master_id, "{date_field}", "{target_field}",
+                             uom, unit_price, type, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}")
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                type = EXCLUDED.type,
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = EXCLUDED.created_by
+                        """, (
+                            final_plan_id,
+                            master_id,
+                            data_date,
+                            quantity,
+                            uom,
+                            unit_price,
+                            'disaggregated',
+                            user_email
+                        ))
 
-    @staticmethod
-    def _get_and_disaggregate_final_plan(
-        conn,
-        source_columns: List[str],
-        target_columns: List[str],
-        ratios_df: pd.DataFrame,
-        filters: Optional[Dict[str, Any]],
-        date_field: str,
-        target_field: str,
-        interval: str,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get final_plan data and disaggregate using ratios.
-        """
-        # Build filter clause
-        filter_clause = ""
-        filter_params = []
+                    elif target_table == "product_manager":
+                        # Insert into product_manager table
+                        pm_id = str(uuid.uuid4())
+                        cursor.execute(f"""
+                            INSERT INTO product_manager
+                            (pm_id, master_id, "{date_field}", "{target_field}",
+                             uom, unit_price, type, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}")
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = EXCLUDED.created_by
+                        """, (
+                            pm_id,
+                            master_id,
+                            data_date,
+                            quantity,
+                            uom,
+                            unit_price,
+                            'disaggregated',
+                            user_email
+                        ))
 
-        if filters:
-            filter_conditions = []
-            for col, val in filters.items():
-                if col not in ["interval", "date_from", "date_to"]:
-                    if isinstance(val, list):
-                        placeholders = ', '.join(['%s'] * len(val))
-                        filter_conditions.append(f'm."{col}" IN ({placeholders})')
-                        filter_params.extend(val)
-                    else:
-                        filter_conditions.append(f'm."{col}" = %s')
-                        filter_params.append(val)
+                    elif target_table == "forecast_data":
+                        # Insert into forecast_data table
+                        cursor.execute(f"""
+                            INSERT INTO forecast_data
+                            (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}")
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = EXCLUDED.created_by
+                        """, (
+                            master_id,
+                            data_date,
+                            quantity,
+                            uom,
+                            unit_price,
+                            user_email
+                        ))
 
-            if filter_conditions:
-                filter_clause = "AND " + " AND ".join(filter_conditions)
-        
-        # Add date filters - FIXED: Changed s. to fp.
-        if date_from:
-            filter_clause += f' AND fp."{date_field}" >= %s'
-            filter_params.append(date_from)
-        
-        if date_to:
-            filter_clause += f' AND fp."{date_field}" <= %s'
-            filter_params.append(date_to)
-        
-        # FIXED: Changed the date_trunc call to use 'fp' instead of 's'
-        date_trunc_expr = interval.upper()
-        if date_trunc_expr == "WEEKLY":
-            date_trunc = f"DATE_TRUNC('week', fp.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "MONTHLY":
-            date_trunc = f"DATE_TRUNC('month', fp.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "QUARTERLY":
-            date_trunc = f"DATE_TRUNC('quarter', fp.\"{date_field}\"::timestamp)::date"
-        elif date_trunc_expr == "YEARLY":
-            date_trunc = f"DATE_TRUNC('year', fp.\"{date_field}\"::timestamp)::date"
-        else:
-            date_trunc = f"DATE_TRUNC('month', fp.\"{date_field}\"::timestamp)::date"
-        
-        source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
-        
-        query = f"""
-            SELECT
-                {date_trunc} as date,
-                {source_cols_sql},
-                SUM(CAST(fp."{target_field}" AS numeric)) as value
-            FROM final_plan fp
-            JOIN master_data m ON fp.master_id = m.master_id
-            WHERE 1=1 {filter_clause}
-            GROUP BY {date_trunc}, {source_cols_sql}
-            ORDER BY date, {source_cols_sql}
-        """
-        
-        df_final_plan = pd.read_sql_query(query, conn, params=filter_params)
-        
-        if df_final_plan.empty:
-            logger.info("No final plan data found for disaggregation")
-            return []
-        
-        # Apply ratios to disaggregate
-        result = []
-        for _, plan_row in df_final_plan.iterrows():
-            # Find matching ratios
-            mask = pd.Series(True, index=ratios_df.index)
-            for col in source_columns:
-                if col in ratios_df.columns:
-                    mask &= (ratios_df[col].astype(str) == str(plan_row[col]))
-            
-            relevant_ratios = ratios_df[mask]
-            
-            for _, ratio_row in relevant_ratios.iterrows():
-                disagg_value = float(plan_row['value']) * float(ratio_row['allocation_factor'])
-                
-                record = {
-                    'date': plan_row['date'].isoformat() if hasattr(plan_row['date'], 'isoformat') else str(plan_row['date']),
-                    'type': 'final_plan',
-                    'value': disagg_value
-                }
-                
-                # Add dimension columns
-                for col in target_columns:
-                    record[col] = ratio_row[col]
-                
-                result.append(record)
-        
-        logger.info(f"Disaggregated {len(result)} final plan records")
-        return result
+                    upserted_count += 1
 
-
-    @staticmethod
-    def _merge_disaggregated_data(
-        sales_data: List[Dict[str, Any]],
-        forecast_data: List[Dict[str, Any]],
-        final_plan_data: List[Dict[str, Any]],
-        target_columns: List[str],
-        date_field: str,
-        target_field: str
-    ) -> List[Dict[str, Any]]:
-        """
-        Merge sales, forecast, and final plan data into a unified view.
-        
-        Returns list of records with all three data types side by side.
-        """
-        # Create a unified key structure
-        def create_key(record):
-            dimension_key = tuple(record.get(col, '') for col in target_columns)
-            return (record['date'], dimension_key)
-        
-        # Build lookup dictionaries
-        sales_dict = {create_key(r): r['value'] for r in sales_data}
-        forecast_dict = {create_key(r): r['value'] for r in forecast_data}
-        final_plan_dict = {create_key(r): r['value'] for r in final_plan_data}
-        
-        # Get all unique keys
-        all_keys = set(sales_dict.keys()) | set(forecast_dict.keys()) | set(final_plan_dict.keys())
-        
-        # Merge data
-        merged = []
-        for key in sorted(all_keys):
-            date, dimension_tuple = key
-            
-            record = {
-                'date': date,
-                'sales_value': sales_dict.get(key),
-                'forecast_value': forecast_dict.get(key),
-                'final_plan_value': final_plan_dict.get(key)
-            }
-            
-            # Add dimension columns
-            for i, col in enumerate(target_columns):
-                record[col] = dimension_tuple[i]
-            
-            merged.append(record)
-        
-        logger.info(f"Merged {len(merged)} total records")
-        return merged
+        return upserted_count
         

@@ -909,21 +909,24 @@ async def disaggregate_data(
     _: Dict = Depends(require_object_access("Forecast"))
 ):
     """
-    Disaggregate sales, forecast, and final plan data to a more granular level.
-    
-    This endpoint takes aggregated data (e.g., by Product) and breaks it down
-    to a finer granularity (e.g., Product-Location) using historical sales distribution.
-    
+    Disaggregate sales, forecast, and final plan data to the lowest granular level.
+
+    This endpoint takes aggregated data and breaks it down to the finest granularity
+    (all dimension fields from master_data) using historical sales distribution,
+    then upserts the results into the specified target table.
+
     **Process:**
-    1. Calculates historical distribution ratios from sales_data
-    2. Returns granular sales data (already at target level)
-    3. Disaggregates forecast_data using calculated ratios
-    4. Disaggregates final_plan using calculated ratios
-    
+    1. Auto-determines target level as all dimension fields from master_data
+    2. Calculates historical distribution ratios from sales_data
+    3. Returns granular sales data (already at target level)
+    4. Disaggregates forecast_data using calculated ratios
+    5. Disaggregates final_plan using calculated ratios
+    6. Upserts disaggregated results into the specified target table
+
     **Example Request:**
 ```json
     {
-        "aggregation_level": ["product", "location"],
+        "target_table": "final_plan",
         "filters": {
             "product": "19191"
         },
@@ -932,8 +935,8 @@ async def disaggregate_data(
         "interval": "MONTHLY"
     }
 ```
-    
-    **Response Format (Same as /aggregated-data):**
+
+    **Response Format (Same as before):**
     - `records`: Array of dimension groups with their sales, forecast, and final plan data
     - `total_count`: Total number of unique dimension combinations
     - Each record contains:
@@ -941,17 +944,18 @@ async def disaggregate_data(
       - `sales_data`: Array with date, UOM, Quantity
       - `forecast_data`: Array with date, UOM, Quantity
       - `final_plan`: Array with date, UOM, Quantity
-    
-    **Use Case:**
-    View Product 19191's sales, forecast, and final plan broken down by location
-    in the dashboard, with values calculated based on historical location distribution.
+
+    **Target Tables:**
+    - `final_plan`: Final plan table
+    - `product_manager`: Product manager table
+    - `forecast_data`: Forecast data table
     """
     try:
         logger.info(
-            f"Disaggregating data to level {request.aggregation_level} "
+            f"Disaggregating data to lowest granularity and upserting to {request.target_table} "
             f"for tenant {tenant_data['tenant_id']} (Page {page}, Size {page_size})"
         )
-        
+
         result = ForecastingService.disaggregate_data(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
@@ -959,14 +963,14 @@ async def disaggregate_data(
             page=page,
             page_size=page_size
         )
-        
+
         return ResponseHandler.list_response(
             data=result["records"],
             page=page,
             page_size=page_size,
             total_count=result["total_count"]
         )
-    
+
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:

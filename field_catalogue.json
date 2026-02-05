@@ -148,3 +148,130 @@
   "password": "test@123",
   "tenant_identifier": "sekhmet_pharmaventures"
 }
+
+Disaggregate api input
+
+{
+  "aggregation_level": ["product", "location"],
+  "filters": [
+    {
+      "field_name": "product",
+      "values": ["PROD001"]
+    }
+  ],
+  "date_from": "2023-01-01",
+  "date_to": "2024-12-01",
+  "interval": "MONTHLY"
+}
+
+Forecast with external factors and multiple algorithms input
+
+{
+  "version_id": "6530f539-8568-48df-b1d2-2e70361b1205",
+  "forecast_filters": {
+    "aggregation_level": "product",
+    "interval": "MONTHLY",
+    "product": ["19191"],
+    "selected_external_factors": ["GDP_Growth"]
+  },
+  "forecast_start": "2025-07-01",
+  "forecast_end": "2025-12-31",
+  "history_start": "2021-01-01",
+  "history_end": "2025-06-01",
+  "algorithms": [
+    {
+      "algorithm_id": 1,
+      "execution_order": 1,
+      "custom_parameters": {
+        "seasonal_periods": 12,
+        "trend_dampening": 0.8
+      }
+    },
+    {
+      "algorithm_id": 2,
+      "execution_order": 2,
+      "custom_parameters": {
+        "n_estimators": 100,
+        "max_depth": 10
+      }
+    }
+  ]
+}
+
+SAP-IBP Write into database
+
+{
+  "connection": {
+    "base_url": "https://my303361-api.scmibp1.ondemand.com",
+    "username": "ODATA_USER",
+    "password": "JyqEsTPHyn7uzVZnHMyfLpN$SFJLwktUloHPaxAu",
+    "sap_client": "100",
+    "timeout": 60.0
+  },
+  "read": {
+    "service_path": "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV",
+    "entity_set": "YSAPIBP1",
+    "select": [
+      "PRDID",
+      "ACTUALSQTY",
+      "PERIODID3_TSTAMP",
+      "UOMTOID"
+    ],
+    "filter": {
+      "UOMTOID": {
+        "eq": "KG"
+      }
+    },
+    "orderby": [],
+    "top": null,
+    "skip": 0,
+    "format": "json"
+  },
+  "master_data_mappings": [
+    {
+      "sap_field": "PRDID",
+      "db_field": "product_id"
+    }
+  ],
+  "sales_data_mappings": [
+    {
+      "sap_field": "ACTUALSQTY",
+      "db_field": "quantity"
+    },
+    {
+      "sap_field": "PERIODID3_TSTAMP",
+      "db_field": "date"
+    }
+  ]
+}
+
+SAP-IBP Read input
+
+{
+  "connection": {
+    "base_url": "https://my303361-api.scmibp1.ondemand.com",
+    "username": "ODATA_USER",
+    "password": "JyqEsTPHyn7uzVZnHMyfLpN$SFJLwktUloHPaxAu",
+    "sap_client": "100",
+    "timeout": 60.0
+  },
+  "read": {
+    "service_path": "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV",
+    "entity_set": "YSAPIBP1",
+    "select": [
+      "PRDID",
+      "ACTUALSQTY",
+      "PERIODID3_TSTAMP",
+      "UOMTOID"
+    ],
+    "filter": {
+      "UOMTOID": {
+        "eq": "KG"
+      }
+    },
+    "orderby": [],
+    "top": null,
+    "skip": 0,
+    "format": "json"
+  }
+}
