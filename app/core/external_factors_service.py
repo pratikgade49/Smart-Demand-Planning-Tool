@@ -725,6 +725,122 @@ class ExternalFactorsService:
             raise DatabaseException(f"Failed to list factors: {str(e)}")
 
     @staticmethod
+    def bulk_upload_from_excel(
+        tenant_id: str,
+        database_name: str,
+        df: pd.DataFrame,
+        user_email: str
+    ) -> Dict[str, Any]:
+        """
+        Bulk upload external factors from Excel DataFrame.
+        Supports upsert on (factor_name, date).
+        
+        Args:
+            tenant_id: Tenant identifier
+            database_name: Tenant's database name
+            df: DataFrame with columns: Date, Factor Name, Factor Value
+            user_email: User performing upload
+            
+        Returns:
+            Upload summary with success/failure counts
+        """
+        db_manager = get_db_manager()
+        
+        total_imported = 0
+        total_updated = 0
+        failed_records = []
+        
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    for idx, row in df.iterrows():
+                        try:
+                            # Extract and validate data
+                            factor_name = str(row.get('Factor Name', '')).strip()
+                            if not factor_name:
+                                failed_records.append({
+                                    'row': idx + 2,  # +2 because Excel is 1-indexed and we skip header
+                                    'error': 'Factor Name cannot be empty'
+                                })
+                                continue
+                            
+                            # Parse date
+                            try:
+                                date_value = pd.to_datetime(row.get('Date')).date()
+                            except (ValueError, TypeError):
+                                failed_records.append({
+                                    'row': idx + 2,
+                                    'error': f'Invalid date format: {row.get("Date")}'
+                                })
+                                continue
+                            
+                            # Parse factor value
+                            try:
+                                factor_value = float(row.get('Factor Value', 0))
+                            except (ValueError, TypeError):
+                                failed_records.append({
+                                    'row': idx + 2,
+                                    'error': f'Invalid factor value: {row.get("Factor Value")}'
+                                })
+                                continue
+                            
+                            factor_id = str(uuid.uuid4())
+                            
+                            # Upsert the record
+                            cursor.execute("""
+                                INSERT INTO external_factors
+                                (factor_id, date, factor_name, factor_value, created_by, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (factor_name, date) 
+                                DO UPDATE SET 
+                                    factor_value = EXCLUDED.factor_value,
+                                    updated_at = %s,
+                                    updated_by = %s
+                                RETURNING (xmax = 0) AS inserted
+                            """, (
+                                factor_id,
+                                date_value,
+                                factor_name,
+                                factor_value,
+                                user_email,
+                                datetime.utcnow(),
+                                datetime.utcnow(),
+                                user_email
+                            ))
+                            
+                            # Check if inserted or updated
+                            result = cursor.fetchone()
+                            if result and result[0]:
+                                total_imported += 1
+                            else:
+                                total_updated += 1
+                            
+                        except Exception as e:
+                            failed_records.append({
+                                'row': idx + 2,
+                                'error': str(e)
+                            })
+                    
+                    conn.commit()
+                    logger.info(f"Bulk upload completed: {total_imported} inserted, {total_updated} updated, {len(failed_records)} failed")
+                    
+                finally:
+                    cursor.close()
+            
+            return {
+                "total_inserted": total_imported,
+                "total_updated": total_updated,
+                "total_records": total_imported + total_updated,
+                "failed_records": failed_records,
+                "upload_date": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Bulk upload from Excel failed: {str(e)}")
+            raise DatabaseException(f"Failed to upload external factors: {str(e)}")
+
+    @staticmethod
     def delete_factor_by_name(
         tenant_id: str,
         database_name: str,

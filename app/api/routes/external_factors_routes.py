@@ -2,18 +2,20 @@
 External Factors API Routes with FRED Integration.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, UploadFile, File
 from typing import Dict, Any, List, Optional
 from datetime import date
 from pydantic import BaseModel, Field
 
 from app.core.external_factors_service import ExternalFactorsService
 from app.core.fred_api_service import FREDAPIService
+from app.core.excel_upload_service import ExcelUploadService
 from app.core.responses import ResponseHandler
 from app.core.exceptions import AppException
 from app.api.dependencies import get_current_tenant, require_object_access
 from app.config import settings
 import logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +254,72 @@ async def forecast_future_factors(
 
 
 # ============================================================================
+# EXCEL UPLOAD ENDPOINTS
+# ============================================================================
+
+@router.post("/upload", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED)
+async def upload_external_factors_excel(
+    file: UploadFile = File(...),
+    tenant_data: Dict = Depends(get_current_tenant),
+    _: Dict = Depends(require_object_access("Allow Edit", min_role_id=2))
+):
+    """
+    Upload external factors data from Excel file.
+    
+    **Excel File Requirements**:
+    - Must contain columns: 'Date', 'Factor Name', 'Factor Value'
+    - Date format should be parseable (YYYY-MM-DD, MM/DD/YYYY, etc.)
+    - Factor Name cannot be empty
+    - Factor Value should be numeric
+    
+    **Behavior**:
+    - Supports upsert: if a record with same factor_name and date exists, it will be updated
+    - Returns summary of inserted/updated/failed records
+    
+    **Example Usage**:
+    Upload an Excel file with the required columns via multipart/form-data.
+    """
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith(('.xlsx', '.xls')):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only Excel files (.xlsx, .xls) are allowed"
+            )
+
+        # Read file content
+        file_content = await file.read()
+
+        # Validate and parse Excel file
+        df = ExcelUploadService.validate_excel_file(file_content)
+
+        # Validate required columns
+        required_columns = ['Date', 'Factor Name', 'Factor Value']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required columns: {missing_columns}"
+            )
+
+        # Process upload
+        result = ExternalFactorsService.bulk_upload_from_excel(
+            tenant_id=tenant_data["tenant_id"],
+            database_name=tenant_data["database_name"],
+            df=df,
+            user_email=tenant_data["email"]
+        )
+
+        return ResponseHandler.success(data=result, status_code=201)
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in upload_external_factors_excel: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
 # FACTOR MANAGEMENT
 # ============================================================================
 
@@ -351,3 +419,5 @@ async def list_external_factors(
     except Exception as e:
         logger.error(f"Failed to list factors: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
