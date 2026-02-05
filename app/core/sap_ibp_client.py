@@ -8,7 +8,7 @@ from __future__ import annotations
 import httpx
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 from datetime import date, datetime, timedelta
 import uuid
 
@@ -38,11 +38,9 @@ class FilterCondition(BaseModel):
 
 class FilterGroup(BaseModel):
     """Filter group for complex OData queries."""
+    model_config = ConfigDict(populate_by_name=True, extra='forbid')
     and_conditions: Optional[List[FilterCondition]] = Field(default=None, alias="and")
     or_conditions: Optional[List[FilterCondition]] = Field(default=None, alias="or")
-
-    class Config:
-        populate_by_name = True
 
 
 class ReadConfig(BaseModel):
@@ -50,7 +48,7 @@ class ReadConfig(BaseModel):
     service_path: str  # e.g., "/sap/opu/odata/IBP/PLANNING_DATA_API_SRV"
     entity_set: str  # e.g., "YSAPIBP1"
     select: List[str]  # Fields to select
-    filter: Optional[Union[Dict[str, FilterCondition], FilterGroup]] = None
+    filter: Optional[Union[FilterGroup, Dict[str, Any]]] = None
     orderby: Optional[List[str]] = None
     top: Optional[int] = None
     skip: Optional[int] = None
@@ -115,6 +113,8 @@ class DynamicODataClient:
                     for operator, value in condition_data.items():
                         condition = FilterCondition(field=field, operator=operator, value=value)
                         conditions.append(self._format_condition(condition))
+                elif isinstance(condition_data, FilterCondition):
+                    conditions.append(self._format_condition(condition_data))
             return " and ".join(conditions) if conditions else ""
 
         # FilterGroup format with and/or
