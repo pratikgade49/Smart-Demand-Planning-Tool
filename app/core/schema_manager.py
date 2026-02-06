@@ -479,6 +479,9 @@ class SchemaManager:
                             uom VARCHAR(20) NOT NULL,
                             unit_price DECIMAL(18, 2),
 
+                            -- Disaggregation tracking columns
+                            type VARCHAR(20) DEFAULT 'manual',
+
                             -- Audit fields (created only - transactions are immutable)
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             created_by VARCHAR(255) NOT NULL,
@@ -509,6 +512,7 @@ class SchemaManager:
 
                     cursor.execute(f'CREATE INDEX idx_product_manager_date ON product_manager("{date_field.field_name}")')
                     cursor.execute(f'CREATE INDEX idx_product_manager_master_id ON product_manager(master_id)')
+                    cursor.execute('CREATE INDEX idx_product_manager_type ON product_manager(type)')
                     # Store metadata about target and date fields
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue_metadata (

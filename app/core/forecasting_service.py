@@ -1428,11 +1428,10 @@ class ForecastingService:
             target_columns = ForecastingService._get_dimension_fields(tenant_id, database_name)
             target_aggregation_level = '-'.join(target_columns)
 
-            # ✅ FIXED: Properly convert filters
+            # ✅ Convert filters
             filters_dict = {}
             if request.filters:
                 for filter_item in request.filters:
-                    # Handle both single values and lists
                     if len(filter_item.values) == 1:
                         filters_dict[filter_item.field_name] = filter_item.values[0]
                     else:
@@ -1445,13 +1444,12 @@ class ForecastingService:
                     if key in target_columns:
                         source_columns.append(key)
 
-            # If no source columns identified, use first target column
             if not source_columns:
                 source_columns = [target_columns[0]]
 
             source_aggregation_level = '-'.join(source_columns)
 
-            logger.info(f"Disaggregating from {source_aggregation_level} to lowest granularity ({target_aggregation_level}) and upserting to {request.target_table}")
+            logger.info(f"Disaggregating from {source_aggregation_level} to {target_aggregation_level}")
 
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
@@ -1473,12 +1471,10 @@ class ForecastingService:
                         return {
                             "records": [],
                             "total_count": 0,
-                            "summary": {
-                                "message": "No historical sales data found for disaggregation"
-                            }
+                            "summary": {"message": "No historical sales data found"}
                         }
                     
-                    # Step 2: Build WHERE clause for filtering
+                    # Step 2: Build filter clause for master_data
                     where_conditions = []
                     where_params = []
                     
@@ -1494,10 +1490,9 @@ class ForecastingService:
                     
                     where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else "WHERE 1=1"
                     
-                    # Step 3: Get all unique target dimension combinations (paginated)
+                    # Step 3: Get ALL target dimension combinations (Process everything for data integrity)
                     target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
                     
-                    # Count total unique combinations
                     count_query = f"""
                         SELECT COUNT(*) FROM (
                             SELECT DISTINCT {target_cols_sql}
@@ -1508,30 +1503,24 @@ class ForecastingService:
                     cursor.execute(count_query, where_params)
                     total_combinations = cursor.fetchone()[0]
                     
-                    # Get paginated dimension combinations
-                    offset = (page - 1) * page_size
                     groups_query = f"""
                         SELECT DISTINCT {target_cols_sql}
                         FROM master_data m
                         {where_clause}
                         ORDER BY {target_cols_sql}
-                        LIMIT %s OFFSET %s
                     """
-                    cursor.execute(groups_query, where_params + [page_size, offset])
+                    cursor.execute(groups_query, where_params)
                     dimension_groups = cursor.fetchall()
                     
                     if not dimension_groups:
                         return {
                             "records": [],
                             "total_count": total_combinations,
-                            "summary": {
-                                "message": "No dimension combinations found for the specified page"
-                            }
+                            "summary": {"message": "No dimension combinations found"}
                         }
                     
-                    # Step 4: Build ratios lookup dictionary
-                    ratios_dict = {}  # {(target_dims): {(source_dims): allocation_factor}}
-                    
+                    # Step 4: Build ratios lookup
+                    ratios_dict = {}
                     for _, row in ratios_df.iterrows():
                         target_key = tuple(str(row[col]) for col in target_columns)
                         source_key = tuple(str(row[col]) for col in source_columns)
@@ -1541,16 +1530,82 @@ class ForecastingService:
                             ratios_dict[target_key] = {}
                         ratios_dict[target_key][source_key] = allocation_factor
                     
-                    # Step 5: Build results for each dimension group
-                    results = []
+                    # ✅ Step 5: Fetch SOURCE-LEVEL forecast data ONCE (not per target group)
                     start_date = request.date_from or "1900-01-01"
                     end_date = request.date_to or "2099-12-31"
+                    
+                    source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
+                    
+                    # Build filter for source-level data
+                    source_filter_conditions = []
+                    source_filter_params = []
+                    
+                    if filters_dict:
+                        for col, val in filters_dict.items():
+                            if isinstance(val, list):
+                                placeholders_f = ', '.join(['%s'] * len(val))
+                                source_filter_conditions.append(f'm."{col}" IN ({placeholders_f})')
+                                source_filter_params.extend(val)
+                            else:
+                                source_filter_conditions.append(f'm."{col}" = %s')
+                                source_filter_params.append(val)
+                    
+                    source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
+                    
+                    # Fetch all forecast data at SOURCE level
+                    forecast_query = f"""
+                        SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
+                            MAX(f.uom), {source_cols_sql}
+                        FROM forecast_data f
+                        JOIN master_data m ON f.master_id = m.master_id
+                        WHERE {source_where}
+                        AND f."{date_field}" BETWEEN %s AND %s
+                        GROUP BY f."{date_field}", {source_cols_sql}
+                        ORDER BY f."{date_field}" ASC
+                    """
+                    
+                    cursor.execute(forecast_query, source_filter_params + [start_date, end_date])
+                    forecast_source_data = cursor.fetchall()
+                    
+                    # Fetch all final_plan data at SOURCE level
+                    final_plan_query = f"""
+                        SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)),
+                            MAX(fp.uom), {source_cols_sql}
+                        FROM final_plan fp
+                        JOIN master_data m ON fp.master_id = m.master_id
+                        WHERE {source_where}
+                        AND fp."{date_field}" BETWEEN %s AND %s
+                        AND (fp.type IS NULL OR fp.type != 'disaggregated')
+                        GROUP BY fp."{date_field}", {source_cols_sql}
+                        ORDER BY fp."{date_field}" ASC
+                    """
+                    
+                    cursor.execute(final_plan_query, source_filter_params + [start_date, end_date])
+                    final_plan_source_data = cursor.fetchall()
+
+                    # Fetch all product_manager data at SOURCE level
+                    product_manager_query = f"""
+                        SELECT pm."{date_field}", SUM(CAST(pm."{target_field}" AS DOUBLE PRECISION)),
+                            MAX(pm.uom), {source_cols_sql}
+                        FROM product_manager pm
+                        JOIN master_data m ON pm.master_id = m.master_id
+                        WHERE {source_where}
+                        AND pm."{date_field}" BETWEEN %s AND %s
+                        AND (pm.type IS NULL OR pm.type != 'disaggregated')
+                        GROUP BY pm."{date_field}", {source_cols_sql}
+                        ORDER BY pm."{date_field}" ASC
+                    """
+                    cursor.execute(product_manager_query, source_filter_params + [start_date, end_date])
+                    product_manager_source_data = cursor.fetchall()
+                    
+                    # Step 6: Build results for ALL target dimension groups
+                    all_results = []
                     
                     for group in dimension_groups:
                         group_data = dict(zip(target_columns, group))
                         target_key = tuple(str(v) for v in group)
                         
-                        # Find all master_ids for this group
+                        # Find master_ids for this target group (for sales data only)
                         group_conditions = []
                         group_vals = []
                         for col, val in group_data.items():
@@ -1561,11 +1616,7 @@ class ForecastingService:
                                 group_vals.append(val)
                         
                         group_where = " AND ".join(group_conditions)
-                        master_id_query = f"""
-                            SELECT master_id
-                            FROM master_data m
-                            WHERE {group_where}
-                        """
+                        master_id_query = f"SELECT master_id FROM master_data m WHERE {group_where}"
                         cursor.execute(master_id_query, group_vals)
                         master_ids = [row[0] for row in cursor.fetchall()]
                         
@@ -1577,11 +1628,11 @@ class ForecastingService:
                             "sales_data": [],
                             "forecast_data": [],
                             "final_plan": [],
+                            "product_manager": [],
                         }
                         
+                        # Fetch SALES data (already granular)
                         placeholders = ",".join(["%s"] * len(master_ids))
-                        
-                        # ✅ Fetch SALES data directly (no disaggregation needed)
                         sales_query = f"""
                             SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(uom)
                             FROM sales_data
@@ -1599,42 +1650,8 @@ class ForecastingService:
                                 "Quantity": float(quantity) if quantity is not None else 0.0,
                             })
                         
-                        # ✅ FIXED: Fetch FORECAST data at SOURCE level and disaggregate
-                        source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
-                        
-                        # Build proper filter for source-level query
-                        source_filter_conditions = []
-                        source_filter_params = []
-                        
-                        if filters_dict:
-                            for col, val in filters_dict.items():
-                                if col in source_columns:  # Only filter by source columns
-                                    if isinstance(val, list):
-                                        placeholders_f = ', '.join(['%s'] * len(val))
-                                        source_filter_conditions.append(f'm."{col}" IN ({placeholders_f})')
-                                        source_filter_params.extend(val)
-                                    else:
-                                        source_filter_conditions.append(f'm."{col}" = %s')
-                                        source_filter_params.append(val)
-                        
-                        source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
-                        
-                        forecast_query = f"""
-                            SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
-                                MAX(f.uom), {source_cols_sql}
-                            FROM forecast_data f
-                            JOIN master_data m ON f.master_id = m.master_id
-                            WHERE {source_where}
-                            AND f."{date_field}" BETWEEN %s AND %s
-                            AND (f.created_by IS NULL OR f.created_by != 'system')
-                            GROUP BY f."{date_field}", {source_cols_sql}
-                            ORDER BY f."{date_field}" ASC
-                        """
-                        
-                        cursor.execute(forecast_query, source_filter_params + [start_date, end_date])
-                        
-                        # Apply disaggregation
-                        for row in cursor.fetchall():
+                        # ✅ Disaggregate FORECAST data
+                        for row in forecast_source_data:
                             num_source_cols = len(source_columns)
                             data_date = row[0]
                             source_quantity = row[1]
@@ -1646,6 +1663,7 @@ class ForecastingService:
                             
                             source_key = tuple(str(v) for v in source_vals)
                             
+                            # Apply allocation factor
                             if target_key in ratios_dict and source_key in ratios_dict[target_key]:
                                 allocation_factor = ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
@@ -1656,23 +1674,8 @@ class ForecastingService:
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
                         
-                        # ✅ FIXED: Fetch FINAL PLAN data at SOURCE level and disaggregate
-                        final_plan_query = f"""
-                            SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)),
-                                MAX(fp.uom), {source_cols_sql}
-                            FROM final_plan fp
-                            JOIN master_data m ON fp.master_id = m.master_id
-                            WHERE {source_where}
-                            AND fp."{date_field}" BETWEEN %s AND %s
-                            AND (fp.type IS NULL OR fp.type != 'disaggregated')
-                            GROUP BY fp."{date_field}", {source_cols_sql}
-                            ORDER BY fp."{date_field}" ASC
-                        """
-                        
-                        cursor.execute(final_plan_query, source_filter_params + [start_date, end_date])
-                        
-                        # Apply disaggregation
-                        for row in cursor.fetchall():
+                        # ✅ Disaggregate FINAL PLAN data
+                        for row in final_plan_source_data:
                             num_source_cols = len(source_columns)
                             data_date = row[0]
                             source_quantity = row[1]
@@ -1684,6 +1687,7 @@ class ForecastingService:
                             
                             source_key = tuple(str(v) for v in source_vals)
                             
+                            # Apply allocation factor
                             if target_key in ratios_dict and source_key in ratios_dict[target_key]:
                                 allocation_factor = ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
@@ -1693,31 +1697,61 @@ class ForecastingService:
                                     "UOM": uom or "UNIT",
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
-                        
-                        results.append(entry)
 
-                    # Step 6: Upsert disaggregated results into target table
+                        # ✅ Disaggregate PRODUCT MANAGER data
+                        for row in product_manager_source_data:
+                            num_source_cols = len(source_columns)
+                            data_date = row[0]
+                            source_quantity = row[1]
+                            uom = row[2]
+                            source_vals = row[3:3+num_source_cols]
+                            
+                            if source_quantity is None or source_quantity == 0:
+                                continue
+                            
+                            source_key = tuple(str(v) for v in source_vals)
+                            
+                            # Apply allocation factor
+                            if target_key in ratios_dict and source_key in ratios_dict[target_key]:
+                                allocation_factor = ratios_dict[target_key][source_key]
+                                disaggregated_qty = float(source_quantity) * allocation_factor
+                                
+                                entry["product_manager"].append({
+                                    "date": str(data_date),
+                                    "UOM": uom or "UNIT",
+                                    "Quantity": round(disaggregated_qty, 4),
+                                })
+                        
+                        all_results.append(entry)
+
+
+                    # Step 7: Upsert to target table (Upsert EVERYTHING)
                     upserted_count = ForecastingService._upsert_disaggregated_data(
                         cursor=cursor,
-                        results=results,
+                        results=all_results,
                         target_table=request.target_table,
                         target_columns=target_columns,
                         date_field=date_field,
                         target_field=target_field,
-                        user_email='system'  # TODO: Pass actual user email from request context
+                        user_email='system'
                     )
 
+                    conn.commit()
                     logger.info(f"Upserted {upserted_count} records into {request.target_table}")
 
+                    # Step 8: Paginate the response records
+                    offset = (page - 1) * page_size
+                    paginated_results = all_results[offset : offset + page_size]
+
                     return {
-                        "records": results,
+                        "records": paginated_results,
                         "total_count": total_combinations,
                         "summary": {
-                            "aggregation_level": target_aggregation_level,  # Updated to show actual target level
                             "source_aggregation_level": source_aggregation_level,
                             "target_aggregation_level": target_aggregation_level,
                             "target_table": request.target_table,
                             "records_upserted": upserted_count,
+                            "total_combinations": total_combinations,
                             "date_range": {
                                 "from": request.date_from,
                                 "to": request.date_to
@@ -1880,8 +1914,8 @@ class ForecastingService:
             uom = sales_row[0] if sales_row else "UNIT"
             unit_price = sales_row[1] if sales_row else 0.0
 
-            # Process each data type (forecast_data, final_plan)
-            for data_type in ["forecast_data", "final_plan"]:
+            # Process each data type (forecast_data, final_plan, product_manager)
+            for data_type in ["forecast_data", "final_plan", "product_manager"]:
                 data_list = entry.get(data_type, [])
                 if not data_list:
                     continue
