@@ -1725,19 +1725,23 @@ class ForecastingService:
                         all_results.append(entry)
 
 
-                    # Step 7: Upsert to target table (Upsert EVERYTHING)
-                    upserted_count = ForecastingService._upsert_disaggregated_data(
-                        cursor=cursor,
-                        results=all_results,
-                        target_table=request.target_table,
-                        target_columns=target_columns,
-                        date_field=date_field,
-                        target_field=target_field,
-                        user_email='system'
-                    )
+                    # Step 7: Upsert to all three tables (forecast_data, product_manager, final_plan)
+                    upserted_counts = {}
+                    for table_name in ["forecast_data", "product_manager", "final_plan"]:
+                        count = ForecastingService._upsert_disaggregated_data(
+                            cursor=cursor,
+                            results=all_results,
+                            target_table=table_name,
+                            target_columns=target_columns,
+                            date_field=date_field,
+                            target_field=target_field,
+                            user_email='system'
+                        )
+                        upserted_counts[table_name] = count
 
                     conn.commit()
-                    logger.info(f"Upserted {upserted_count} records into {request.target_table}")
+                    total_upserted = sum(upserted_counts.values())
+                    logger.info(f"Upserted {total_upserted} records total: {upserted_counts}")
 
                     # Step 8: Paginate the response records
                     offset = (page - 1) * page_size
@@ -1749,8 +1753,9 @@ class ForecastingService:
                         "summary": {
                             "source_aggregation_level": source_aggregation_level,
                             "target_aggregation_level": target_aggregation_level,
-                            "target_table": request.target_table,
-                            "records_upserted": upserted_count,
+                            "target_tables": ["forecast_data", "product_manager", "final_plan"],
+                            "records_upserted": upserted_counts,
+                            "total_records_upserted": total_upserted,
                             "total_combinations": total_combinations,
                             "date_range": {
                                 "from": request.date_from,
@@ -1858,9 +1863,6 @@ class ForecastingService:
 
         return ratios_df
 
-
-
-
     @staticmethod
     def _upsert_disaggregated_data(
         cursor,
@@ -1914,96 +1916,90 @@ class ForecastingService:
             uom = sales_row[0] if sales_row else "UNIT"
             unit_price = sales_row[1] if sales_row else 0.0
 
-            # Process each data type (forecast_data, final_plan, product_manager)
-            for data_type in ["forecast_data", "final_plan", "product_manager"]:
-                data_list = entry.get(data_type, [])
-                if not data_list:
+            # Process only the data type that matches the target table
+            data_type = target_table if target_table in ["forecast_data", "final_plan", "product_manager"] else "forecast_data"
+            data_list = entry.get(data_type, [])
+            if not data_list:
+                continue
+
+            for data_point in data_list:
+                data_date = data_point.get("date")
+                quantity = data_point.get("Quantity", 0)
+
+                if not data_date or quantity == 0:
                     continue
 
-                for data_point in data_list:
-                    data_date = data_point.get("date")
-                    quantity = data_point.get("Quantity", 0)
+                # Build upsert query based on target table
+                if target_table == "final_plan":
+                    # Insert into final_plan table
+                    final_plan_id = str(uuid.uuid4())
+                    cursor.execute(f"""
+                        INSERT INTO final_plan
+                        (final_plan_id, master_id, "{date_field}", "{target_field}",
+                         uom, unit_price, type, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (master_id, "{date_field}")
+                        DO UPDATE SET
+                            "{target_field}" = EXCLUDED."{target_field}",
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price,
+                            type = EXCLUDED.type,
+                            updated_at = CURRENT_TIMESTAMP,
+                            updated_by = EXCLUDED.created_by
+                    """, (
+                        final_plan_id,
+                        master_id,
+                        data_date,
+                        quantity,
+                        uom,
+                        unit_price,
+                        'disaggregated',
+                        user_email
+                    ))
 
-                    if not data_date or quantity == 0:
-                        continue
+                elif target_table == "product_manager":
+                    # Insert into product_manager table
+                    cursor.execute(f"""
+                        INSERT INTO product_manager
+                        (master_id, "{date_field}", "{target_field}",
+                         uom, unit_price, type, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (master_id, "{date_field}")
+                        DO UPDATE SET
+                            "{target_field}" = EXCLUDED."{target_field}",
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price
+                    """, (
+                        master_id,
+                        data_date,
+                        quantity,
+                        uom,
+                        unit_price,
+                        'disaggregated',
+                        user_email
+                    ))
 
-                    # Build upsert query based on target table
-                    if target_table == "final_plan":
-                        # Insert into final_plan table
-                        final_plan_id = str(uuid.uuid4())
-                        cursor.execute(f"""
-                            INSERT INTO final_plan
-                            (final_plan_id, master_id, "{date_field}", "{target_field}",
-                             uom, unit_price, type, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (master_id, "{date_field}")
-                            DO UPDATE SET
-                                "{target_field}" = EXCLUDED."{target_field}",
-                                uom = EXCLUDED.uom,
-                                unit_price = EXCLUDED.unit_price,
-                                type = EXCLUDED.type,
-                                updated_at = CURRENT_TIMESTAMP,
-                                updated_by = EXCLUDED.created_by
-                        """, (
-                            final_plan_id,
-                            master_id,
-                            data_date,
-                            quantity,
-                            uom,
-                            unit_price,
-                            'disaggregated',
-                            user_email
-                        ))
+                elif target_table == "forecast_data":
+                    # Insert into forecast_data table
+                    cursor.execute(f"""
+                        INSERT INTO forecast_data
+                        (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (master_id, "{date_field}")
+                        DO UPDATE SET
+                            "{target_field}" = EXCLUDED."{target_field}",
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price
+                    """, (
+                        master_id,
+                        data_date,
+                        quantity,
+                        uom,
+                        unit_price,
+                        user_email
+                    ))
 
-                    elif target_table == "product_manager":
-                        # Insert into product_manager table
-                        pm_id = str(uuid.uuid4())
-                        cursor.execute(f"""
-                            INSERT INTO product_manager
-                            (pm_id, master_id, "{date_field}", "{target_field}",
-                             uom, unit_price, type, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (master_id, "{date_field}")
-                            DO UPDATE SET
-                                "{target_field}" = EXCLUDED."{target_field}",
-                                uom = EXCLUDED.uom,
-                                unit_price = EXCLUDED.unit_price,
-                                updated_at = CURRENT_TIMESTAMP,
-                                updated_by = EXCLUDED.created_by
-                        """, (
-                            pm_id,
-                            master_id,
-                            data_date,
-                            quantity,
-                            uom,
-                            unit_price,
-                            'disaggregated',
-                            user_email
-                        ))
-
-                    elif target_table == "forecast_data":
-                        # Insert into forecast_data table
-                        cursor.execute(f"""
-                            INSERT INTO forecast_data
-                            (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (master_id, "{date_field}")
-                            DO UPDATE SET
-                                "{target_field}" = EXCLUDED."{target_field}",
-                                uom = EXCLUDED.uom,
-                                unit_price = EXCLUDED.unit_price,
-                                updated_at = CURRENT_TIMESTAMP,
-                                updated_by = EXCLUDED.created_by
-                        """, (
-                            master_id,
-                            data_date,
-                            quantity,
-                            uom,
-                            unit_price,
-                            user_email
-                        ))
-
-                    upserted_count += 1
+                upserted_count += 1
 
         return upserted_count
         

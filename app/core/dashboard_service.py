@@ -1052,3 +1052,159 @@ class DashboardService:
             raise DatabaseException(
                 f"Failed to copy dashboard data: {str(e)}"
             )
+        
+    @staticmethod
+    def save_aggregated_product_manager(
+        database_name: str,
+        user_email: str,
+        aggregated_fields: List[str],
+        group_data: Dict[str, Any],
+        plan_date,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        """
+        Save aggregated product manager data by distributing the quantity among group members.
+        """
+        return DashboardService._save_aggregated_data(
+            database_name=database_name,
+            user_email=user_email,
+            table_name="product_manager",
+            id_column="product_manager_id",
+            aggregated_fields=aggregated_fields,
+            group_data=group_data,
+            plan_date=plan_date,
+            quantity=quantity,
+        )
+
+    @staticmethod
+    def save_aggregated_final_plan(
+        database_name: str,
+        user_email: str,
+        aggregated_fields: List[str],
+        group_data: Dict[str, Any],
+        plan_date,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        """
+        Save aggregated final plan data by distributing the quantity among group members.
+        """
+        return DashboardService._save_aggregated_data(
+            database_name=database_name,
+            user_email=user_email,
+            table_name="final_plan",
+            id_column="final_plan_id",
+            aggregated_fields=aggregated_fields,
+            group_data=group_data,
+            plan_date=plan_date,
+            quantity=quantity,
+        )
+
+    @staticmethod
+    def _save_aggregated_data(
+        database_name: str,
+        user_email: str,
+        table_name: str,
+        id_column: str,
+        aggregated_fields: List[str],
+        group_data: Dict[str, Any],
+        plan_date,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        db_manager = get_db_manager()
+        try:
+            with db_manager.get_tenant_connection(database_name) as conn:
+                cursor = conn.cursor()
+                try:
+                    if not DashboardService._table_exists(cursor, table_name):
+                        raise ValidationException(f"{table_name} table not found")
+
+                    date_field, target_field = SalesDataService._get_field_names(
+                        cursor
+                    )
+
+                    # 1. Resolve master_ids for the group
+                    clauses = []
+                    params = []
+                    for f in aggregated_fields:
+                        val = group_data.get(f)
+                        if val is None:
+                            clauses.append(sql.SQL("{} IS NULL").format(sql.Identifier(f)))
+                        else:
+                            clauses.append(sql.SQL("{} = %s").format(sql.Identifier(f)))
+                            params.append(val)
+                    
+                    group_where = sql.SQL(" AND ").join(clauses)
+                    master_id_query = sql.SQL("SELECT master_id FROM master_data WHERE {}").format(group_where)
+                    cursor.execute(master_id_query, params)
+                    master_ids = [row[0] for row in cursor.fetchall()]
+
+                    if not master_ids:
+                        raise NotFoundException("Aggregated group", str(group_data))
+
+                    # 2. Calculate historical sales distribution ratios
+                    # We use total sales per master_id as the weight
+                    placeholders = ",".join(["%s"] * len(master_ids))
+                    sales_query = f"""
+                        SELECT master_id, SUM(CAST("{target_field}" AS DOUBLE PRECISION))
+                        FROM sales_data
+                        WHERE master_id IN ({placeholders})
+                        GROUP BY master_id
+                    """
+                    cursor.execute(sales_query, master_ids)
+                    sales_weights = {row[0]: float(row[1]) for row in cursor.fetchall()}
+
+                    total_historical_sales = sum(sales_weights.values())
+                    
+                    # 3. Distribute quantity
+                    distributed_records = []
+                    num_masters = len(master_ids)
+                    
+                    if total_historical_sales > 0:
+                        for m_id in master_ids:
+                            ratio = sales_weights.get(m_id, 0.0) / total_historical_sales
+                            distributed_records.append((m_id, quantity * ratio))
+                    else:
+                        # Equal distribution if no historical sales
+                        equal_qty = quantity / num_masters
+                        for m_id in master_ids:
+                            distributed_records.append((m_id, equal_qty))
+
+                    # 4. Upsert records
+                    upserted_count = 0
+                    for m_id, distributed_qty in distributed_records:
+                        # Get UOM and unit price
+                        uom, unit_price = DashboardService._resolve_sales_info(cursor, m_id)
+                        
+                        upsert_query = sql.SQL("""
+                            INSERT INTO {table}
+                            (master_id, {date_col}, {target_col}, uom, unit_price, type, created_by, updated_at, updated_by)
+                            VALUES (%s, %s, %s, %s, %s, 'aggregated_edit', %s, CURRENT_TIMESTAMP, %s)
+                            ON CONFLICT (master_id, {date_col})
+                            DO UPDATE SET
+                                {target_col} = EXCLUDED.{target_col},
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                type = EXCLUDED.type,
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = EXCLUDED.updated_by
+                        """).format(
+                            table=sql.Identifier(table_name),
+                            date_col=sql.Identifier(date_field),
+                            target_col=sql.Identifier(target_field)
+                        )
+                        cursor.execute(upsert_query, (m_id, plan_date, distributed_qty, uom, unit_price, user_email, user_email))
+                        upserted_count += 1
+
+                    conn.commit()
+                    return {
+                        "status": "success",
+                        "message": f"Aggregated data saved to {table_name}",
+                        "affected_records": upserted_count,
+                    }
+                finally:
+                    cursor.close()
+        except AppException:
+            raise
+        except Exception as e:
+            logger.error(f"Error saving aggregated data to {table_name}: {str(e)}")
+            raise DatabaseException(f"Failed to save aggregated data: {str(e)}")

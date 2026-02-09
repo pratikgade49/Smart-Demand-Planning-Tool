@@ -152,17 +152,22 @@
 Disaggregate api input
 
 {
-  "aggregation_level": ["product", "location"],
+  "target_table": "product_manager",
   "filters": [
     {
       "field_name": "product",
-      "values": ["PROD001"]
+      "values": ["18320"]
+    },
+        {
+      "field_name": "location",
+      "values": ["3110"]
     }
   ],
-  "date_from": "2023-01-01",
-  "date_to": "2024-12-01",
+  "date_from": "2025-01-01",
+  "date_to": "2026-04-01",
   "interval": "MONTHLY"
 }
+
 
 Forecast with external factors and multiple algorithms input
 

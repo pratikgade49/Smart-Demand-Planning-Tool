@@ -141,8 +141,7 @@ class DisaggregationRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
 
 class DisaggregateDataRequest(BaseModel):
-    """Request for disaggregating sales, forecast, and final plan data"""
-    target_table: str = Field(..., description="Target table to upsert results into", pattern="^(final_plan|product_manager|forecast_data)$")
+    """Request for disaggregating sales, forecast, and final plan data to all tables"""
     filters: Optional[List[SalesDataFilter]] = Field(None, description="List of filters to apply. Each filter specifies a field and its values.")
     date_from: Optional[str] = Field(None, description="Start date in YYYY-MM-DD format")
     date_to: Optional[str] = Field(None, description="End date in YYYY-MM-DD format")

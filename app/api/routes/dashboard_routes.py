@@ -99,6 +99,32 @@ class CopyDashboardDataRequest(BaseModel):
     )
 
 
+class SaveAggregatedProductManagerRequest(BaseModel):
+    aggregated_fields: List[str] = Field(
+        ...,
+        description="List of field names used for aggregation (e.g., ['product', 'location'])",
+    )
+    group_data: Dict[str, Any] = Field(
+        ...,
+        description="Dictionary of field values defining the aggregated group (e.g., {'product': 'P1', 'location': 'L1'})",
+    )
+    date: DateType = Field(..., description="Date for the aggregated quantity (YYYY-MM-DD)")
+    quantity: float = Field(..., description="Aggregated quantity to distribute among group members")
+
+
+class SaveAggregatedFinalPlanRequest(BaseModel):
+    aggregated_fields: List[str] = Field(
+        ...,
+        description="List of field names used for aggregation (e.g., ['product', 'location'])",
+    )
+    group_data: Dict[str, Any] = Field(
+        ...,
+        description="Dictionary of field values defining the aggregated group (e.g., {'product': 'P1', 'location': 'L1'})",
+    )
+    date: DateType = Field(..., description="Date for the aggregated quantity (YYYY-MM-DD)")
+    quantity: float = Field(..., description="Aggregated quantity to distribute among group members")
+
+
 @router.post("/alldata", response_model=Dict[str, Any])
 async def get_dashboard_all_data(
     request: SalesDataQueryRequest,
@@ -326,6 +352,71 @@ async def copy_dashboard_data(
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error in copy_dashboard_data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.post("/save-aggregated-product-manager", response_model=Dict[str, Any])
+async def save_aggregated_product_manager(
+    request: SaveAggregatedProductManagerRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Save aggregated product manager data by distributing the quantity among group members
+    using historical sales distribution ratios.
+
+    The aggregated quantity is distributed proportionally based on historical sales data
+    for the group defined by aggregated_fields and group_data.
+    """
+    try:
+        result = DashboardService.save_aggregated_product_manager(
+            database_name=tenant_data["database_name"],
+            user_email=tenant_data["email"],
+            aggregated_fields=request.aggregated_fields,
+            group_data=request.group_data,
+            plan_date=request.date,
+            quantity=request.quantity,
+        )
+        return ResponseHandler.success(data=result)
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in save_aggregated_product_manager: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/save-aggregated-final-plan", response_model=Dict[str, Any])
+async def save_aggregated_final_plan(
+    request: SaveAggregatedFinalPlanRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Save aggregated final plan data by distributing the quantity among group members
+    using historical sales distribution ratios.
+
+    The aggregated quantity is distributed proportionally based on historical sales data
+    for the group defined by aggregated_fields and group_data.
+    """
+    try:
+        result = DashboardService.save_aggregated_final_plan(
+            database_name=tenant_data["database_name"],
+            user_email=tenant_data["email"],
+            aggregated_fields=request.aggregated_fields,
+            group_data=request.group_data,
+            plan_date=request.date,
+            quantity=request.quantity,
+        )
+        return ResponseHandler.success(data=result)
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Unexpected error in save_aggregated_final_plan: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

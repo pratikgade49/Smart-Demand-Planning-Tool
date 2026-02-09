@@ -926,12 +926,18 @@ async def disaggregate_data(
     **Example Request:**
 ```json
     {
-        "target_table": "final_plan",
-        "filters": {
-            "product": "19191"
-        },
+        "filters": [
+            {
+                "field_name": "product",
+                "values": ["18320"]
+            },
+            {
+                "field_name": "location",
+                "values": ["3110"]
+            }
+        ],
         "date_from": "2025-01-01",
-        "date_to": "2025-12-31",
+        "date_to": "2026-04-01",
         "interval": "MONTHLY"
     }
 ```
@@ -945,14 +951,14 @@ async def disaggregate_data(
       - `forecast_data`: Array with date, UOM, Quantity
       - `final_plan`: Array with date, UOM, Quantity
 
-    **Target Tables:**
+    **Note:** This API automatically saves disaggregated data to all three tables:
     - `final_plan`: Final plan table
     - `product_manager`: Product manager table
     - `forecast_data`: Forecast data table
     """
     try:
         logger.info(
-            f"Disaggregating data to lowest granularity and upserting to {request.target_table} "
+            f"Disaggregating data to lowest granularity and upserting to all tables "
             f"for tenant {tenant_data['tenant_id']} (Page {page}, Size {page_size})"
         )
 
