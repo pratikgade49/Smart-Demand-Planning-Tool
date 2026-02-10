@@ -67,7 +67,8 @@ def _process_entity_forecast(
     forecast_dates: List[date],
     algorithms_to_execute: List[AlgorithmConfig],
     db_manager,
-    external_factors_df: Optional[pd.DataFrame] = None
+    external_factors_df: Optional[pd.DataFrame] = None,
+    selected_metrics: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Process forecast for a single entity with all its algorithms.
@@ -75,6 +76,10 @@ def _process_entity_forecast(
     """
     from app.core.forecasting_service import ForecastingService
     from app.core.forecast_execution_service import ForecastExecutionService
+
+    # Set default selected_metrics if not provided
+    if selected_metrics is None:
+        selected_metrics = ['mape', 'accuracy']
 
     entity_name = '-'.join([f"{k}={v}" for k, v in entity_filter.items()]) if entity_filter else "all"
 
@@ -143,11 +148,22 @@ def _process_entity_forecast(
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                     cursor = conn.cursor()
                     try:
+                        # Ensure selected_metrics column exists (schema migration)
+                        try:
+                            cursor.execute("""
+                                ALTER TABLE forecast_runs
+                                ADD COLUMN selected_metrics TEXT[] DEFAULT ARRAY['mape', 'accuracy'];
+                            """)
+                            conn.commit()  # Commit the schema change
+                        except Exception as alter_err:
+                            conn.rollback()  # Rollback if column already exists or error
+                            logger.debug(f"Selected metrics column already exists or not needed: {str(alter_err)}")
+                        
                         cursor.execute("""
                             INSERT INTO forecast_runs
                             (forecast_run_id, version_id, forecast_filters,
-                             forecast_start, forecast_end, run_status, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                             forecast_start, forecast_end, run_status, selected_metrics, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             forecast_run_id,
                             request_data.version_id,
@@ -155,6 +171,7 @@ def _process_entity_forecast(
                             forecast_start_date,
                             forecast_end_date,
                             "In-Progress",
+                            selected_metrics,
                             tenant_data["email"]
                         ))
                         conn.commit()
@@ -462,7 +479,7 @@ def _process_entity_forecast(
                         conn.commit()
                     finally:
                         cursor.close()
-
+                                                      
                 logger.info(
                     f"Entity {entity_name}, Algorithm {algo_name_for_result}: "
                     f"{len(test_actuals)} test actuals, {len(test_forecasts)} test forecasts, "

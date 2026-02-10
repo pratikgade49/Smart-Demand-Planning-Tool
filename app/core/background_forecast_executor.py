@@ -383,6 +383,7 @@ class BackgroundForecastExecutor:
                         self.version_id = data.get('version_id')
                         self.history_start = data.get('history_start')
                         self.history_end = data.get('history_end')
+                        self.selected_metrics = data.get('selected_metrics', ['mape', 'accuracy'])
                 
                 modified_request = ModifiedRequest(request_data)
                 
@@ -406,7 +407,8 @@ class BackgroundForecastExecutor:
                             forecast_dates,
                             algorithms_to_execute,
                             db_manager,
-                            external_factors_df  # Pass pre-loaded factors
+                            external_factors_df,  # Pass pre-loaded factors
+                            request_data.get('selected_metrics', ['mape', 'accuracy'])  # Pass selected_metrics
                         ): entity_filter for entity_filter in entity_combinations
                     }
                     

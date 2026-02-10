@@ -247,7 +247,8 @@ class ForecastExecutionService:
         forecast_start: str,
         forecast_end: str,
         interval: str,
-        user_email: str
+        user_email: str,
+        selected_metrics: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Execute a single algorithm and store results (parallel version).
@@ -263,7 +264,8 @@ class ForecastExecutionService:
             forecast_start=forecast_start,
             forecast_end=forecast_end,
             interval=interval,
-            user_email=user_email
+            user_email=user_email,
+            selected_metrics=selected_metrics
         )
 
     @staticmethod
@@ -321,6 +323,7 @@ class ForecastExecutionService:
             aggregation_level = filters.get('aggregation_level', 'product')
             interval = filters.get('interval', 'MONTHLY')
             selected_factors = filters.get('selected_external_factors')
+            selected_metrics = forecast_run.get('selected_metrics', ['mape', 'accuracy'])
            
             # Get historical data
             historical_data = ForecastingService.prepare_aggregated_data(
@@ -369,7 +372,8 @@ class ForecastExecutionService:
                         forecast_start=forecast_run['forecast_start'],
                         forecast_end=forecast_run['forecast_end'],
                         interval=interval,
-                        user_email=user_email
+                        user_email=user_email,
+                        selected_metrics=selected_metrics
                     )
                     future_to_algorithm[future] = algo
  

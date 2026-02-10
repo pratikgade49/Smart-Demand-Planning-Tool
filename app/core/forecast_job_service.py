@@ -220,25 +220,32 @@ class ForecastJobService:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT forecast_run_id, mapping_id, type, date, value
+                        SELECT forecast_run_id, mapping_id, type, date, value, metadata
                         FROM forecast_results
                         WHERE forecast_run_id = ANY(%s::uuid[])
                         ORDER BY forecast_run_id, mapping_id, type, date
                         """,
                         (run_ids,)
                     )
-                    for forecast_run_id, mapping_id, result_type, date, value in cursor.fetchall():
+                    for forecast_run_id, mapping_id, result_type, date, value, metadata in cursor.fetchall():
                         run_id = str(forecast_run_id)
                         if mapping_id:
                             mapping_ids_by_run.setdefault(run_id, str(mapping_id))
                         if not result_type:
                             continue
-                        results_by_run_type.setdefault(run_id, {}).setdefault(
-                            result_type, []
-                        ).append({
+                        
+                        result_item = {
                             "date": date.isoformat() if date else None,
                             "quantity": float(value) if value is not None else None
-                        })
+                        }
+                        
+                        # Include accuracy metrics if available in metadata
+                        if metadata and isinstance(metadata, dict) and 'test_metrics' in metadata:
+                            result_item["metrics"] = metadata['test_metrics']
+                        
+                        results_by_run_type.setdefault(run_id, {}).setdefault(
+                            result_type, []
+                        ).append(result_item)
 
         results = []
         for run in forecast_runs:

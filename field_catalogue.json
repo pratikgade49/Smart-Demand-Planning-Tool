@@ -203,6 +203,31 @@ Forecast with external factors and multiple algorithms input
   ]
 }
 
+{
+  "version_id": "214db7ab-906a-47d9-99a9-8d578240551d",
+  "algorithms": [
+    {
+      "algorithm_id": 11,
+      "execution_order": 1,
+      "custom_parameters": {
+        "n_neighbors_list": [7, 10]
+      }
+    }
+  ],
+  "forecast_filters": {
+    "aggregation_level": "product",
+    "interval": "MONTHLY",
+    "product": ["10009736"],
+    "selected_external_factors": []
+  },
+  "forecast_start": "2025-04-01",
+  "forecast_end": "2026-04-30",
+  "history_start": "2010-01-01",
+  "history_end": "2025-03-31",
+  "selected_metrics": ["rmse"]
+}
+
+
 SAP-IBP Write into database
 
 {

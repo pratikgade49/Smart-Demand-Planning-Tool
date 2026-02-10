@@ -196,13 +196,24 @@ class ForecastingService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
+                    # Ensure selected_metrics column exists (schema migration)
+                    try:
+                        cursor.execute("""
+                            ALTER TABLE forecast_runs
+                            ADD COLUMN selected_metrics TEXT[] DEFAULT ARRAY['mape', 'accuracy'];
+                        """)
+                        conn.commit()  # Commit the schema change
+                    except Exception as alter_err:
+                        conn.rollback()  # Rollback if column already exists or error
+                        logger.debug(f"Selected metrics column already exists or not needed: {str(alter_err)}")
+                    
                     # Insert forecast run
                     cursor.execute("""
                         INSERT INTO forecast_runs
                         (forecast_run_id, version_id, forecast_filters,
                          forecast_start, forecast_end, history_start, history_end,
-                         run_status, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         run_status, selected_metrics, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         forecast_run_id,
                         str(request.version_id),
@@ -212,6 +223,7 @@ class ForecastingService:
                         request.history_start,
                         request.history_end,
                         "Pending",
+                        request.selected_metrics or ['mape', 'accuracy'],
                         user_email
                     ))
 
@@ -230,7 +242,7 @@ class ForecastingService:
                             INSERT INTO forecast_algorithms_mapping
                             (mapping_id, forecast_run_id, algorithm_id, 
                              algorithm_name, custom_parameters, execution_order, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
                             mapping_id,
                             forecast_run_id,
