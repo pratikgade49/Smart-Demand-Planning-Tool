@@ -149,16 +149,6 @@ def _process_entity_forecast(
                     cursor = conn.cursor()
                     try:
                         # Ensure selected_metrics column exists (schema migration)
-                        try:
-                            cursor.execute("""
-                                ALTER TABLE forecast_runs
-                                ADD COLUMN selected_metrics TEXT[] DEFAULT ARRAY['mape', 'accuracy'];
-                            """)
-                            conn.commit()  # Commit the schema change
-                        except Exception as alter_err:
-                            conn.rollback()  # Rollback if column already exists or error
-                            logger.debug(f"Selected metrics column already exists or not needed: {str(alter_err)}")
-                        
                         cursor.execute("""
                             INSERT INTO forecast_runs
                             (forecast_run_id, version_id, forecast_filters,
@@ -355,12 +345,21 @@ def _process_entity_forecast(
                         tenant_data["email"]
                     ))
                 
+                # After calculating algo_metrics and before building batch_data
+                # Determine primary metric for the accuracy_metric column
+                primary_metric = selected_metrics[0] if selected_metrics else 'mape'
+                primary_metric_name = primary_metric.upper()
+
+                # Get primary metric value
+                primary_metric_value = algo_metrics.get(primary_metric)
+                if primary_metric_value is not None:
+                    primary_metric_value = round(float(primary_metric_value), 2)
+
                 # 2. Insert testing_forecast records
                 for test_date, forecast_value in zip(test_dates, test_forecasts):
                     result_id = str(uuid.uuid4())
                     forecast_value_float = min(999999.9999, max(0, float(forecast_value)))
                     forecast_value_float = round(forecast_value_float, 4)
-                    accuracy_metric = round(algo_accuracy, 2) if algo_accuracy else None
                     
                     batch_data.append((
                         result_id,
@@ -371,11 +370,11 @@ def _process_entity_forecast(
                         test_date,
                         forecast_value_float,
                         'testing_forecast',
-                        accuracy_metric,
-                        'MAPE',
+                        primary_metric_value,  # ✅ Use primary metric value
+                        primary_metric_name,   # ✅ Use primary metric name (RMSE, MAE, etc.)
                         Json({
                             'algorithm': algo_name_for_result,
-                            **algo_metrics,
+                            'metrics': {k: algo_metrics[k] for k in selected_metrics if k in algo_metrics},  # Only selected
                             'entity_filter': entity_filter
                         }),
                         tenant_data["email"]

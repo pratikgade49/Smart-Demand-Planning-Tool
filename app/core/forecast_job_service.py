@@ -65,6 +65,7 @@ class ForecastJobService:
                             request_data JSONB NOT NULL,
                             result_data JSONB,
                             error_message TEXT,
+                            selected_metrics TEXT[],
                             started_at TIMESTAMP,
                             completed_at TIMESTAMP,
                             created_at TIMESTAMP NOT NULL,
@@ -75,18 +76,19 @@ class ForecastJobService:
                     
                     cursor.execute("""
                         INSERT INTO forecast_jobs 
-                        (job_id, tenant_id, status, request_data, created_at, created_by, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (job_id, tenant_id, status, request_data, selected_metrics, created_at, created_by, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         job_id,
                         tenant_id,
                         JobStatus.PENDING.value,
                         json.dumps(request_data, default=str),
+                        request_data.get('selected_metrics', ['mape', 'accuracy']),  # ✅ Extract and store
                         created_at,
                         user_email,
                         created_at
                     ))
-                    
+                                        
                     conn.commit()
             
             logger.info(f"Created forecast job {job_id} for tenant {tenant_id}")

@@ -196,17 +196,6 @@ class ForecastingService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Ensure selected_metrics column exists (schema migration)
-                    try:
-                        cursor.execute("""
-                            ALTER TABLE forecast_runs
-                            ADD COLUMN selected_metrics TEXT[] DEFAULT ARRAY['mape', 'accuracy'];
-                        """)
-                        conn.commit()  # Commit the schema change
-                    except Exception as alter_err:
-                        conn.rollback()  # Rollback if column already exists or error
-                        logger.debug(f"Selected metrics column already exists or not needed: {str(alter_err)}")
-                    
                     # Insert forecast run
                     cursor.execute("""
                         INSERT INTO forecast_runs
@@ -305,12 +294,17 @@ class ForecastingService:
                                run_status, run_progress,
                                total_records, processed_records,
                                failed_records, error_message, created_at, updated_at,
-                               started_at, completed_at, created_by
+                               started_at, completed_at, created_by,
+                               selected_metrics 
                         FROM forecast_runs
                         WHERE forecast_run_id = %s
                     """, (forecast_run_id,))
 
                     result = cursor.fetchone()
+                    (run_id, version_id, filters, start, end, hist_start, hist_end,
+                    status, progress, total, processed, failed, error_msg,
+                    created_at, updated_at, started_at, completed_at, created_by,
+                    selected_metrics) = result
                     if not result:
                         raise NotFoundException("Forecast Run", forecast_run_id)
 
@@ -364,7 +358,8 @@ class ForecastingService:
                         "started_at": started_at.isoformat() if started_at else None,
                         "completed_at": completed_at.isoformat() if completed_at else None,
                         "created_by": created_by,
-                        "algorithms": algorithms
+                        "algorithms": algorithms,
+                        "selected_metrics": selected_metrics
                     }
 
                 finally:

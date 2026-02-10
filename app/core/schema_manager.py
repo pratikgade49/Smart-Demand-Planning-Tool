@@ -807,7 +807,7 @@ class SchemaManager:
                         error_message TEXT,
                         algorithm_name VARCHAR(255),
                         accuracy DECIMAL(18, 4),
-                        
+                        selected_metrics TEXT[] DEFAULT ARRAY['mape', 'accuracy'],
                         -- Audit fields (full trail)
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         created_by VARCHAR(255),
