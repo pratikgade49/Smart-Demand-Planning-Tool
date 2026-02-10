@@ -1,3 +1,4 @@
+
 """
 Forecasting API Routes.
 Endpoints for forecast run management and execution.
@@ -14,7 +15,8 @@ from app.schemas.forecasting import (
     ExternalFactorCreate,
     ExternalFactorUpdate,
     DisaggregationRequest,
-    DisaggregateDataRequest
+    DisaggregateDataRequest,
+    ForecastRunCreate
 )
 
 
@@ -55,7 +57,7 @@ class DirectForecastExecutionRequest(BaseModel):
 @router.post("/execute-forecast-async", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
 @monitor_endpoint("Forecast Request Submission", warn_threshold=3.0)  # Add monitoring decorator
 async def execute_forecast_async(
-    request_data: Dict[str, Any],  # Your request model here
+    request_data: ForecastRunCreate,
     background_tasks: BackgroundTasks,
     tenant_data: Dict = Depends(get_current_tenant),
     _: Dict = Depends(require_object_access("Forecast", min_role_id=2))
@@ -83,15 +85,18 @@ async def execute_forecast_async(
             extra={'start_resources': current_resources}
         )
 
+        # Set default selected_metrics if not provided
+        if request_data.selected_metrics is None:
+            request_data.selected_metrics = ['mape', 'accuracy']
+            logger.info("Using default metrics: ['mape', 'accuracy']")
+
+        # Convert Pydantic model to dict for processing
+        request_data = request_data.dict()
+
         # Validate algorithm parameters before creating job
         algorithms_to_validate = []
-        if request_data.get('algorithms') and len(request_data.get('algorithms', [])) > 0:
+        if request_data.get('algorithms') and len(request_data['algorithms']) > 0:
             algorithms_to_validate = request_data['algorithms']
-        elif request_data.get('algorithm_id') is not None:
-            algorithms_to_validate = [{
-                'algorithm_id': request_data['algorithm_id'],
-                'custom_parameters': request_data.get('custom_parameters')
-            }]
         else:
             algorithms_to_validate = [{'algorithm_id': 999}]  # Best Fit
 
@@ -105,13 +110,11 @@ async def execute_forecast_async(
                     error_msg = f"Invalid parameters for algorithm {algo['algorithm_id']}: {'; '.join(validation_result.errors)}"
                     logger.error(f"Parameter validation failed: {error_msg}")
                     raise ValidationException(error_msg)
-                
+
                 # Update with validated parameters (including defaults)
                 algo['custom_parameters'] = validation_result.validated_parameters
 
-        # If we used algorithm_id, ensure request_data['custom_parameters'] is updated
-        if request_data.get('algorithm_id') is not None and not request_data.get('algorithms'):
-            request_data['custom_parameters'] = algorithms_to_validate[0]['custom_parameters']
+
 
         # Check for duplicate running jobs with same forecast parameters
         is_duplicate = ForecastJobService.check_duplicate_running_job(

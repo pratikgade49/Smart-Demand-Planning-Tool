@@ -476,8 +476,235 @@ class ForecastExecutionService:
         forecast_start: str,
         forecast_end: str,
         interval: str,
-        user_email: str
+        user_email: str,
+        selected_metrics: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
+        """Execute a single algorithm with detailed debugging."""
+
+        # Set default selected_metrics if not provided
+        if selected_metrics is None:
+            selected_metrics = ['mape', 'accuracy']
+
+        mapping_id = algorithm_mapping['mapping_id']
+        algorithm_id = algorithm_mapping['algorithm_id']
+        algorithm_name = algorithm_mapping['algorithm_name']
+        custom_params = algorithm_mapping.get('custom_parameters') or {}
+
+        try:
+            custom_params = ForecastExecutionService.validate_algorithm_parameters(algorithm_id, custom_params)
+        except Exception as e:
+            logger.error(f"Parameter validation failed for algorithm {algorithm_name}: {str(e)}")
+            raise
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"STARTING ALGORITHM: {algorithm_name} (ID: {algorithm_id})")
+        logger.info(f"Selected Metrics: {selected_metrics}")
+        logger.info(f"{'='*80}")
+
+        ForecastExecutionService._update_algorithm_status(database_name, mapping_id, 'Running')
+
+        try:
+            forecast_start_date = datetime.fromisoformat(forecast_start).date()
+            forecast_end_date = datetime.fromisoformat(forecast_end).date()
+
+            future_periods = ForecastExecutionService._calculate_periods(
+                forecast_start_date,
+                forecast_end_date,
+                interval
+            )
+
+            logger.info(f"Future periods to forecast: {future_periods}")
+
+            # Merge external factors
+            if not external_factors.empty:
+                logger.info(f"Merging {len(external_factors)} external factor records")
+                historical_data = historical_data.merge(
+                    external_factors,
+                    left_on='period',
+                    right_on='date',
+                    how='left'
+                )
+
+            # Get aggregation level from forecast run
+            from app.core.forecasting_service import ForecastingService
+            forecast_run = ForecastingService.get_forecast_run(
+                tenant_id, database_name, forecast_run_id
+            )
+            aggregation_level = forecast_run.get('forecast_filters', {}).get('aggregation_level')
+
+            # Train-test split
+            train_ratio = 0.85
+            n = len(historical_data)
+            split_index = max(2, int(n * train_ratio))
+
+            train_data = historical_data.iloc[:split_index].copy()
+            test_data = historical_data.iloc[split_index:].copy()
+            test_periods = len(test_data)
+
+            logger.info(f"\nDATA SPLIT:")
+            logger.info(f"  Total historical data: {n} periods")
+            logger.info(f"  Training data: {len(train_data)} periods (indices 0-{split_index-1})")
+            logger.info(f"  Test data: {len(test_data)} periods (indices {split_index}-{n-1})")
+            logger.info(f"  Future forecast: {future_periods} periods")
+
+            # Get test actuals and dates
+            if 'total_quantity' in test_data.columns:
+                test_actuals = test_data['total_quantity'].values
+            elif 'quantity' in test_data.columns:
+                test_actuals = test_data['quantity'].values
+            else:
+                test_actuals = np.array([])
+
+            test_dates = test_data['period'].tolist() if 'period' in test_data.columns else []
+
+            logger.info(f"\nTEST SET ACTUALS:")
+            logger.info(f"  Count: {len(test_actuals)}")
+            if len(test_actuals) > 0:
+                logger.info(f"  Range: [{test_actuals.min():.0f}, {test_actuals.max():.0f}]")
+                logger.info(f"  First 3 values: {test_actuals[:3]}")
+                logger.info(f"  Last 3 values: {test_actuals[-3:]}")
+
+            # ====================================================================
+            # GENERATE TEST FORECAST
+            # ====================================================================
+            test_forecast = np.array([])
+            test_metrics = {}
+
+            if test_periods > 0:
+                logger.info(f"\n{'='*80}")
+                logger.info(f"GENERATING TEST FORECAST")
+                logger.info(f"{'='*80}")
+                logger.info(f"Training on: {len(train_data)} periods")
+                logger.info(f"Predicting: {test_periods} future periods")
+
+                # Call algorithm with tenant context
+                test_forecast_result, train_metrics = ForecastExecutionService._route_algorithm(
+                    algorithm_id=algorithm_id,
+                    algorithm_name=algorithm_name,
+                    data=train_data,
+                    periods=test_periods,
+                    custom_params=custom_params,
+                    tenant_id=tenant_id,
+                    database_name=database_name,
+                    aggregation_level=aggregation_level
+                )
+
+                test_forecast = np.array(test_forecast_result)
+
+                logger.info(f"\nTEST FORECAST RESULT:")
+                logger.info(f"  Type: {type(test_forecast)}")
+                logger.info(f"  Length: {len(test_forecast)}")
+                logger.info(f"  Range: [{test_forecast.min():.0f}, {test_forecast.max():.0f}]")
+                logger.info(f"  First 3 values: {test_forecast[:3]}")
+                logger.info(f"  Last 3 values: {test_forecast[-3:]}")
+
+                # ⚠️ CRITICAL CHECK
+                if len(test_forecast) != test_periods:
+                    logger.error(f"❌ LENGTH MISMATCH! Expected {test_periods}, got {len(test_forecast)}")
+
+                # Calculate test metrics using selected metrics
+                if len(test_actuals) > 0 and len(test_forecast) > 0:
+                    min_len = min(len(test_actuals), len(test_forecast))
+                    test_metrics = ForecastExecutionService.calculate_metrics(
+                        test_actuals[:min_len],
+                        test_forecast[:min_len],
+                        selected_metrics=selected_metrics
+                    )
+                    logger.info(f"\nTEST SET METRICS:")
+                    for metric, value in test_metrics.items():
+                        logger.info(f"  {metric.upper()}: {value:.2f}{'%' if metric == 'mape' else ''}")
+                else:
+                    # Use default metrics if no test data available
+                    test_metrics = ForecastExecutionService.calculate_metrics(
+                        np.array([1.0]), np.array([1.0]), selected_metrics=selected_metrics
+                    ) if selected_metrics else {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
+                    logger.warning("Using default metrics for test set (no actuals available)")
+
+            # ====================================================================
+            # GENERATE FUTURE FORECAST
+            # ====================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"GENERATING FUTURE FORECAST")
+            logger.info(f"{'='*80}")
+            logger.info(f"Training on: {len(historical_data)} periods (ALL historical data)")
+            logger.info(f"Predicting: {future_periods} future periods")
+
+            # Call algorithm with tenant context
+            future_forecast_result, future_metrics = ForecastExecutionService._route_algorithm(
+                algorithm_id=algorithm_id,
+                algorithm_name=algorithm_name,
+                data=historical_data,
+                periods=future_periods,
+                custom_params=custom_params,
+                tenant_id=tenant_id,
+                database_name=database_name,
+                aggregation_level=aggregation_level
+            )
+
+            future_forecast = np.array(future_forecast_result)
+
+            logger.info(f"\nFUTURE FORECAST RESULT:")
+            logger.info(f"  Type: {type(future_forecast)}")
+            logger.info(f"  Length: {len(future_forecast)}")
+            logger.info(f"  Range: [{future_forecast.min():.0f}, {future_forecast.max():.0f}]")
+            logger.info(f"  First 3 values: {future_forecast[:3]}")
+            logger.info(f"  Last 3 values: {future_forecast[-3:]}")
+
+            # Generate future dates
+            future_dates = ForecastExecutionService._generate_forecast_dates(
+                forecast_start_date,
+                future_periods,
+                interval
+            )
+
+            # ====================================================================
+            # STORE RESULTS
+            # ====================================================================
+            logger.info(f"\n{'='*80}")
+            logger.info(f"STORING RESULTS")
+            logger.info(f"{'='*80}")
+            logger.info(f"Test dates: {len(test_dates)}")
+            logger.info(f"Test actuals: {len(test_actuals)}")
+            logger.info(f"Test forecast: {len(test_forecast)}")
+            logger.info(f"Future dates: {len(future_dates)}")
+            logger.info(f"Future forecast: {len(future_forecast)}")
+
+            results = ForecastExecutionService._store_forecast_results_v2(
+                tenant_id=tenant_id,
+                database_name=database_name,
+                forecast_run_id=forecast_run_id,
+                version_id=algorithm_mapping.get('version_id'),
+                mapping_id=mapping_id,
+                algorithm_id=algorithm_id,
+                test_dates=test_dates,
+                test_actuals=test_actuals,
+                test_forecast=test_forecast,
+                test_metrics=test_metrics,
+                future_dates=future_dates,
+                future_forecast=future_forecast,
+                user_email=user_email,
+                selected_metrics=selected_metrics
+            )
+
+            ForecastExecutionService._update_algorithm_status(
+                database_name, mapping_id, 'Completed'
+            )
+
+            logger.info(f"\n{'='*80}")
+            logger.info(f"ALGORITHM {algorithm_name} COMPLETED SUCCESSFULLY")
+            logger.info(f"{'='*80}\n")
+
+            return results
+
+        except Exception as e:
+            logger.error(f"\n{'='*80}")
+            logger.error(f"ALGORITHM {algorithm_name} FAILED")
+            logger.error(f"ERROR: {str(e)}")
+            logger.error(f"{'='*80}\n", exc_info=True)
+            ForecastExecutionService._update_algorithm_status(
+                database_name, mapping_id, 'Failed', str(e)
+            )
+            raise
         """Execute a single algorithm with detailed debugging."""
         
         mapping_id = algorithm_mapping['mapping_id']
@@ -600,17 +827,19 @@ class ForecastExecutionService:
                 if len(test_actuals) > 0 and len(test_forecast) > 0:
                     min_len = min(len(test_actuals), len(test_forecast))
                     test_metrics = ForecastExecutionService.calculate_metrics(
-                        test_actuals[:min_len], 
-                        test_forecast[:min_len]
+                        test_actuals[:min_len],
+                        test_forecast[:min_len],
+                        selected_metrics=selected_metrics
                     )
                     logger.info(f"\nTEST SET METRICS:")
-                    logger.info(f"  MAE: {test_metrics['mae']:.2f}")
-                    logger.info(f"  RMSE: {test_metrics['rmse']:.2f}")
-                    logger.info(f"  MAPE: {test_metrics['mape']:.2f}%")
-                    logger.info(f"  Accuracy: {test_metrics['accuracy']:.2f}%")
+                    for metric, value in test_metrics.items():
+                        logger.info(f"  {metric.upper()}: {value:.2f}{'%' if metric == 'mape' else ''}")
                 else:
-                    test_metrics = train_metrics
-                    logger.warning("Using training metrics for test set (no actuals available)")
+                    # Use default metrics if no test data available
+                    test_metrics = ForecastExecutionService.calculate_metrics(
+                        np.array([1.0]), np.array([1.0]), selected_metrics=selected_metrics
+                    ) if selected_metrics else {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
+                    logger.warning("Using default metrics for test set (no actuals available)")
 
             # ====================================================================
             # GENERATE FUTURE FORECAST
@@ -2799,74 +3028,100 @@ This makes the trend robust to spikes and outliers
             return ForecastExecutionService.linear_regression_forecast(data, periods)
     
     @staticmethod
-    def calculate_metrics(actual: Any, predicted: Any) -> Dict[str, float]:
+    def calculate_metrics(actual: Any, predicted: Any, selected_metrics: List[str] = None) -> Dict[str, float]:
         """
-        Calculate metrics with extensive error handling and logging.
+        Calculate selected accuracy metrics with extensive error handling and logging.
+
+        Args:
+            actual: Actual values array
+            predicted: Predicted values array
+            selected_metrics: List of metrics to calculate. Options: ['mae', 'rmse', 'mape', 'accuracy']
+                             If None, calculates all metrics (backward compatibility)
+
+        Returns:
+            Dictionary with calculated metrics
         """
         try:
             # Ensure they are numpy arrays for shape access and calculations
             actual = np.asarray(actual)
             predicted = np.asarray(predicted)
-            
+
             logger.debug(f"calculate_metrics called: actual shape={actual.shape}, predicted shape={predicted.shape}")
-            
+
             # Ensure same length
             min_len = min(len(actual), len(predicted))
             if len(actual) != len(predicted):
                 logger.warning(f"Length mismatch: truncating to {min_len}")
                 actual = actual[:min_len]
                 predicted = predicted[:min_len]
-            
+
             # Ensure float type
             actual = actual.astype(float)
             predicted = predicted.astype(float)
-            
+
             # Check for NaN/Inf
             if np.any(np.isnan(actual)) or np.any(np.isnan(predicted)):
                 logger.error("NaN values detected in input arrays")
                 return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
-            
+
             if np.any(np.isinf(actual)) or np.any(np.isinf(predicted)):
                 logger.error("Inf values detected in input arrays")
                 return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
-            
-            # Calculate MAE
-            mae = float(np.mean(np.abs(actual - predicted)))
-            
-            # Calculate RMSE
-            rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
-            
-            # Calculate MAPE
-            mask = actual != 0
-            num_nonzero = int(np.sum(mask))
-            
-            logger.debug(f"Non-zero actuals: {num_nonzero}/{len(actual)}")
-            
-            if num_nonzero > 0:
-                pct_errors = np.abs((actual[mask] - predicted[mask]) / actual[mask])
-                mape = float(np.mean(pct_errors) * 100)
-                logger.debug(f"MAPE calculated from {num_nonzero} non-zero values: {mape:.2f}%")
-            else:
-                mape = 100.0
-                logger.warning("All actual values are zero - MAPE set to 100%")
-            
-            # Cap MAPE
-            mape = min(float(mape), 100.0)
-            
-            # Calculate accuracy
-            accuracy = max(0.0, 100.0 - mape)
-            
-            result = {
-                'accuracy': round(accuracy, 2),
-                'mae': round(mae, 2),
-                'rmse': round(rmse, 2),
-                'mape': round(mape, 2)
-            }
-            
+
+            # Default to all metrics if not specified
+            if selected_metrics is None:
+                selected_metrics = ['mae', 'rmse', 'mape', 'accuracy']
+
+            result = {}
+
+            # Calculate MAE if requested
+            if 'mae' in selected_metrics:
+                mae = float(np.mean(np.abs(actual - predicted)))
+                result['mae'] = round(mae, 2)
+
+            # Calculate RMSE if requested
+            if 'rmse' in selected_metrics:
+                rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
+                result['rmse'] = round(rmse, 2)
+
+            # Calculate MAPE if requested
+            if 'mape' in selected_metrics or 'accuracy' in selected_metrics:
+                mask = actual != 0
+                num_nonzero = int(np.sum(mask))
+
+                logger.debug(f"Non-zero actuals: {num_nonzero}/{len(actual)}")
+
+                if num_nonzero > 0:
+                    pct_errors = np.abs((actual[mask] - predicted[mask]) / actual[mask])
+                    mape = float(np.mean(pct_errors) * 100)
+                    logger.debug(f"MAPE calculated from {num_nonzero} non-zero values: {mape:.2f}%")
+                else:
+                    mape = 100.0
+                    logger.warning("All actual values are zero - MAPE set to 100%")
+
+                # Cap MAPE
+                mape = min(float(mape), 100.0)
+                result['mape'] = round(mape, 2)
+
+            # Calculate accuracy if requested (derived from MAPE)
+            if 'accuracy' in selected_metrics:
+                if 'mape' not in result:
+                    # Calculate MAPE if not already calculated
+                    mask = actual != 0
+                    if np.sum(mask) > 0:
+                        pct_errors = np.abs((actual[mask] - predicted[mask]) / actual[mask])
+                        mape = float(np.mean(pct_errors) * 100)
+                    else:
+                        mape = 100.0
+                    mape = min(float(mape), 100.0)
+
+                accuracy = max(0.0, 100.0 - result.get('mape', mape))
+                result['accuracy'] = round(accuracy, 2)
+
             logger.debug(f"Calculated metrics: {result}")
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Exception in calculate_metrics: {str(e)}", exc_info=True)
             return {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
@@ -2970,7 +3225,8 @@ This makes the trend robust to spikes and outliers
         test_metrics: Dict[str, float],
         future_dates: List[date],
         future_forecast: np.ndarray,
-        user_email: str
+        user_email: str,
+        selected_metrics: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Store forecast results with three types:

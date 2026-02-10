@@ -5,7 +5,7 @@ Changes:
 - ForecastResultResponse now uses date, value, type instead of forecast_date, forecast_quantity
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Any, Dict
 from app.schemas.sales_data import SalesDataFilter
 
@@ -67,8 +67,22 @@ class ForecastRunCreate(BaseModel):
     forecast_end: str = Field(..., description="End date in YYYY-MM-DD format")
     history_start: Optional[str] = Field(None, description="Start date of historic data to use (YYYY-MM-DD)")
     history_end: Optional[str] = Field(None, description="End date of historic data to use (YYYY-MM-DD)")
+    selected_metrics: Optional[List[str]] = Field(
+        None,
+        description="List of accuracy metrics to calculate. Options: mae, rmse, mape, accuracy. Default: ['mape', 'accuracy']",
+        min_items=1
+    )
 
     algorithms: List[AlgorithmMapping] = Field(..., min_items=1)
+
+    @validator('selected_metrics')
+    def validate_selected_metrics(cls, v):
+        if v is not None:
+            valid_metrics = {'mae', 'rmse', 'mape', 'accuracy'}
+            invalid_metrics = set(v) - valid_metrics
+            if invalid_metrics:
+                raise ValueError(f"Invalid metrics: {invalid_metrics}. Valid options: {valid_metrics}")
+        return v
 
 
 class ForecastRunResponse(BaseModel):
@@ -114,21 +128,23 @@ class ForecastResultResponse(BaseModel):
     version_id: str
     mapping_id: str
     algorithm_id: int
-    
+
     # NEW SCHEMA
     date: str  # Changed from forecast_date
     value: float  # Changed from forecast_quantity
     type: str  # NEW: 'testing_actual', 'testing_forecast', 'future_forecast'
-    
+
     # Confidence intervals (only for future_forecast)
     confidence_interval_lower: Optional[float] = None
     confidence_interval_upper: Optional[float] = None
     confidence_level: Optional[str] = None  # Changed from float to str
-    
-    # Accuracy metrics (only for testing_forecast)
-    accuracy_metric: Optional[float] = None
-    metric_type: Optional[str] = None
-    
+
+    # Accuracy metrics (only for testing_forecast) - supports multiple metrics
+    metrics: Optional[Dict[str, float]] = Field(
+        None,
+        description="Dictionary of accuracy metrics (mae, rmse, mape, accuracy) calculated for this result"
+    )
+
     metadata: Optional[Dict[str, Any]] = None
     created_at: str
     created_by: str
