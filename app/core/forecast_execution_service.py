@@ -1797,6 +1797,13 @@ This makes the trend robust to spikes and outliers
             from tensorflow.keras.layers import LSTM, Dense # type: ignore
             from tensorflow.keras.optimizers import Adam # type: ignore
             import warnings
+            import random
+            import numpy as np
+            import tensorflow as tf
+            
+            random.seed(42)
+            np.random.seed(42)
+            tf.random.set_seed(42)
             warnings.filterwarnings('ignore')
 
             # Prepare quantity data
@@ -2031,6 +2038,13 @@ This makes the trend robust to spikes and outliers
             from tensorflow import keras
             from tensorflow.keras import layers # type: ignore
             from sklearn.preprocessing import MinMaxScaler
+            import random
+            import numpy as np
+            import tensorflow as tf
+            
+            random.seed(42)
+            np.random.seed(42)
+            tf.random.set_seed(42)
             
             if 'total_quantity' in data.columns:
                 y = data['total_quantity'].values
@@ -2303,6 +2317,8 @@ This makes the trend robust to spikes and outliers
                     stepwise=True,
                     suppress_warnings=True,
                     error_action='ignore',
+                    random_state=42,
+                    
                     trace=False
                 )
 
