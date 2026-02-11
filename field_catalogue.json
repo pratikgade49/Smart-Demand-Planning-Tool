@@ -204,6 +204,29 @@ Forecast with external factors and multiple algorithms input
 }
 
 {
+  "version_id": "eec6e1e7-b504-4e0b-9d97-89eadb081378",
+  "algorithms": [
+    {
+      "algorithm_id": 999,
+      "execution_order": 1,
+      "custom_parameters": {}
+    }
+  ],
+  "forecast_filters": {
+    "aggregation_level": "product",
+    "interval": "MONTHLY",
+    "product": ["10009736"],
+    "selected_external_factors": []
+  },
+  "forecast_start": "2025-04-01",
+  "forecast_end": "2026-04-30",
+  "history_start": "2010-01-01",
+  "history_end": "2025-03-31",
+  "selected_metrics": ["mape"]
+}
+
+
+{
   "version_id": "214db7ab-906a-47d9-99a9-8d578240551d",
   "algorithms": [
     {

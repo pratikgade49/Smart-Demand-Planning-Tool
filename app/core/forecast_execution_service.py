@@ -3077,16 +3077,27 @@ This makes the trend robust to spikes and outliers
                 selected_metrics = ['mae', 'rmse', 'mape', 'accuracy']
 
             result = {}
+            actual_mean = float(np.mean(actual)) if len(actual) > 0 else 0
 
             # Calculate MAE if requested
             if 'mae' in selected_metrics:
                 mae = float(np.mean(np.abs(actual - predicted)))
                 result['mae'] = round(mae, 2)
+                # Calculate normalized MAE accuracy
+                if actual_mean > 0:
+                    result['mae_accuracy'] = round(max(0.0, 100.0 - (mae / actual_mean * 100)), 2)
+                else:
+                    result['mae_accuracy'] = 0.0
 
             # Calculate RMSE if requested
             if 'rmse' in selected_metrics:
                 rmse = float(np.sqrt(np.mean((actual - predicted) ** 2)))
                 result['rmse'] = round(rmse, 2)
+                # Calculate normalized RMSE accuracy
+                if actual_mean > 0:
+                    result['rmse_accuracy'] = round(max(0.0, 100.0 - (rmse / actual_mean * 100)), 2)
+                else:
+                    result['rmse_accuracy'] = 0.0
 
             # Calculate MAPE if requested
             if 'mape' in selected_metrics or 'accuracy' in selected_metrics:
@@ -3294,9 +3305,19 @@ This makes the trend robust to spikes and outliers
                 # 2. Store testing_forecast records (with accuracy metrics)
                 # ====================================================================
                 accuracy_metric = 0.0
-                if test_metrics and 'accuracy' in test_metrics:
-                    accuracy_metric = float(test_metrics['accuracy'])
-                    accuracy_metric = min(round(accuracy_metric, 2), 999.99)
+                primary_metric = selected_metrics[0] if selected_metrics else 'accuracy'
+                
+                if test_metrics:
+                    if primary_metric == 'mape':
+                        accuracy_metric = 100.0 - test_metrics.get('mape', 0)
+                    elif primary_metric == 'mae':
+                        accuracy_metric = test_metrics.get('mae_accuracy', 0)
+                    elif primary_metric == 'rmse':
+                        accuracy_metric = test_metrics.get('rmse_accuracy', 0)
+                    else:
+                        accuracy_metric = test_metrics.get('accuracy', 0)
+                        
+                accuracy_metric = min(round(float(accuracy_metric), 2), 999.99)
                 
                 for test_date, forecast_value in zip(test_dates, test_forecast):
                     result_id = str(uuid.uuid4())
@@ -3423,7 +3444,8 @@ This makes the trend robust to spikes and outliers
         process_log: List[str] = None,
         tenant_id: str = None,
         database_name: str = None,
-        aggregation_level: str = None
+        aggregation_level: str = None,
+        selected_metrics: List[str] = None
     ) -> Dict[str, Any]:
         """
         Generate forecast using best_fit algorithm selection.
@@ -3436,6 +3458,7 @@ This makes the trend robust to spikes and outliers
             tenant_id: Tenant identifier (for dynamic field detection)
             database_name: Database name (for dynamic field detection)
             aggregation_level: Current aggregation level (e.g., "product")
+            selected_metrics: List of metrics to use for comparison
             
         Returns:
             Dictionary with forecast results including selected algorithm, metrics, and predictions
@@ -3443,13 +3466,20 @@ This makes the trend robust to spikes and outliers
         if process_log is None:
             process_log = []
         
+        if selected_metrics is None:
+            selected_metrics = ['mape', 'accuracy']
+            
+        primary_metric = selected_metrics[0] if selected_metrics else 'accuracy'
+        # Define if a higher value is better for the primary metric
+        higher_is_better = primary_metric in ['accuracy']
+        
         process_log.append("Loading data for forecasting...")
         
         if len(historical_data) < 2:
             raise ValueError("Insufficient data for forecasting")
         
         process_log.append(f"Data loaded: {len(historical_data)} records")
-        process_log.append("Running best fit algorithm selection...")
+        process_log.append(f"Running best fit algorithm selection based on {primary_metric}...")
         
         # Define all available algorithms
         available_algorithms = [
@@ -3497,7 +3527,8 @@ This makes the trend robust to spikes and outliers
                     'total_quantity',
                     tenant_id,
                     database_name,
-                    aggregation_level
+                    aggregation_level,
+                    selected_metrics=selected_metrics
                 )
                 future_to_algorithm[future] = algorithm
             
@@ -3508,17 +3539,32 @@ This makes the trend robust to spikes and outliers
                     result = future.result()
                     algorithm_results.append(result)
                     
+                    metric_value = result.get(primary_metric, 0)
                     process_log.append(
-                        f"✅ Algorithm {algorithm_name} completed with accuracy: {result['accuracy']:.2f}%"
+                        f"✅ Algorithm {algorithm_name} completed with {primary_metric}: {metric_value:.2f}{'%' if primary_metric in ['accuracy', 'mape'] else ''}"
                     )
                     
-                    # Track best performing algorithm
-                    if best_metrics is None or result['accuracy'] > best_metrics['accuracy']:
+                    # Track best performing algorithm based on selected metric
+                    is_better = False
+                    if best_metrics is None:
+                        is_better = True
+                    else:
+                        current_best_val = best_metrics.get(primary_metric)
+                        if higher_is_better:
+                            if metric_value > current_best_val:
+                                is_better = True
+                        else:
+                            if metric_value < current_best_val:
+                                is_better = True
+                    
+                    if is_better:
                         best_metrics = {
-                            'accuracy': result['accuracy'],
-                            'mae': result['mae'],
-                            'rmse': result['rmse'],
-                            'mape': result.get('mape')
+                            'accuracy': result.get('accuracy', 0),
+                            'mae': result.get('mae', 0),
+                            'mae_accuracy': result.get('mae_accuracy', 0),
+                            'rmse': result.get('rmse', 0),
+                            'rmse_accuracy': result.get('rmse_accuracy', 0),
+                            'mape': result.get('mape', 100)
                         }
                         best_model = result
                         best_algorithm = algorithm_name
@@ -3528,13 +3574,13 @@ This makes the trend robust to spikes and outliers
                     logger.warning(f"Algorithm {algorithm_name} failed: {str(exc)}")
         
         # Filter out failed results
-        successful_results = [res for res in algorithm_results if res.get('accuracy', 0) > 0 and res.get('forecast')]
+        successful_results = [res for res in algorithm_results if res.get(primary_metric) is not None and res.get('forecast')]
 
         if not successful_results:
             fallback_results = [res for res in algorithm_results if res.get('forecast')]
             if fallback_results:
                 successful_results = fallback_results
-                process_log.append("No algorithm produced positive accuracy; using algorithms with non-empty forecasts as fallback")
+                process_log.append(f"No algorithm produced {primary_metric}; using algorithms with non-empty forecasts as fallback")
             else:
                 process_log.append("All algorithms failed to produce forecasts; using simple moving average fallback")
                 sma_forecast, sma_metrics = ForecastExecutionService.simple_moving_average(historical_data, periods=periods)
@@ -3554,8 +3600,11 @@ This makes the trend robust to spikes and outliers
             f"{len(algorithm_results) - len(successful_results)} failed."
         )
         
-        # Ensemble: average forecast of top 3 algorithms by accuracy
-        top3 = sorted(successful_results, key=lambda x: -x['accuracy'])[:3]
+        # Ensemble: average forecast of top 3 algorithms by selected metric
+        if higher_is_better:
+            top3 = sorted(successful_results, key=lambda x: -x.get(primary_metric, 0))[:3]
+        else:
+            top3 = sorted(successful_results, key=lambda x: x.get(primary_metric, float('inf')))[:3]
         
         if len(top3) >= 2:
             process_log.append(f"Creating ensemble from top {len(top3)} algorithms...")
@@ -3580,31 +3629,57 @@ This makes the trend robust to spikes and outliers
                 'algorithm': 'Ensemble (Top 3 Avg)',
                 'forecast': ensemble_forecast,
                 'test_forecast': ensemble_test_forecast,
-                'accuracy': np.mean([algo['accuracy'] for algo in top3]),
-                'mae': np.mean([algo['mae'] for algo in top3]),
-                'rmse': np.mean([algo['rmse'] for algo in top3]),
+                'accuracy': np.mean([algo.get('accuracy', 0) for algo in top3]),
+                'mae': np.mean([algo.get('mae', 0) for algo in top3]),
+                'mae_accuracy': np.mean([algo.get('mae_accuracy', 0) for algo in top3]),
+                'rmse': np.mean([algo.get('rmse', 0) for algo in top3]),
+                'rmse_accuracy': np.mean([algo.get('rmse_accuracy', 0) for algo in top3]),
                 'mape': np.mean([algo.get('mape', 0) for algo in top3])
             }
             algorithm_results.append(ensemble_result)
             
             # Update best model if ensemble is better
-            if ensemble_result['accuracy'] > best_metrics['accuracy']:
+            is_ensemble_better = False
+            ensemble_val = ensemble_result.get(primary_metric)
+            current_best_val = best_metrics.get(primary_metric)
+            
+            if ensemble_val is not None and current_best_val is not None:
+                if higher_is_better:
+                    if ensemble_val > current_best_val:
+                        is_ensemble_better = True
+                else:
+                    if ensemble_val < current_best_val:
+                        is_ensemble_better = True
+            
+            if is_ensemble_better:
                 best_model = ensemble_result
                 best_algorithm = 'ensemble'
                 best_metrics = {
-                    'accuracy': ensemble_result['accuracy'],
-                    'mae': ensemble_result['mae'],
-                    'rmse': ensemble_result['rmse'],
-                    'mape': ensemble_result['mape']
+                    'accuracy': ensemble_result.get('accuracy', 0),
+                    'mae': ensemble_result.get('mae', 0),
+                    'mae_accuracy': ensemble_result.get('mae_accuracy', 0),
+                    'rmse': ensemble_result.get('rmse', 0),
+                    'rmse_accuracy': ensemble_result.get('rmse_accuracy', 0),
+                    'mape': ensemble_result.get('mape', 0)
                 }
         
-        process_log.append(f"Best algorithm selected: {best_algorithm} (Accuracy: {best_metrics['accuracy']:.2f}%)")
+        process_log.append(f"Best algorithm selected: {best_algorithm} ({primary_metric}: {best_metrics.get(primary_metric):.2f})")
         
+        # Determine summary accuracy percentage for DB storage
+        if primary_metric == 'mape':
+            summary_value = 100.0 - best_metrics.get('mape', 0)
+        elif primary_metric == 'mae':
+            summary_value = best_metrics.get('mae_accuracy', 0)
+        elif primary_metric == 'rmse':
+            summary_value = best_metrics.get('rmse_accuracy', 0)
+        else:
+            summary_value = best_metrics.get('accuracy', 0)
+            
         return {
             'selected_algorithm': f"{best_algorithm} (Best Fit)",
-            'accuracy': best_metrics['accuracy'],
-            'mae': best_metrics['mae'],
-            'rmse': best_metrics['rmse'],
+            'accuracy': summary_value,
+            'mae': best_metrics.get('mae', 0),
+            'rmse': best_metrics.get('rmse', 0),
             'mape': best_metrics.get('mape'),
             'forecast': best_model['forecast'],
             'test_forecast': best_model.get('test_forecast', []),
@@ -3635,7 +3710,8 @@ This makes the trend robust to spikes and outliers
         target_column: str = 'total_quantity',
         tenant_id: str = None,
         database_name: str = None,
-        aggregation_level: str = None
+        aggregation_level: str = None,
+        selected_metrics: List[str] = None
     ) -> Dict[str, Any]:
         """
         Safely run an algorithm and return results.
@@ -3648,10 +3724,14 @@ This makes the trend robust to spikes and outliers
             tenant_id: Tenant identifier (for dynamic field detection)
             database_name: Database name (for dynamic field detection)
             aggregation_level: Current aggregation level (e.g., "product")
+            selected_metrics: List of metrics to calculate
 
         Returns:
             Dictionary with algorithm results
         """
+        if selected_metrics is None:
+            selected_metrics = ['mape', 'accuracy']
+
         # Ensure target_column is properly set
         if not target_column:
             target_column = 'total_quantity'
@@ -3739,7 +3819,11 @@ This makes the trend robust to spikes and outliers
                 eval_forecast, eval_metrics = execute(eval_data, eval_periods)
                 actual_eval = test_df[target_column].values
                 predicted_eval = np.asarray(eval_forecast)[:len(actual_eval)]
-                metrics = ForecastExecutionService.calculate_metrics(actual_eval, predicted_eval)
+                metrics = ForecastExecutionService.calculate_metrics(
+                    actual_eval, 
+                    predicted_eval,
+                    selected_metrics=selected_metrics
+                )
                 test_forecast_list = predicted_eval.tolist()
             else:
                 # Fallback: use training metrics
@@ -3752,17 +3836,11 @@ This makes the trend robust to spikes and outliers
             # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
             
-            # Extract accuracy metric
-            accuracy = metrics.get('accuracy', 0)
-            
             return {
                 'algorithm': algorithm_name,
                 'forecast': forecast_list,
                 'test_forecast': test_forecast_list,
-                'accuracy': accuracy,
-                'mae': metrics.get('mae', 0),
-                'rmse': metrics.get('rmse', 0),
-                'mape': metrics.get('mape', 0)
+                **metrics
             }
             
         except Exception as e:

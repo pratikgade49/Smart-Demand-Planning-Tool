@@ -208,7 +208,8 @@ def _process_entity_forecast(
                     process_log=[],
                     tenant_id=tenant_data["tenant_id"],
                     database_name=tenant_data["database_name"],
-                    aggregation_level=aggregation_level
+                    aggregation_level=aggregation_level,
+                    selected_metrics=selected_metrics
                 )
                     algo_name_for_result = "best_fit"
                     algo_accuracy = forecast_result.get('accuracy')
