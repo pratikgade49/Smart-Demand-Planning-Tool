@@ -31,6 +31,7 @@ import time
 from app.core.database import get_db_manager
 from app.core.exceptions import DatabaseException, ValidationException, NotFoundException
 from app.core.forecasting_service import ForecastingService
+from app.core.aggregation_service import AggregationService
 from app.core.external_factors_service import ExternalFactorsService
 from app.config import settings
 
@@ -326,7 +327,7 @@ class ForecastExecutionService:
             selected_metrics = forecast_run.get('selected_metrics', ['mape', 'accuracy'])
            
             # Get historical data
-            historical_data = ForecastingService.prepare_aggregated_data(
+            historical_data = AggregationService.prepare_aggregated_data(
                 tenant_id=tenant_id,
                 database_name=database_name,
                 aggregation_level=aggregation_level,
@@ -2318,7 +2319,7 @@ This makes the trend robust to spikes and outliers
                     suppress_warnings=True,
                     error_action='ignore',
                     random_state=42,
-                    
+
                     trace=False
                 )
 
@@ -2382,12 +2383,12 @@ This makes the trend robust to spikes and outliers
         
         try:
             # Get dynamic field names from metadata
-            from app.core.forecasting_service import ForecastingService
-            target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
+            from app.core.aggregation_service import AggregationService
+            target_field, date_field = AggregationService._get_field_names(tenant_id, database_name)
             standard_columns.update({target_field, date_field})
             
             # Get all dimension fields from field catalogue
-            dimension_fields = ForecastingService._get_dimension_fields(tenant_id, database_name)
+            dimension_fields = AggregationService._get_dimension_fields(tenant_id, database_name)
             
             # Parse aggregation level to get fields being used for aggregation
             agg_fields = set()

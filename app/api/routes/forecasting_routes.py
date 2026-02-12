@@ -14,11 +14,12 @@ from app.schemas.forecasting import (
     ForecastVersionUpdate,
     ExternalFactorCreate,
     ExternalFactorUpdate,
+    ForecastRunCreate,
     DisaggregationRequest,
-    DisaggregateDataRequest,
-    ForecastRunCreate
+    DisaggregateDataRequest
 )
-
+from app.core.disaggregation_service import DisaggregationService
+from app.core.aggregation_service import AggregationService
 
 
 from app.core.resource_monitor import monitor_endpoint, ResourceMonitor
@@ -360,7 +361,7 @@ async def disaggregate_forecast(
     """
     try:
         logger.info(f"Disaggregating forecast run {request.forecast_run_id} to {request.target_aggregation_level}")
-        result = ForecastingService.disaggregate_forecast(
+        result = DisaggregationService.disaggregate_forecast(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             request=request,
@@ -393,7 +394,7 @@ async def get_disaggregated_forecast(
             raise HTTPException(status_code=400, detail="forecast_run_id is required")
         
         logger.info(f"Retrieving disaggregated forecast for run {forecast_run_id}")
-        result = ForecastingService.get_disaggregated_forecast_data(
+        result = DisaggregationService.get_disaggregated_forecast_data(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             forecast_run_id=forecast_run_id,
@@ -624,7 +625,7 @@ async def get_aggregation_levels(
     - Multi dimension: Combine fields with hyphen (e.g., "product-location", "customer-location")
     """
     try:
-        result = ForecastingService.get_available_aggregation_levels(
+        result = AggregationService.get_available_aggregation_levels(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"]
         )
@@ -965,7 +966,7 @@ async def disaggregate_data(
             f"for tenant {tenant_data['tenant_id']} (Page {page}, Size {page_size})"
         )
 
-        result = ForecastingService.disaggregate_data(
+        result = DisaggregationService.disaggregate_data(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             request=request,

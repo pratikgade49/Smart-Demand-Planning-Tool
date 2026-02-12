@@ -75,6 +75,7 @@ def _process_entity_forecast(
     Returns entity results dictionary.
     """
     from app.core.forecasting_service import ForecastingService
+    from app.core.aggregation_service import AggregationService
     from app.core.forecast_execution_service import ForecastExecutionService
 
     # Set default selected_metrics if not provided
@@ -91,7 +92,7 @@ def _process_entity_forecast(
                        if k not in ['aggregation_level', 'interval', 'selected_external_factors']}
 
         # Get historical data for this specific aggregation combination
-        historical_data, date_field_name = ForecastingService.prepare_aggregated_data(
+        historical_data, date_field_name = AggregationService.prepare_aggregated_data(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
             aggregation_level=aggregation_level,

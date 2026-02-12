@@ -230,6 +230,7 @@ from app.core.forecast_utils import (
     AlgorithmConfig
 )
 from app.core.forecasting_service import ForecastingService
+from app.core.aggregation_service import AggregationService
 from app.core.forecast_execution_service import ForecastExecutionService
 from app.core.resource_monitor import ResourceMonitor, performance_tracker
 from app.core.algorithm_parameters import AlgorithmParametersService
@@ -302,7 +303,7 @@ class BackgroundForecastExecutor:
                 filters_for_data = {k: v for k, v in request_data.get('forecast_filters', {}).items() 
                                    if k not in ['aggregation_level', 'interval', 'selected_external_factors']}
                 
-                entity_combinations = ForecastingService.get_aggregation_combinations(
+                entity_combinations = AggregationService.get_aggregation_combinations(
                     tenant_id=tenant_id,
                     database_name=database_name,
                     aggregation_level=aggregation_level,
