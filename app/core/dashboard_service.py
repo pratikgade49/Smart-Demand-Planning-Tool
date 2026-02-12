@@ -1,6 +1,11 @@
 """
-Dashboard Data Service.
+Dashboard Data Service - UPDATED WITH NEW DISAGGREGATION LOGIC.
 Aggregates sales, forecast, and final plan data for UI dashboards.
+
+CHANGES:
+- save_aggregated_product_manager now uses existing product_manager ratios
+- save_aggregated_final_plan now uses existing final_plan ratios
+- New method _calculate_table_ratios to get ratios from the same table
 """
 
 import logging
@@ -1052,6 +1057,84 @@ class DashboardService:
             raise DatabaseException(
                 f"Failed to copy dashboard data: {str(e)}"
             )
+
+    # ============================================================================
+    # NEW METHOD: Calculate ratios from the same table being disaggregated
+    # ============================================================================
+    @staticmethod
+    def _calculate_table_ratios(
+        cursor,
+        table_name: str,
+        aggregated_fields: List[str],
+        group_data: Dict[str, Any],
+        date_field: str,
+        target_field: str,
+    ) -> Dict[str, float]:
+        """
+        Calculate distribution ratios from existing values in the same table.
+        
+        Args:
+            cursor: Database cursor
+            table_name: Table to calculate ratios from (final_plan or product_manager)
+            aggregated_fields: Fields used for aggregation (e.g., ['product'])
+            group_data: Aggregated group values (e.g., {'product': 'P1'})
+            date_field: Name of the date field
+            target_field: Name of the target field (quantity)
+            
+        Returns:
+            Dictionary mapping master_id to allocation ratio
+        """
+        # Build WHERE clause for the aggregated group
+        group_conditions = []
+        group_params = []
+        for field in aggregated_fields:
+            val = group_data.get(field)
+            if val is None:
+                group_conditions.append(f'm."{field}" IS NULL')
+            else:
+                group_conditions.append(f'm."{field}" = %s')
+                group_params.append(val)
+        
+        group_where = " AND ".join(group_conditions)
+        
+        # Get all master_ids in this group
+        master_id_query = f"""
+            SELECT master_id
+            FROM master_data m
+            WHERE {group_where}
+        """
+        cursor.execute(master_id_query, group_params)
+        master_ids = [row[0] for row in cursor.fetchall()]
+        
+        if not master_ids:
+            raise NotFoundException("Aggregated group", str(group_data))
+        
+        # Get total quantities per master_id from the table
+        placeholders = ",".join(["%s"] * len(master_ids))
+        totals_query = f"""
+            SELECT master_id, SUM(CAST("{target_field}" AS DOUBLE PRECISION))
+            FROM {table_name}
+            WHERE master_id IN ({placeholders})
+            GROUP BY master_id
+        """
+        cursor.execute(totals_query, master_ids)
+        
+        # Calculate ratios
+        totals = {row[0]: float(row[1]) for row in cursor.fetchall()}
+        total_sum = sum(totals.values())
+        
+        ratios = {}
+        if total_sum > 0:
+            # Use existing table ratios
+            for master_id in master_ids:
+                ratios[master_id] = totals.get(master_id, 0.0) / total_sum
+        else:
+            # If no data exists, use equal distribution
+            equal_ratio = 1.0 / len(master_ids)
+            for master_id in master_ids:
+                ratios[master_id] = equal_ratio
+        
+        return ratios
         
     @staticmethod
     def save_aggregated_product_manager(
@@ -1063,7 +1146,10 @@ class DashboardService:
         quantity: float,
     ) -> Dict[str, Any]:
         """
-        Save aggregated product manager data by distributing the quantity among group members.
+        Save aggregated product manager data by distributing the quantity among group members
+        using EXISTING PRODUCT_MANAGER TABLE ratios (NOT sales data).
+        
+        CHANGED: Now uses _calculate_table_ratios instead of sales_data
         """
         return DashboardService._save_aggregated_data(
             database_name=database_name,
@@ -1086,7 +1172,10 @@ class DashboardService:
         quantity: float,
     ) -> Dict[str, Any]:
         """
-        Save aggregated final plan data by distributing the quantity among group members.
+        Save aggregated final plan data by distributing the quantity among group members
+        using EXISTING FINAL_PLAN TABLE ratios (NOT sales data).
+        
+        CHANGED: Now uses _calculate_table_ratios instead of sales_data
         """
         return DashboardService._save_aggregated_data(
             database_name=database_name,
@@ -1110,6 +1199,9 @@ class DashboardService:
         plan_date,
         quantity: float,
     ) -> Dict[str, Any]:
+        """
+        UPDATED: Now uses table-specific ratios instead of sales data ratios.
+        """
         db_manager = get_db_manager()
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
@@ -1122,59 +1214,27 @@ class DashboardService:
                         cursor
                     )
 
-                    # 1. Resolve master_ids for the group
-                    clauses = []
-                    params = []
-                    for f in aggregated_fields:
-                        val = group_data.get(f)
-                        if val is None:
-                            clauses.append(sql.SQL("{} IS NULL").format(sql.Identifier(f)))
-                        else:
-                            clauses.append(sql.SQL("{} = %s").format(sql.Identifier(f)))
-                            params.append(val)
+                    # ========================================
+                    # CHANGED: Use table-specific ratios
+                    # ========================================
+                    ratios = DashboardService._calculate_table_ratios(
+                        cursor=cursor,
+                        table_name=table_name,
+                        aggregated_fields=aggregated_fields,
+                        group_data=group_data,
+                        date_field=date_field,
+                        target_field=target_field,
+                    )
                     
-                    group_where = sql.SQL(" AND ").join(clauses)
-                    master_id_query = sql.SQL("SELECT master_id FROM master_data WHERE {}").format(group_where)
-                    cursor.execute(master_id_query, params)
-                    master_ids = [row[0] for row in cursor.fetchall()]
-
-                    if not master_ids:
-                        raise NotFoundException("Aggregated group", str(group_data))
-
-                    # 2. Calculate historical sales distribution ratios
-                    # We use total sales per master_id as the weight
-                    placeholders = ",".join(["%s"] * len(master_ids))
-                    sales_query = f"""
-                        SELECT master_id, SUM(CAST("{target_field}" AS DOUBLE PRECISION))
-                        FROM sales_data
-                        WHERE master_id IN ({placeholders})
-                        GROUP BY master_id
-                    """
-                    cursor.execute(sales_query, master_ids)
-                    sales_weights = {row[0]: float(row[1]) for row in cursor.fetchall()}
-
-                    total_historical_sales = sum(sales_weights.values())
-                    
-                    # 3. Distribute quantity
-                    distributed_records = []
-                    num_masters = len(master_ids)
-                    
-                    if total_historical_sales > 0:
-                        for m_id in master_ids:
-                            ratio = sales_weights.get(m_id, 0.0) / total_historical_sales
-                            distributed_records.append((m_id, quantity * ratio))
-                    else:
-                        # Equal distribution if no historical sales
-                        equal_qty = quantity / num_masters
-                        for m_id in master_ids:
-                            distributed_records.append((m_id, equal_qty))
-
-                    # 4. Upsert records
+                    # Distribute quantity based on ratios
                     upserted_count = 0
-                    for m_id, distributed_qty in distributed_records:
-                        # Get UOM and unit price
-                        uom, unit_price = DashboardService._resolve_sales_info(cursor, m_id)
+                    for master_id, ratio in ratios.items():
+                        distributed_qty = quantity * ratio
                         
+                        # Get UOM and unit price
+                        uom, unit_price = DashboardService._resolve_sales_info(cursor, master_id)
+                        
+                        # Upsert record
                         upsert_query = sql.SQL("""
                             INSERT INTO {table}
                             (master_id, {date_col}, {target_col}, uom, unit_price, type, created_by, updated_at, updated_by)
@@ -1192,14 +1252,15 @@ class DashboardService:
                             date_col=sql.Identifier(date_field),
                             target_col=sql.Identifier(target_field)
                         )
-                        cursor.execute(upsert_query, (m_id, plan_date, distributed_qty, uom, unit_price, user_email, user_email))
+                        cursor.execute(upsert_query, (master_id, plan_date, distributed_qty, uom, unit_price, user_email, user_email))
                         upserted_count += 1
 
                     conn.commit()
                     return {
                         "status": "success",
-                        "message": f"Aggregated data saved to {table_name}",
+                        "message": f"Aggregated data saved to {table_name} using {table_name} ratios",
                         "affected_records": upserted_count,
+                        "distribution_method": f"Existing {table_name} data ratios"
                     }
                 finally:
                     cursor.close()

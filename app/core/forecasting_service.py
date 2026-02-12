@@ -1423,6 +1423,11 @@ class ForecastingService:
         Disaggregate sales, forecast, and final plan data to the lowest granular level
         and upsert results into the specified target table.
 
+        UPDATED: Now uses table-specific ratios for final_plan and product_manager
+        - forecast_data: uses sales_data ratios (unchanged)
+        - final_plan: uses existing final_plan ratios
+        - product_manager: uses existing product_manager ratios
+
         Returns data in dashboard format: grouped by master_data dimensions with separate arrays.
         """
         db_manager = get_db_manager()
@@ -1435,7 +1440,7 @@ class ForecastingService:
             target_columns = ForecastingService._get_dimension_fields(tenant_id, database_name)
             target_aggregation_level = '-'.join(target_columns)
 
-            # ✅ Convert filters
+            # Convert filters
             filters_dict = {}
             if request.filters:
                 for filter_item in request.filters:
@@ -1461,8 +1466,12 @@ class ForecastingService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Step 1: Calculate historical ratios
-                    ratios_df = ForecastingService._calculate_disaggregation_ratios(
+                    # ========================================================================
+                    # CHANGED: Calculate ratios for each table type separately
+                    # ========================================================================
+                    
+                    # For forecast_data: use sales_data ratios (original logic)
+                    forecast_ratios_df = ForecastingService._calculate_disaggregation_ratios(
                         conn=conn,
                         source_columns=source_columns,
                         target_columns=target_columns,
@@ -1471,17 +1480,46 @@ class ForecastingService:
                         target_field=target_field,
                         interval=request.interval,
                         date_from=request.date_from,
-                        date_to=request.date_to
+                        date_to=request.date_to,
+                        source_table='sales_data'  # NEW PARAMETER
                     )
                     
-                    if ratios_df.empty:
+                    # For final_plan: use final_plan ratios
+                    final_plan_ratios_df = ForecastingService._calculate_disaggregation_ratios(
+                        conn=conn,
+                        source_columns=source_columns,
+                        target_columns=target_columns,
+                        filters=filters_dict,
+                        date_field=date_field,
+                        target_field=target_field,
+                        interval=request.interval,
+                        date_from=request.date_from,
+                        date_to=request.date_to,
+                        source_table='final_plan'  # NEW PARAMETER
+                    )
+                    
+                    # For product_manager: use product_manager ratios
+                    product_manager_ratios_df = ForecastingService._calculate_disaggregation_ratios(
+                        conn=conn,
+                        source_columns=source_columns,
+                        target_columns=target_columns,
+                        filters=filters_dict,
+                        date_field=date_field,
+                        target_field=target_field,
+                        interval=request.interval,
+                        date_from=request.date_from,
+                        date_to=request.date_to,
+                        source_table='product_manager'  # NEW PARAMETER
+                    )
+                    
+                    if forecast_ratios_df.empty and final_plan_ratios_df.empty and product_manager_ratios_df.empty:
                         return {
                             "records": [],
                             "total_count": 0,
-                            "summary": {"message": "No historical sales data found"}
+                            "summary": {"message": "No data found for ratio calculation"}
                         }
                     
-                    # Step 2: Build filter clause for master_data
+                    # Build filter clause for master_data
                     where_conditions = []
                     where_params = []
                     
@@ -1497,7 +1535,7 @@ class ForecastingService:
                     
                     where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else "WHERE 1=1"
                     
-                    # Step 3: Get ALL target dimension combinations (Process everything for data integrity)
+                    # Get ALL target dimension combinations
                     target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
                     
                     count_query = f"""
@@ -1526,18 +1564,20 @@ class ForecastingService:
                             "summary": {"message": "No dimension combinations found"}
                         }
                     
-                    # Step 4: Build ratios lookup
-                    ratios_dict = {}
-                    for _, row in ratios_df.iterrows():
-                        target_key = tuple(str(row[col]) for col in target_columns)
-                        source_key = tuple(str(row[col]) for col in source_columns)
-                        allocation_factor = float(row['allocation_factor'])
-                        
-                        if target_key not in ratios_dict:
-                            ratios_dict[target_key] = {}
-                        ratios_dict[target_key][source_key] = allocation_factor
+                    # ========================================================================
+                    # Build ratios lookups for each table type
+                    # ========================================================================
+                    forecast_ratios_dict = ForecastingService._build_ratios_dict(
+                        forecast_ratios_df, target_columns, source_columns
+                    )
+                    final_plan_ratios_dict = ForecastingService._build_ratios_dict(
+                        final_plan_ratios_df, target_columns, source_columns
+                    )
+                    product_manager_ratios_dict = ForecastingService._build_ratios_dict(
+                        product_manager_ratios_df, target_columns, source_columns
+                    )
                     
-                    # ✅ Step 5: Fetch SOURCE-LEVEL forecast data ONCE (not per target group)
+                    # Fetch SOURCE-LEVEL data for each table
                     start_date = request.date_from or "1900-01-01"
                     end_date = request.date_to or "2099-12-31"
                     
@@ -1559,7 +1599,7 @@ class ForecastingService:
                     
                     source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
                     
-                    # Fetch all forecast data at SOURCE level
+                    # Fetch forecast_data at SOURCE level
                     forecast_query = f"""
                         SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
                             MAX(f.uom), {source_cols_sql}
@@ -1570,11 +1610,10 @@ class ForecastingService:
                         GROUP BY f."{date_field}", {source_cols_sql}
                         ORDER BY f."{date_field}" ASC
                     """
-                    
                     cursor.execute(forecast_query, source_filter_params + [start_date, end_date])
                     forecast_source_data = cursor.fetchall()
                     
-                    # Fetch all final_plan data at SOURCE level
+                    # Fetch final_plan at SOURCE level
                     final_plan_query = f"""
                         SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)),
                             MAX(fp.uom), {source_cols_sql}
@@ -1586,11 +1625,10 @@ class ForecastingService:
                         GROUP BY fp."{date_field}", {source_cols_sql}
                         ORDER BY fp."{date_field}" ASC
                     """
-                    
                     cursor.execute(final_plan_query, source_filter_params + [start_date, end_date])
                     final_plan_source_data = cursor.fetchall()
 
-                    # Fetch all product_manager data at SOURCE level
+                    # Fetch product_manager at SOURCE level
                     product_manager_query = f"""
                         SELECT pm."{date_field}", SUM(CAST(pm."{target_field}" AS DOUBLE PRECISION)),
                             MAX(pm.uom), {source_cols_sql}
@@ -1605,7 +1643,7 @@ class ForecastingService:
                     cursor.execute(product_manager_query, source_filter_params + [start_date, end_date])
                     product_manager_source_data = cursor.fetchall()
                     
-                    # Step 6: Build results for ALL target dimension groups
+                    # Build results for ALL target dimension groups
                     all_results = []
                     
                     for group in dimension_groups:
@@ -1657,7 +1695,9 @@ class ForecastingService:
                                 "Quantity": float(quantity) if quantity is not None else 0.0,
                             })
                         
-                        # ✅ Disaggregate FORECAST data
+                        # ========================================================================
+                        # CHANGED: Disaggregate FORECAST using forecast_ratios_dict
+                        # ========================================================================
                         for row in forecast_source_data:
                             num_source_cols = len(source_columns)
                             data_date = row[0]
@@ -1670,9 +1710,9 @@ class ForecastingService:
                             
                             source_key = tuple(str(v) for v in source_vals)
                             
-                            # Apply allocation factor
-                            if target_key in ratios_dict and source_key in ratios_dict[target_key]:
-                                allocation_factor = ratios_dict[target_key][source_key]
+                            # Use forecast_ratios_dict
+                            if target_key in forecast_ratios_dict and source_key in forecast_ratios_dict[target_key]:
+                                allocation_factor = forecast_ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
                                 
                                 entry["forecast_data"].append({
@@ -1681,7 +1721,9 @@ class ForecastingService:
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
                         
-                        # ✅ Disaggregate FINAL PLAN data
+                        # ========================================================================
+                        # CHANGED: Disaggregate FINAL PLAN using final_plan_ratios_dict
+                        # ========================================================================
                         for row in final_plan_source_data:
                             num_source_cols = len(source_columns)
                             data_date = row[0]
@@ -1694,9 +1736,9 @@ class ForecastingService:
                             
                             source_key = tuple(str(v) for v in source_vals)
                             
-                            # Apply allocation factor
-                            if target_key in ratios_dict and source_key in ratios_dict[target_key]:
-                                allocation_factor = ratios_dict[target_key][source_key]
+                            # Use final_plan_ratios_dict
+                            if target_key in final_plan_ratios_dict and source_key in final_plan_ratios_dict[target_key]:
+                                allocation_factor = final_plan_ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
                                 
                                 entry["final_plan"].append({
@@ -1705,7 +1747,9 @@ class ForecastingService:
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
 
-                        # ✅ Disaggregate PRODUCT MANAGER data
+                        # ========================================================================
+                        # CHANGED: Disaggregate PRODUCT MANAGER using product_manager_ratios_dict
+                        # ========================================================================
                         for row in product_manager_source_data:
                             num_source_cols = len(source_columns)
                             data_date = row[0]
@@ -1718,9 +1762,9 @@ class ForecastingService:
                             
                             source_key = tuple(str(v) for v in source_vals)
                             
-                            # Apply allocation factor
-                            if target_key in ratios_dict and source_key in ratios_dict[target_key]:
-                                allocation_factor = ratios_dict[target_key][source_key]
+                            # Use product_manager_ratios_dict
+                            if target_key in product_manager_ratios_dict and source_key in product_manager_ratios_dict[target_key]:
+                                allocation_factor = product_manager_ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
                                 
                                 entry["product_manager"].append({
@@ -1731,8 +1775,7 @@ class ForecastingService:
                         
                         all_results.append(entry)
 
-
-                    # Step 7: Upsert to all three tables (forecast_data, product_manager, final_plan)
+                    # Upsert to all three tables
                     upserted_counts = {}
                     for table_name in ["forecast_data", "product_manager", "final_plan"]:
                         count = ForecastingService._upsert_disaggregated_data(
@@ -1750,7 +1793,7 @@ class ForecastingService:
                     total_upserted = sum(upserted_counts.values())
                     logger.info(f"Upserted {total_upserted} records total: {upserted_counts}")
 
-                    # Step 8: Paginate the response records
+                    # Paginate the response records
                     offset = (page - 1) * page_size
                     paginated_results = all_results[offset : offset + page_size]
 
@@ -1768,7 +1811,12 @@ class ForecastingService:
                                 "from": request.date_from,
                                 "to": request.date_to
                             },
-                            "interval": request.interval
+                            "interval": request.interval,
+                            "ratio_calculation_method": {
+                                "forecast_data": "sales_data ratios",
+                                "final_plan": "final_plan existing ratios",
+                                "product_manager": "product_manager existing ratios"
+                            }
                         }
                     }
                 
@@ -1783,6 +1831,30 @@ class ForecastingService:
 
 
     @staticmethod
+    def _build_ratios_dict(
+        ratios_df: pd.DataFrame,
+        target_columns: List[str],
+        source_columns: List[str]
+    ) -> Dict[tuple, Dict[tuple, float]]:
+        """
+        Build a nested dictionary for fast ratio lookups.
+        
+        Returns:
+            {target_key: {source_key: allocation_factor}}
+        """
+        ratios_dict = {}
+        for _, row in ratios_df.iterrows():
+            target_key = tuple(str(row[col]) for col in target_columns)
+            source_key = tuple(str(row[col]) for col in source_columns)
+            allocation_factor = float(row['allocation_factor'])
+            
+            if target_key not in ratios_dict:
+                ratios_dict[target_key] = {}
+            ratios_dict[target_key][source_key] = allocation_factor
+        
+        return ratios_dict
+
+    @staticmethod
     def _calculate_disaggregation_ratios(
         conn,
         source_columns: List[str],
@@ -1792,10 +1864,16 @@ class ForecastingService:
         target_field: str,
         interval: str,
         date_from: Optional[str] = None,
-        date_to: Optional[str] = None
+        date_to: Optional[str] = None,
+        source_table: str = 'sales_data'  # NEW PARAMETER
     ) -> pd.DataFrame:
         """
-        Calculate disaggregation ratios based on historical sales distribution.
+        Calculate disaggregation ratios based on data from specified source table.
+
+        CHANGED: Now accepts source_table parameter to use different tables for ratio calculation
+        - 'sales_data': for forecast_data disaggregation
+        - 'final_plan': for final_plan disaggregation  
+        - 'product_manager': for product_manager disaggregation
 
         Returns DataFrame with target-level combinations and their allocation factors.
         """
@@ -1830,27 +1908,31 @@ class ForecastingService:
         # Get date truncation expression
         date_trunc = ForecastingService._get_date_trunc_expr(interval, date_field)
         
-        # Query for target-level aggregated sales
+        # Query for target-level aggregated data FROM THE SPECIFIED SOURCE TABLE
         target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
         source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
         
+        # ========================================================================
+        # CHANGED: Use source_table parameter instead of hardcoded 'sales_data'
+        # ========================================================================
         query = f"""
             SELECT
                 {target_cols_sql},
                 SUM(CAST(s."{target_field}" AS numeric)) as target_volume
-            FROM sales_data s
+            FROM {source_table} s
             JOIN master_data m ON s.master_id = m.master_id
             WHERE 1=1 {filter_clause}
             GROUP BY {target_cols_sql}
             ORDER BY {target_cols_sql}
         """
         
-        logger.debug(f"Ratio calculation query: {query}")
+        logger.debug(f"Ratio calculation query for {source_table}: {query}")
         logger.debug(f"Params: {filter_params}")
         
         df_target = pd.read_sql_query(query, conn, params=filter_params)
         
         if df_target.empty:
+            logger.warning(f"No data found in {source_table} for ratio calculation")
             return pd.DataFrame()
         
         # Calculate source-level totals
@@ -1866,7 +1948,7 @@ class ForecastingService:
         sort_columns = target_columns + source_columns
         ratios_df = ratios_df.sort_values(by=sort_columns).reset_index(drop=True)
 
-        logger.info(f"Calculated {len(ratios_df)} disaggregation ratios")
+        logger.info(f"Calculated {len(ratios_df)} disaggregation ratios from {source_table}")
 
         return ratios_df
 
