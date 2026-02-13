@@ -121,7 +121,7 @@ class AlgorithmMappingResponse(BaseModel):
     created_at: str
     updated_at: Optional[str] = None
 
-# ✅ UPDATED: Changed from forecast_date/forecast_quantity to date/value/type
+#   UPDATED: Changed from forecast_date/forecast_quantity to date/value/type
 class ForecastResultResponse(BaseModel):
     result_id: str
     forecast_run_id: str

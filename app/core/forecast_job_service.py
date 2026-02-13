@@ -83,7 +83,7 @@ class ForecastJobService:
                         tenant_id,
                         JobStatus.PENDING.value,
                         json.dumps(request_data, default=str),
-                        request_data.get('selected_metrics', ['mape', 'accuracy']),  # ✅ Extract and store
+                        request_data.get('selected_metrics', ['mape', 'accuracy']),  #   Extract and store
                         created_at,
                         user_email,
                         created_at

@@ -337,11 +337,11 @@ class ForecastExecutionService:
  
             logger.info(f"Prepared {len(historical_data)} historical records")
            
-            # ✅ FIXED: Get external factors WITHOUT date filtering
+            #   FIXED: Get external factors WITHOUT date filtering
             external_factors = ForecastExecutionService._prepare_external_factors(
                 tenant_id,
                 database_name,
-                selected_factors=selected_factors  # ✅ Only pass selected_factors
+                selected_factors=selected_factors  #   Only pass selected_factors
             )
            
             # Execute each algorithm in parallel
@@ -1662,7 +1662,7 @@ This makes the trend robust to spikes and outliers
         # Calculate base moving average
         base_ma = float(np.mean(y[-window:]))
         
-        # ✅ CRITICAL FIX: Generate forecast by rolling forward with trend
+        #   CRITICAL FIX: Generate forecast by rolling forward with trend
         # Instead of just extrapolating, we update the moving average as we forecast
         forecast = []
         
@@ -1689,7 +1689,7 @@ This makes the trend robust to spikes and outliers
             
             forecast.append(next_value)
             
-            # ✅ KEY: Update the rolling window with the new forecast
+            #   KEY: Update the rolling window with the new forecast
             current_values = current_values[1:] + [next_value]
         
         forecast = np.array(forecast)
@@ -2231,7 +2231,7 @@ This makes the trend robust to spikes and outliers
         # Calculate base moving average
         base_ma = float(np.mean(y[-window:]))
         
-        # ✅ CRITICAL FIX: Generate forecast by rolling forward with trend
+        #   CRITICAL FIX: Generate forecast by rolling forward with trend
         # Instead of just extrapolating, we update the moving average as we forecast
         forecast = []
         
@@ -2258,7 +2258,7 @@ This makes the trend robust to spikes and outliers
             
             forecast.append(next_value)
             
-            # ✅ KEY: Update the rolling window with the new forecast
+            #   KEY: Update the rolling window with the new forecast
             current_values = current_values[1:] + [next_value]
         
         forecast = np.array(forecast)
@@ -3185,8 +3185,8 @@ This makes the trend robust to spikes and outliers
                 tenant_id=tenant_id,
                 database_name=database_name,
                 selected_factors=selected_factors,
-                start_date=None,  # ✅ FIXED: No date filtering
-                end_date=None     # ✅ FIXED: No date filtering
+                start_date=None,  #   FIXED: No date filtering
+                end_date=None     #   FIXED: No date filtering
             )
 
             if not df_pivot.empty:
@@ -3558,7 +3558,7 @@ This makes the trend robust to spikes and outliers
                     
                     metric_value = result.get(primary_metric, 0)
                     process_log.append(
-                        f"✅ Algorithm {algorithm_name} completed with {primary_metric}: {metric_value:.2f}{'%' if primary_metric in ['accuracy', 'mape'] else ''}"
+                        f"  Algorithm {algorithm_name} completed with {primary_metric}: {metric_value:.2f}{'%' if primary_metric in ['accuracy', 'mape'] else ''}"
                     )
                     
                     # Track best performing algorithm based on selected metric
@@ -3754,7 +3754,7 @@ This makes the trend robust to spikes and outliers
             target_column = 'total_quantity'
 
         try:
-            # ✅ CRITICAL: Ensure no duplicate columns before proceeding
+            #   CRITICAL: Ensure no duplicate columns before proceeding
             # Duplicate columns (like multiple 'total_quantity' or 'period') can crash algorithms
             if data.columns.duplicated().any():
                 logger.info(f"Algorithm {algorithm_name}: Found duplicate columns {data.columns[data.columns.duplicated()].unique().tolist()}, keeping only first occurrence")

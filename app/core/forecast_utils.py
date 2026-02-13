@@ -313,7 +313,7 @@ def _process_entity_forecast(
                     test_actuals = []
                     test_dates = []
                 
-                # ✅ LOG what we have before inserting
+                #   LOG what we have before inserting
                 logger.info(f"DEBUG {entity_name}: Preparing to insert:")
                 logger.info(f"  test_actuals={len(test_actuals)}, test_forecasts={len(test_forecasts)}, test_dates={len(test_dates)}")
                 logger.info(f"  future_forecasts={len(algo_forecast)}, future_dates={len(forecast_dates)}")
@@ -372,8 +372,8 @@ def _process_entity_forecast(
                         test_date,
                         forecast_value_float,
                         'testing_forecast',
-                        primary_metric_value,  # ✅ Use primary metric value
-                        primary_metric_name,   # ✅ Use primary metric name (RMSE, MAE, etc.)
+                        primary_metric_value,  #   Use primary metric value
+                        primary_metric_name,   #   Use primary metric name (RMSE, MAE, etc.)
                         Json({
                             'algorithm': algo_name_for_result,
                             'metrics': {k: algo_metrics[k] for k in selected_metrics if k in algo_metrics},  # Only selected

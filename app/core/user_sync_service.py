@@ -70,7 +70,7 @@ class UserSyncService:
                     ))
                     
                     conn.commit()
-                    logger.info(f"✅ Synced user {email} to master database")
+                    logger.info(f"  Synced user {email} to master database")
                     return True
                     
                 finally:
@@ -112,7 +112,7 @@ class UserSyncService:
                     """, (user_id, tenant_id))
                     
                     conn.commit()
-                    logger.info(f"✅ Synced user deletion to master database")
+                    logger.info(f"  Synced user deletion to master database")
                     return True
                     
                 finally:
@@ -181,7 +181,7 @@ class UserSyncService:
                     cursor.execute(query, params)
                     conn.commit()
                     
-                    logger.info(f"✅ Synced user update to master database")
+                    logger.info(f"  Synced user update to master database")
                     return True
                     
                 finally:

@@ -99,7 +99,7 @@ class ExcelUploadService:
     def identify_column_types(
         df: pd.DataFrame,
         field_catalogue: Dict[str, Any]
-    ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:  # ✅ Now returns 3 values
+    ) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:  #   Now returns 3 values
         """
         Identify column types with detailed logging.
         FIXED: Now returns actual field names for dynamic column creation.
@@ -131,7 +131,7 @@ class ExcelUploadService:
         
         logger.info(f"Dynamic fields - Target: {target_field_name}, Date: {date_field_name}")
 
-        # ✅ NEW: Store actual field names for later use
+        #   NEW: Store actual field names for later use
         field_names_mapping = {
             'target_field': target_field_name,
             'date_field': date_field_name
@@ -237,7 +237,7 @@ class ExcelUploadService:
         failed_count = 0
         errors = []
 
-        # ✅ FIXED: Now receives field_names_mapping
+        #   FIXED: Now receives field_names_mapping
         try:
             master_data_mapping, sales_mapping, field_names_mapping = ExcelUploadService.identify_column_types(
                 df, field_catalogue
@@ -344,7 +344,7 @@ class ExcelUploadService:
         row_dict: Dict[str, Any],
         master_data_mapping: Dict[str, str],
         sales_mapping: Dict[str, str],
-        field_names_mapping: Dict[str, str],  # ✅ NEW PARAMETER
+        field_names_mapping: Dict[str, str],  #   NEW PARAMETER
         field_catalogue: Dict[str, Any],
         user_email: str
     ) -> None:
@@ -365,13 +365,13 @@ class ExcelUploadService:
             row_dict, sales_mapping
         )
 
-        # ✅ FIXED: Use dynamic column names from field_names_mapping
+        #   FIXED: Use dynamic column names from field_names_mapping
         target_field = field_names_mapping['target_field']
         date_field = field_names_mapping['date_field']
         
         sales_id = str(uuid.uuid4())
         
-        # ✅ FIXED: Build dynamic UPSERT query to replace existing records
+        #   FIXED: Build dynamic UPSERT query to replace existing records
         cursor.execute(f"""
             INSERT INTO sales_data
             (sales_id, master_id, "{date_field}", "{target_field}", uom, unit_price, created_at, created_by)
@@ -386,8 +386,8 @@ class ExcelUploadService:
         """, (
             sales_id,
             master_id,
-            sales_data['date'],      # ✅ Still uses 'date' key internally
-            sales_data['quantity'],   # ✅ Still uses 'quantity' key internally
+            sales_data['date'],      #   Still uses 'date' key internally
+            sales_data['quantity'],   #   Still uses 'quantity' key internally
             sales_data['uom'],
             sales_data.get('unit_price'),
             datetime.utcnow(),

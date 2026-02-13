@@ -98,7 +98,7 @@ class SchemaManager:
                      # ========================================================================
                     # Create Final Plan table with PARTIAL AUDIT (created only - immutable)
                     # ========================================================================
-                    # Note: final_plan table is created dynamically in migrations
+                    # Note: final_plan table is handled dynamically
                     # This placeholder is for backwards compatibility
                     # ========================================================================
                     logger.info(" final_plan table will be created dynamically during field catalogue setup")
@@ -285,6 +285,30 @@ class SchemaManager:
                     conn.commit()
                     logger.info(" Created/verified api_request_logs table")
 
+                    # Initialize dynamic tables metadata (for custom table tracking)
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS dynamic_tables (
+                            metadata_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                            table_name VARCHAR(63) NOT NULL UNIQUE,
+                            display_name VARCHAR(255) NOT NULL,
+                            table_type VARCHAR(50) NOT NULL DEFAULT 'custom',
+                            description TEXT,
+                            is_mandatory BOOLEAN DEFAULT FALSE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            created_by VARCHAR(255) DEFAULT 'system',
+                            updated_at TIMESTAMP,
+                            updated_by VARCHAR(255)
+                        )
+                    """)
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dynamic_tables_name ON dynamic_tables(table_name)")
+                    
+                    cursor.execute("""
+                        INSERT INTO dynamic_tables 
+                        (table_name, display_name, table_type, is_mandatory, created_by)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (table_name) DO NOTHING
+                    """, ("final_plan", "Final Consensus Plan", "planning", True, "system"))
+
                     # Initialize forecasting tables and seed default data
                     SchemaManager.initialize_forecasting_tables(tenant_id, database_name)
                     SchemaManager.seed_default_algorithms(tenant_id, database_name)
@@ -467,34 +491,10 @@ class SchemaManager:
                         )
                     """)
 
-                    # ====================================================================
-                    # Create product_manager table with dynamic columns (SIMILAR TO final_plan)
-                    # ====================================================================
-                    cursor.execute(f"""
-                        CREATE TABLE IF NOT EXISTS product_manager (
-                            product_manager_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                            master_id UUID NOT NULL REFERENCES master_data(master_id),
-                            "{date_field.field_name}" {date_sql_type} NOT NULL,
-                            "{target_field.field_name}" {target_sql_type} NOT NULL,
-                            uom VARCHAR(20) NOT NULL,
-                            unit_price DECIMAL(18, 2),
-
-                            -- Disaggregation tracking columns
-                            type VARCHAR(20) DEFAULT 'manual',
-
-                            -- Audit fields (created only - transactions are immutable)
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            created_by VARCHAR(255) NOT NULL,
-                            updated_at TIMESTAMP,
-                            updated_by VARCHAR(255)
-                        )
-                    """)
-
                     # Add unique constraint for batch upsert functionality
                     cursor.execute(f'ALTER TABLE sales_data ADD CONSTRAINT sales_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
                     cursor.execute(f'ALTER TABLE forecast_data ADD CONSTRAINT forecast_data_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
                     cursor.execute(f'ALTER TABLE final_plan ADD CONSTRAINT final_plan_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
-                    cursor.execute(f'ALTER TABLE product_manager ADD CONSTRAINT product_manager_master_date_unique UNIQUE (master_id, "{date_field.field_name}")')
 
                     # Create indexes on sales_data and forecast_data
                     cursor.execute(f'CREATE INDEX idx_sales_data_date ON sales_data("{date_field.field_name}")')
@@ -510,9 +510,7 @@ class SchemaManager:
                     cursor.execute('CREATE INDEX idx_final_plan_source_forecast_run_id ON final_plan(source_forecast_run_id)')
                     cursor.execute('CREATE INDEX idx_final_plan_disaggregation_level ON final_plan(disaggregation_level)')
 
-                    cursor.execute(f'CREATE INDEX idx_product_manager_date ON product_manager("{date_field.field_name}")')
-                    cursor.execute(f'CREATE INDEX idx_product_manager_master_id ON product_manager(master_id)')
-                    cursor.execute('CREATE INDEX idx_product_manager_type ON product_manager(type)')
+
                     # Store metadata about target and date fields
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS field_catalogue_metadata (
@@ -1001,7 +999,7 @@ class SchemaManager:
                         """, (algo_id, algo_name, default_params, algo_type, description))
                     
                     conn.commit()
-                    logger.info(f"✅ Default algorithms seeded for tenant: {tenant_id}")
+                    logger.info(f"  Default algorithms seeded for tenant: {tenant_id}")
                     return True
                     
                 finally:
@@ -1048,7 +1046,7 @@ class SchemaManager:
                         """, (version_name, version_type, is_active, created_by_user))
                     
                     conn.commit()
-                    logger.info(f"✅ Default forecast versions seeded for tenant: {tenant_id}")
+                    logger.info(f"  Default forecast versions seeded for tenant: {tenant_id}")
                     return True
                     
                 finally:
@@ -1213,7 +1211,7 @@ class SchemaManager:
                         """, (object_id, object_type, object_name, description))
 
                     conn.commit()
-                    logger.info(f"✅ Default RBAC data seeded for tenant: {tenant_id}")
+                    logger.info(f"  Default RBAC data seeded for tenant: {tenant_id}")
                     return True
 
                 finally:
