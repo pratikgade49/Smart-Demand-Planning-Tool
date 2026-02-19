@@ -274,12 +274,18 @@ class DynamicTableService:
         return bool(cursor.fetchone()[0])
 
     @staticmethod
-    def get_tenant_dynamic_tables(database_name: str) -> List[Dict[str, Any]]:
+    def get_tenant_dynamic_tables(
+        database_name: str,
+        include_mandatory: bool = True
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve all dynamic tables configured for a tenant.
         
         Args:
             database_name: Tenant's database name
+            include_mandatory: If True, includes mandatory tables like final_plan.
+                            If False, only returns custom (non-mandatory) tables.
+                            Default: True
             
         Returns:
             List of dynamic table metadata dictionaries
@@ -297,19 +303,36 @@ class DynamicTableService:
                     if not DynamicTableService._table_exists(cursor, "dynamic_tables"):
                         return []
                     
-                    cursor.execute("""
-                        SELECT 
-                            metadata_id,
-                            table_name,
-                            display_name,
-                            table_type,
-                            description,
-                            is_mandatory,
-                            created_at
-                        FROM dynamic_tables
-                        WHERE is_mandatory = false
-                        ORDER BY created_at ASC
-                    """)
+                    # Build query based on include_mandatory parameter
+                    if include_mandatory:
+                        # Return ALL tables (custom + mandatory)
+                        cursor.execute("""
+                            SELECT 
+                                metadata_id,
+                                table_name,
+                                display_name,
+                                table_type,
+                                description,
+                                is_mandatory,
+                                created_at
+                            FROM dynamic_tables
+                            ORDER BY is_mandatory ASC, created_at ASC
+                        """)
+                    else:
+                        # Return ONLY custom tables (exclude mandatory ones like final_plan)
+                        cursor.execute("""
+                            SELECT 
+                                metadata_id,
+                                table_name,
+                                display_name,
+                                table_type,
+                                description,
+                                is_mandatory,
+                                created_at
+                            FROM dynamic_tables
+                            WHERE is_mandatory = false
+                            ORDER BY created_at ASC
+                        """)
                     
                     columns = [desc[0] for desc in cursor.description]
                     tables = []

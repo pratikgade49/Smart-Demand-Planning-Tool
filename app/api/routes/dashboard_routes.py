@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_tenant_database, require_object_access
 from app.core.dashboard_service import DashboardService
+from app.core.dynamic_table_service import DynamicTableService
 from app.core.exceptions import AppException
 from app.core.responses import ResponseHandler
 from app.schemas.sales_data import (
@@ -160,18 +161,31 @@ async def export_dashboard_xlsx(
             return ""
 
         row_index = 1
+        
+        # Get all dynamic tables to include in export
+        dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+            database_name=tenant_data["database_name"]
+        )
+        
+        # Build the list of data series to export
+        data_series = [
+            ("Sales history", "sales_data"),
+            ("Baseline forecast", "forecast_data")
+        ]
+        
+        # Add all dynamic tables (this includes mandatory ones like final_plan)
+        for table in dynamic_tables:
+            # Avoid duplication if already in list
+            if table['table_name'] not in [s[1] for s in data_series]:
+                data_series.append((table['display_name'], table['table_name']))
+
         for record in records:
             master_data = record.get("master_data") or {}
             master_values = [
                 str(master_data.get(field_name, "")) for field_name in field_names
             ]
 
-            for label, key in (
-                ("Sales history", "sales_data"),
-                ("Baseline forecast", "forecast_data"),
-                ("Product manager", "product_manager"),
-                ("Final consensus plan", "final_plan"),
-            ):
+            for label, key in data_series:
                 values = record.get(key) or []
                 totals = summarize_values(values)
                 uom_value = resolve_uom(values)

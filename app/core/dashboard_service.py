@@ -1,10 +1,8 @@
 """
 Dashboard Data Service - UPDATED WITH NEW DISAGGREGATION LOGIC.
-Aggregates sales, forecast, and final plan data for UI dashboards.
+Aggregates sales, forecast for UI dashboards.
 
 CHANGES:
-- save_aggregated_product_manager now uses existing product_manager ratios
-- save_aggregated_final_plan now uses existing final_plan ratios
 - New method _calculate_table_ratios to get ratios from the same table
 """
 
@@ -46,15 +44,15 @@ class DashboardService:
         """
         Retrieve all master data with related sales, forecast, and final plan
         records for the provided date range (no pagination).
+        
+        UPDATED: Now dynamically fetches all tenant's custom tables instead of hardcoding product_manager.
         """
         db_manager = get_db_manager()
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
 
-                date_field, target_field = SalesDataService._get_field_names(
-                    cursor
-                )
+                date_field, target_field = SalesDataService._get_field_names(cursor)
 
                 start_date = request.from_date if request.from_date else "2025-01-01"
                 end_date = request.to_date if request.to_date else "2026-03-31"
@@ -82,7 +80,7 @@ class DashboardService:
                         """
                         SELECT column_name FROM information_schema.columns
                         WHERE table_name = 'master_data'
-                          AND column_name IN ('product', 'customer')
+                        AND column_name IN ('product', 'customer')
                         """
                     )
                     existing_cols = [r[0] for r in cursor.fetchall()]
@@ -135,6 +133,16 @@ class DashboardService:
                         if col_names[i] not in exclude_fields
                     }
 
+                # ========================================================================
+                # CHANGED: Get dynamic tables from metadata instead of hardcoding
+                # ========================================================================
+                from app.core.dynamic_table_service import DynamicTableService
+                
+                dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+                    database_name=database_name
+                )
+
+                # Build results structure dynamically
                 results = []
                 results_map = {}
                 for master_id in master_ids:
@@ -142,9 +150,12 @@ class DashboardService:
                         "master_data": master_data_map.get(master_id, {}),
                         "sales_data": [],
                         "forecast_data": [],
-                        "final_plan": [],
-                        "product_manager": [],
                     }
+                    
+                    # Add all dynamic tables to the structure
+                    for table in dynamic_tables:
+                        entry[table['table_name']] = []
+                    
                     results.append(entry)
                     results_map[master_id] = entry
 
@@ -158,10 +169,10 @@ class DashboardService:
                         return
                     query = f"""
                         SELECT {id_column}, master_id, "{date_field}",
-                               "{target_field}", uom
+                            "{target_field}", uom
                         FROM public.{table_name}
                         WHERE master_id IN ({placeholders})
-                          AND "{date_field}" BETWEEN %s AND %s
+                        AND "{date_field}" BETWEEN %s AND %s
                         ORDER BY master_id, "{date_field}" ASC
                     """
                     cursor.execute(query, master_ids + [start_date, end_date])
@@ -178,6 +189,7 @@ class DashboardService:
                             }
                         )
 
+                # Add sales and forecast data (core tables)
                 add_table_records(
                     table_name="sales_data",
                     id_column="sales_id",
@@ -190,18 +202,19 @@ class DashboardService:
                     target_key="forecast_data",
                     id_key="forecast_data_id",
                 )
-                add_table_records(
-                    table_name="final_plan",
-                    id_column="final_plan_id",
-                    target_key="final_plan",
-                    id_key="final_plan_id",
-                )
-                add_table_records(
-                    table_name="product_manager",
-                    id_column="product_manager_id",
-                    target_key="product_manager",
-                    id_key="product_manager_id",
-                )
+                
+                # ========================================================================
+                # CHANGED: Dynamically add all tenant's planning tables
+                # ========================================================================
+                for table in dynamic_tables:
+                    table_name = table['table_name']
+                    id_column = f"{table_name}_id"
+                    add_table_records(
+                        table_name=table_name,
+                        id_column=id_column,
+                        target_key=table_name,
+                        id_key=id_column,
+                    )
 
                 return {"records": results, "total_count": total_master_count}
 
@@ -219,15 +232,15 @@ class DashboardService:
         """
         Retrieve master data with paginated filters and fetch sales/forecast/final plan
         records for the provided date range.
+        
+        UPDATED: Now dynamically fetches all tenant's custom tables instead of hardcoding product_manager.
         """
         db_manager = get_db_manager()
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
 
-                date_field, target_field = SalesDataService._get_field_names(
-                    cursor
-                )
+                date_field, target_field = SalesDataService._get_field_names(cursor)
 
                 start_date = request.from_date if request.from_date else "2025-01-01"
                 end_date = request.to_date if request.to_date else "2026-03-31"
@@ -256,7 +269,7 @@ class DashboardService:
                         """
                         SELECT column_name FROM information_schema.columns
                         WHERE table_name = 'master_data'
-                          AND column_name IN ('product', 'customer')
+                        AND column_name IN ('product', 'customer')
                         """
                     )
                     existing_cols = [r[0] for r in cursor.fetchall()]
@@ -313,6 +326,16 @@ class DashboardService:
                         if col_names[i] not in exclude_fields
                     }
 
+                # ========================================================================
+                # CHANGED: Get dynamic tables from metadata instead of hardcoding
+                # ========================================================================
+                from app.core.dynamic_table_service import DynamicTableService
+                
+                dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+                    database_name=database_name
+                )
+
+                # Build results structure dynamically
                 results = []
                 results_map = {}
                 for master_id in master_ids:
@@ -320,9 +343,12 @@ class DashboardService:
                         "master_data": master_data_map.get(master_id, {}),
                         "sales_data": [],
                         "forecast_data": [],
-                        "final_plan": [],
-                        "product_manager": [],
                     }
+                    
+                    # Add all dynamic tables to the structure
+                    for table in dynamic_tables:
+                        entry[table['table_name']] = []
+                    
                     results.append(entry)
                     results_map[master_id] = entry
 
@@ -336,10 +362,10 @@ class DashboardService:
                         return
                     query = f"""
                         SELECT {id_column}, master_id, "{date_field}",
-                               "{target_field}", uom
+                            "{target_field}", uom
                         FROM public.{table_name}
                         WHERE master_id IN ({placeholders})
-                          AND "{date_field}" BETWEEN %s AND %s
+                        AND "{date_field}" BETWEEN %s AND %s
                         ORDER BY master_id, "{date_field}" ASC
                     """
                     cursor.execute(query, master_ids + [start_date, end_date])
@@ -356,6 +382,7 @@ class DashboardService:
                             }
                         )
 
+                # Add sales and forecast data (core tables)
                 add_table_records(
                     table_name="sales_data",
                     id_column="sales_id",
@@ -368,18 +395,19 @@ class DashboardService:
                     target_key="forecast_data",
                     id_key="forecast_data_id",
                 )
-                add_table_records(
-                    table_name="final_plan",
-                    id_column="final_plan_id",
-                    target_key="final_plan",
-                    id_key="final_plan_id",
-                )
-                add_table_records(
-                    table_name="product_manager",
-                    id_column="product_manager_id",
-                    target_key="product_manager",
-                    id_key="product_manager_id",
-                )
+                
+                # ========================================================================
+                # CHANGED: Dynamically add all tenant's planning tables
+                # ========================================================================
+                for table in dynamic_tables:
+                    table_name = table['table_name']
+                    id_column = f"{table_name}_id"
+                    add_table_records(
+                        table_name=table_name,
+                        id_column=id_column,
+                        target_key=table_name,
+                        id_key=id_column,
+                    )
 
                 return {"records": results, "total_count": total_master_count}
 
@@ -397,15 +425,15 @@ class DashboardService:
         """
         Retrieve aggregated master data based on aggregated_fields and fetch
         aggregated sales/forecast/final plan records.
+        
+        UPDATED: Now dynamically fetches all tenant's custom tables instead of hardcoding product_manager.
         """
         db_manager = get_db_manager()
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
 
-                date_field, target_field = SalesDataService._get_field_names(
-                    cursor
-                )
+                date_field, target_field = SalesDataService._get_field_names(cursor)
 
                 start_date = request.from_date if request.from_date else "2025-01-01"
                 end_date = request.to_date if request.to_date else "2026-03-31"
@@ -460,6 +488,15 @@ class DashboardService:
                 if not groups:
                     return {"records": [], "total_count": total_groups_count}
 
+                # ========================================================================
+                # CHANGED: Get dynamic tables from metadata instead of hardcoding
+                # ========================================================================
+                from app.core.dynamic_table_service import DynamicTableService
+                
+                dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+                    database_name=database_name
+                )
+
                 results = []
                 for group in groups:
                     group_data = dict(zip(agg_fields, group))
@@ -492,9 +529,13 @@ class DashboardService:
                         "master_data": group_data,
                         "sales_data": [],
                         "forecast_data": [],
-                        "final_plan": [],
-                        "product_manager": [],
                     }
+                    
+                    # ========================================================================
+                    # CHANGED: Dynamically add all tenant's planning tables
+                    # ========================================================================
+                    for table in dynamic_tables:
+                        entry[table['table_name']] = []
 
                     def add_aggregated_table_records(
                         table_name: str,
@@ -506,7 +547,7 @@ class DashboardService:
                             SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(uom)
                             FROM public.{table_name}
                             WHERE master_id IN ({placeholders})
-                              AND "{date_field}" BETWEEN %s AND %s
+                            AND "{date_field}" BETWEEN %s AND %s
                             GROUP BY "{date_field}"
                             ORDER BY "{date_field}" ASC
                         """
@@ -523,10 +564,13 @@ class DashboardService:
                                 }
                             )
 
+                    # Add sales and forecast data (core tables)
                     add_aggregated_table_records("sales_data", "sales_data")
                     add_aggregated_table_records("forecast_data", "forecast_data")
-                    add_aggregated_table_records("final_plan", "final_plan")
-                    add_aggregated_table_records("product_manager", "product_manager")
+                    
+                    # Add all tenant planning tables (This includes final_plan and custom ones)
+                    for table in dynamic_tables:
+                        add_aggregated_table_records(table['table_name'], table['table_name'])
                     
                     results.append(entry)
 
@@ -574,507 +618,3 @@ class DashboardService:
         uom = sales_row[0] if sales_row else "UNIT"
         unit_price = sales_row[1] if sales_row else 0
         return uom, unit_price
-
-
-    @staticmethod
-    def copy_forecast_to_final_plan(
-        database_name: str,
-        user_email: str,
-        filters: List[Any],
-        from_date,
-        to_date,
-    ) -> Dict[str, Any]:
-        """
-        Copy forecast_data records into final_plan with optional filters and date range.
-        """
-        db_manager = get_db_manager()
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    if not DashboardService._table_exists(cursor, "forecast_data"):
-                        raise ValidationException("forecast_data table not found")
-                    if not DashboardService._table_exists(cursor, "final_plan"):
-                        raise ValidationException("final_plan table not found")
-
-                    date_field, target_field = SalesDataService._get_field_names(
-                        cursor
-                    )
-
-                    where_clauses = [sql.SQL("1=1")]
-                    params: List[Any] = []
-
-                    if from_date:
-                        where_clauses.append(
-                            sql.SQL('fd.{} >= %s').format(
-                                sql.Identifier(date_field)
-                            )
-                        )
-                        params.append(from_date)
-                    if to_date:
-                        where_clauses.append(
-                            sql.SQL('fd.{} <= %s').format(
-                                sql.Identifier(date_field)
-                            )
-                        )
-                        params.append(to_date)
-
-                    if filters:
-                        for filter_obj in filters:
-                            values = getattr(filter_obj, "values", None)
-                            field_name = getattr(filter_obj, "field_name", None)
-                            if not values or not field_name:
-                                continue
-                            where_clauses.append(
-                                sql.SQL(
-                                    "fd.master_id IN (SELECT master_id FROM master_data WHERE {} = ANY(%s))"
-                                ).format(sql.Identifier(field_name))
-                            )
-                            params.append(list(values))
-
-                    where_sql = sql.SQL(" AND ").join(where_clauses)
-
-                    count_query = sql.SQL(
-                        "SELECT COUNT(*) FROM forecast_data fd WHERE {}"
-                    ).format(where_sql)
-                    cursor.execute(count_query, params)
-                    total_records = cursor.fetchone()[0]
-
-                    upsert_query = sql.SQL(
-                        """
-                        INSERT INTO final_plan
-                        (master_id, {date_field}, {target_field}, uom, unit_price,
-                         created_by, updated_at, updated_by)
-                        SELECT
-                            fd.master_id,
-                            fd.{date_field},
-                            fd.{target_field},
-                            fd.uom,
-                            fd.unit_price,
-                            %s,
-                            CURRENT_TIMESTAMP,
-                            %s
-                        FROM forecast_data fd
-                        WHERE {where_clause}
-                        ON CONFLICT (master_id, {date_field})
-                        DO UPDATE SET
-                            {target_field} = EXCLUDED.{target_field},
-                            uom = EXCLUDED.uom,
-                            unit_price = EXCLUDED.unit_price,
-                            updated_at = CURRENT_TIMESTAMP,
-                            updated_by = EXCLUDED.updated_by
-                        """
-                    ).format(
-                        date_field=sql.Identifier(date_field),
-                        target_field=sql.Identifier(target_field),
-                        where_clause=where_sql,
-                    )
-
-                    cursor.execute(
-                        upsert_query, [user_email, user_email, *params]
-                    )
-                    affected = cursor.rowcount
-                    conn.commit()
-
-                    return {
-                        "status": "success",
-                        "message": "Forecast copied to final plan",
-                        "filtered_records": total_records,
-                        "upserted_records": affected,
-                    }
-                finally:
-                    cursor.close()
-        except AppException:
-            raise
-        except Exception as e:
-            logger.error(
-                f"Error copying forecast to final plan: {str(e)}"
-            )
-            raise DatabaseException(
-                f"Failed to copy forecast to final plan: {str(e)}"
-            )
-
-    @staticmethod
-    def copy_dashboard_data(
-        database_name: str,
-        user_email: str,
-        copy_from: str,
-        copy_to: str,
-        filters: List[Any],
-        from_date,
-        to_date,
-    ) -> Dict[str, Any]:
-        """
-        Copy data between dashboard tables.
-
-        Supported:
-        - baseline_forecast -> product_manager
-        - product_manager -> final_consensus_plan
-        """
-        db_manager = get_db_manager()
-        source_map = {
-            "baseline_forecast": "forecast_data",
-            "product_manager": "product_manager",
-        }
-        target_map = {
-            "product_manager": "product_manager",
-            "final_consensus_plan": "final_plan",
-        }
-        source_table = source_map.get(copy_from)
-        target_table = target_map.get(copy_to)
-        if not source_table or not target_table:
-            raise ValidationException("Unsupported copy_from or copy_to value")
-        if source_table == target_table:
-            raise ValidationException("copy_from and copy_to cannot be same")
-
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    if not DashboardService._table_exists(
-                        cursor, source_table
-                    ):
-                        raise ValidationException(
-                            f"{source_table} table not found"
-                        )
-                    if not DashboardService._table_exists(
-                        cursor, target_table
-                    ):
-                        raise ValidationException(
-                            f"{target_table} table not found"
-                        )
-
-                    date_field, target_field = SalesDataService._get_field_names(
-                        cursor
-                    )
-
-                    # Ensure unique constraint for ON CONFLICT on target table
-                    constraint_name = (
-                        f"{target_table}_master_date_unique"
-                    )
-                    cursor.execute(
-                        """
-                        SELECT 1
-                        FROM information_schema.table_constraints
-                        WHERE table_schema = 'public'
-                          AND table_name = %s
-                          AND constraint_name = %s
-                          AND constraint_type = 'UNIQUE'
-                        """,
-                        (target_table, constraint_name),
-                    )
-                    if cursor.fetchone() is None:
-                        cursor.execute(
-                            sql.SQL(
-                                'ALTER TABLE {table} ADD CONSTRAINT {constraint} UNIQUE (master_id, {date_field})'
-                            ).format(
-                                table=sql.Identifier(target_table),
-                                constraint=sql.Identifier(constraint_name),
-                                date_field=sql.Identifier(date_field),
-                            )
-                        )
-
-                    where_clauses = [sql.SQL("1=1")]
-                    params: List[Any] = []
-
-                    if from_date:
-                        where_clauses.append(
-                            sql.SQL("sd.{} >= %s").format(
-                                sql.Identifier(date_field)
-                            )
-                        )
-                        params.append(from_date)
-                    if to_date:
-                        where_clauses.append(
-                            sql.SQL("sd.{} <= %s").format(
-                                sql.Identifier(date_field)
-                            )
-                        )
-                        params.append(to_date)
-
-                    if filters:
-                        for filter_obj in filters:
-                            values = getattr(filter_obj, "values", None)
-                            field_name = getattr(filter_obj, "field_name", None)
-                            if not values or not field_name:
-                                continue
-                            where_clauses.append(
-                                sql.SQL(
-                                    "sd.master_id IN (SELECT master_id FROM master_data WHERE {} = ANY(%s))"
-                                ).format(sql.Identifier(field_name))
-                            )
-                            params.append(list(values))
-
-                    where_sql = sql.SQL(" AND ").join(where_clauses)
-
-                    count_query = sql.SQL(
-                        "SELECT COUNT(*) FROM {} sd WHERE {}"
-                    ).format(sql.Identifier(source_table), where_sql)
-                    cursor.execute(count_query, params)
-                    total_records = cursor.fetchone()[0]
-
-                    upsert_query = sql.SQL(
-                        """
-                        INSERT INTO {target_table}
-                        (master_id, {date_field}, {target_field}, uom, unit_price,
-                         created_by, updated_at, updated_by)
-                        SELECT
-                            sd.master_id,
-                            sd.{date_field},
-                            sd.{target_field},
-                            sd.uom,
-                            sd.unit_price,
-                            %s,
-                            CURRENT_TIMESTAMP,
-                            %s
-                        FROM {source_table} sd
-                        WHERE {where_clause}
-                        ON CONFLICT (master_id, {date_field})
-                        DO UPDATE SET
-                            {target_field} = EXCLUDED.{target_field},
-                            uom = EXCLUDED.uom,
-                            unit_price = EXCLUDED.unit_price,
-                            updated_at = CURRENT_TIMESTAMP,
-                            updated_by = EXCLUDED.updated_by
-                        """
-                    ).format(
-                        target_table=sql.Identifier(target_table),
-                        source_table=sql.Identifier(source_table),
-                        date_field=sql.Identifier(date_field),
-                        target_field=sql.Identifier(target_field),
-                        where_clause=where_sql,
-                    )
-
-                    cursor.execute(
-                        upsert_query, [user_email, user_email, *params]
-                    )
-                    affected = cursor.rowcount
-                    conn.commit()
-
-                    return {
-                        "status": "success",
-                        "message": f"Copied {copy_from} to {copy_to}",
-                        "filtered_records": total_records,
-                        "upserted_records": affected,
-                    }
-                finally:
-                    cursor.close()
-        except AppException:
-            raise
-        except Exception as e:
-            logger.error(f"Error copying dashboard data: {str(e)}")
-            raise DatabaseException(
-                f"Failed to copy dashboard data: {str(e)}"
-            )
-
-    # ============================================================================
-    # NEW METHOD: Calculate ratios from the same table being disaggregated
-    # ============================================================================
-    @staticmethod
-    def _calculate_table_ratios(
-        cursor,
-        table_name: str,
-        aggregated_fields: List[str],
-        group_data: Dict[str, Any],
-        date_field: str,
-        target_field: str,
-    ) -> Dict[str, float]:
-        """
-        Calculate distribution ratios from existing values in the same table.
-        
-        Args:
-            cursor: Database cursor
-            table_name: Table to calculate ratios from (final_plan or product_manager)
-            aggregated_fields: Fields used for aggregation (e.g., ['product'])
-            group_data: Aggregated group values (e.g., {'product': 'P1'})
-            date_field: Name of the date field
-            target_field: Name of the target field (quantity)
-            
-        Returns:
-            Dictionary mapping master_id to allocation ratio
-        """
-        # Build WHERE clause for the aggregated group
-        group_conditions = []
-        group_params = []
-        for field in aggregated_fields:
-            val = group_data.get(field)
-            if val is None:
-                group_conditions.append(f'm."{field}" IS NULL')
-            else:
-                group_conditions.append(f'm."{field}" = %s')
-                group_params.append(val)
-        
-        group_where = " AND ".join(group_conditions)
-        
-        # Get all master_ids in this group
-        master_id_query = f"""
-            SELECT master_id
-            FROM master_data m
-            WHERE {group_where}
-        """
-        cursor.execute(master_id_query, group_params)
-        master_ids = [row[0] for row in cursor.fetchall()]
-        
-        if not master_ids:
-            raise NotFoundException("Aggregated group", str(group_data))
-        
-        # Get total quantities per master_id from the table
-        placeholders = ",".join(["%s"] * len(master_ids))
-        totals_query = f"""
-            SELECT master_id, SUM(CAST("{target_field}" AS DOUBLE PRECISION))
-            FROM {table_name}
-            WHERE master_id IN ({placeholders})
-            GROUP BY master_id
-        """
-        cursor.execute(totals_query, master_ids)
-        
-        # Calculate ratios
-        totals = {row[0]: float(row[1]) for row in cursor.fetchall()}
-        total_sum = sum(totals.values())
-        
-        ratios = {}
-        if total_sum > 0:
-            # Use existing table ratios
-            for master_id in master_ids:
-                ratios[master_id] = totals.get(master_id, 0.0) / total_sum
-        else:
-            # If no data exists, use equal distribution
-            equal_ratio = 1.0 / len(master_ids)
-            for master_id in master_ids:
-                ratios[master_id] = equal_ratio
-        
-        return ratios
-        
-    @staticmethod
-    def save_aggregated_product_manager(
-        database_name: str,
-        user_email: str,
-        aggregated_fields: List[str],
-        group_data: Dict[str, Any],
-        plan_date,
-        quantity: float,
-    ) -> Dict[str, Any]:
-        """
-        Save aggregated product manager data by distributing the quantity among group members
-        using EXISTING PRODUCT_MANAGER TABLE ratios (NOT sales data).
-        
-        CHANGED: Now uses _calculate_table_ratios instead of sales_data
-        """
-        return DashboardService._save_aggregated_data(
-            database_name=database_name,
-            user_email=user_email,
-            table_name="product_manager",
-            id_column="product_manager_id",
-            aggregated_fields=aggregated_fields,
-            group_data=group_data,
-            plan_date=plan_date,
-            quantity=quantity,
-        )
-
-    @staticmethod
-    def save_aggregated_final_plan(
-        database_name: str,
-        user_email: str,
-        aggregated_fields: List[str],
-        group_data: Dict[str, Any],
-        plan_date,
-        quantity: float,
-    ) -> Dict[str, Any]:
-        """
-        Save aggregated final plan data by distributing the quantity among group members
-        using EXISTING FINAL_PLAN TABLE ratios (NOT sales data).
-        
-        CHANGED: Now uses _calculate_table_ratios instead of sales_data
-        """
-        return DashboardService._save_aggregated_data(
-            database_name=database_name,
-            user_email=user_email,
-            table_name="final_plan",
-            id_column="final_plan_id",
-            aggregated_fields=aggregated_fields,
-            group_data=group_data,
-            plan_date=plan_date,
-            quantity=quantity,
-        )
-
-    @staticmethod
-    def _save_aggregated_data(
-        database_name: str,
-        user_email: str,
-        table_name: str,
-        id_column: str,
-        aggregated_fields: List[str],
-        group_data: Dict[str, Any],
-        plan_date,
-        quantity: float,
-    ) -> Dict[str, Any]:
-        """
-        UPDATED: Now uses table-specific ratios instead of sales data ratios.
-        """
-        db_manager = get_db_manager()
-        try:
-            with db_manager.get_tenant_connection(database_name) as conn:
-                cursor = conn.cursor()
-                try:
-                    if not DashboardService._table_exists(cursor, table_name):
-                        raise ValidationException(f"{table_name} table not found")
-
-                    date_field, target_field = SalesDataService._get_field_names(
-                        cursor
-                    )
-
-                    # ========================================
-                    # CHANGED: Use table-specific ratios
-                    # ========================================
-                    ratios = DashboardService._calculate_table_ratios(
-                        cursor=cursor,
-                        table_name=table_name,
-                        aggregated_fields=aggregated_fields,
-                        group_data=group_data,
-                        date_field=date_field,
-                        target_field=target_field,
-                    )
-                    
-                    # Distribute quantity based on ratios
-                    upserted_count = 0
-                    for master_id, ratio in ratios.items():
-                        distributed_qty = quantity * ratio
-                        
-                        # Get UOM and unit price
-                        uom, unit_price = DashboardService._resolve_sales_info(cursor, master_id)
-                        
-                        # Upsert record
-                        upsert_query = sql.SQL("""
-                            INSERT INTO {table}
-                            (master_id, {date_col}, {target_col}, uom, unit_price, type, created_by, updated_at, updated_by)
-                            VALUES (%s, %s, %s, %s, %s, 'aggregated_edit', %s, CURRENT_TIMESTAMP, %s)
-                            ON CONFLICT (master_id, {date_col})
-                            DO UPDATE SET
-                                {target_col} = EXCLUDED.{target_col},
-                                uom = EXCLUDED.uom,
-                                unit_price = EXCLUDED.unit_price,
-                                type = EXCLUDED.type,
-                                updated_at = CURRENT_TIMESTAMP,
-                                updated_by = EXCLUDED.updated_by
-                        """).format(
-                            table=sql.Identifier(table_name),
-                            date_col=sql.Identifier(date_field),
-                            target_col=sql.Identifier(target_field)
-                        )
-                        cursor.execute(upsert_query, (master_id, plan_date, distributed_qty, uom, unit_price, user_email, user_email))
-                        upserted_count += 1
-
-                    conn.commit()
-                    return {
-                        "status": "success",
-                        "message": f"Aggregated data saved to {table_name} using {table_name} ratios",
-                        "affected_records": upserted_count,
-                        "distribution_method": f"Existing {table_name} data ratios"
-                    }
-                finally:
-                    cursor.close()
-        except AppException:
-            raise
-        except Exception as e:
-            logger.error(f"Error saving aggregated data to {table_name}: {str(e)}")
-            raise DatabaseException(f"Failed to save aggregated data: {str(e)}")

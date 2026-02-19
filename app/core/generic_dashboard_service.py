@@ -1,6 +1,9 @@
 """
 Generic Dashboard Data Service Methods.
 Provides table-agnostic methods for saving, updating, and copying data across tables.
+
+BUG FIX: Fixed parameter ordering issue in copy_data_between_tables method
+that was causing date parser errors when filters were applied.
 """
 
 import logging
@@ -21,29 +24,48 @@ class GenericDashboardService:
     """Generic methods for dashboard data operations across any table."""
 
     @staticmethod
-    def save_data_row(
+
+    def upsert_data_row(
         database_name: str,
         table_name: str,
         user_email: str,
-        record_id: Optional[str],
-        master_data: Optional[Dict[str, Any]],
+        master_data: Dict[str, Any],
         plan_date,
         quantity: float,
     ) -> Dict[str, Any]:
         """
-        Generic method to save or update a row in any dynamic table.
+        UPSERT a data row using master_data + date as the natural unique key.
+        
+        Uses PostgreSQL's ON CONFLICT clause to either:
+        - INSERT a new record if (master_id, date) combination doesn't exist
+        - UPDATE the existing record's quantity if it does exist
+        
+        This is atomic and efficient - no need to check existence first.
         
         Args:
             database_name: Tenant database name
-            table_name: Normalized table name (e.g., "product_manager", "sales_team")
+            table_name: Normalized table name (e.g., 'product_manager')
             user_email: User performing the operation
-            record_id: Primary key if updating, None for new insert
-            master_data: Master data fields to resolve master_id (for inserts)
+            master_data: Master data fields (e.g., {"product": "P1", "location": "North"})
             plan_date: Date for the record
             quantity: Quantity value
             
         Returns:
-            Dictionary with status and record_id
+            Dictionary with:
+            - status: "success"
+            - action: "inserted" or "updated"
+            - message: Description of what happened
+            - record_id: The record's ID (new or existing)
+            - table_name: Table that was modified
+            
+        Example:
+            First call:
+            master_data={"product": "P1"}, date="2026-02-13", quantity=100
+            → INSERT new record, returns action="inserted"
+            
+            Second call:
+            master_data={"product": "P1"}, date="2026-02-13", quantity=150
+            → UPDATE existing record, returns action="updated"
             
         Raises:
             ValidationException: If parameters invalid
@@ -60,63 +82,62 @@ class GenericDashboardService:
                     if not GenericDashboardService._table_exists(cursor, table_name):
                         raise NotFoundException("Table", table_name)
                     
-                    # Get field names
+                    # Get field names from field catalogue
                     date_field, target_field = SalesDataService._get_field_names(cursor)
                     
                     # Get primary key column name
                     id_column = f"{table_name}_id"
                     
-                    if record_id:
-                        # Update existing record
-                        cursor.execute(
-                            f"""
-                            UPDATE {table_name}
-                            SET "{target_field}" = %s,
-                                updated_at = CURRENT_TIMESTAMP,
-                                updated_by = %s
-                            WHERE {id_column} = %s
-                            """,
-                            (quantity, user_email, record_id)
-                        )
-                        conn.commit()
-                        return {
-                            "status": "success",
-                            "message": f"Record updated in {table_name}",
-                            "record_id": record_id,
-                            "table_name": table_name
-                        }
-                    
-                    # Insert new record
-                    if master_data is None or plan_date is None:
-                        raise ValidationException("master_data and date are required for new records")
-                    
-                    # Resolve master_id
+                    # Resolve master_id from master_data fields
                     master_id = GenericDashboardService._resolve_master_id(cursor, master_data)
                     
-                    # Get UOM and unit price
-                    uom = master_data.get("uom") if master_data else None
+                    # Get UOM and unit price from master_data or sales history
+                    uom = master_data.get("uom")
                     if not uom:
                         uom, unit_price = GenericDashboardService._resolve_sales_info(cursor, master_id)
                     else:
                         _, unit_price = GenericDashboardService._resolve_sales_info(cursor, master_id)
                     
-                    cursor.execute(
-                        f"""
+                    # ====================================================================
+                    # UPSERT using PostgreSQL's ON CONFLICT clause
+                    # ====================================================================
+                    # The unique constraint is on (master_id, date_field)
+                    # If this combination exists → UPDATE
+                    # If it doesn't exist → INSERT
+                    upsert_query = f"""
                         INSERT INTO {table_name}
                         (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING {id_column}
-                        """,
-                        (master_id, plan_date, quantity, uom, unit_price, user_email)
+                        ON CONFLICT (master_id, "{date_field}") 
+                        DO UPDATE SET
+                            "{target_field}" = EXCLUDED."{target_field}",
+                            uom = EXCLUDED.uom,
+                            unit_price = EXCLUDED.unit_price,
+                            updated_at = CURRENT_TIMESTAMP,
+                            updated_by = %s
+                        RETURNING {id_column}, 
+                                (xmax = 0) AS inserted
+                    """
+                    
+                    cursor.execute(
+                        upsert_query,
+                        (master_id, plan_date, quantity, uom, unit_price, user_email, user_email)
                     )
                     
-                    row = cursor.fetchone()
+                    result = cursor.fetchone()
+                    record_id = str(result[0])
+                    was_inserted = result[1]  # True if INSERT, False if UPDATE
+                    
                     conn.commit()
+                    
+                    action = "inserted" if was_inserted else "updated"
+                    message = f"Record {action} in {table_name}"
                     
                     return {
                         "status": "success",
-                        "message": f"Record created in {table_name}",
-                        "record_id": str(row[0]),
+                        "action": action,
+                        "message": message,
+                        "record_id": record_id,
                         "table_name": table_name
                     }
                     
@@ -126,8 +147,8 @@ class GenericDashboardService:
         except AppException:
             raise
         except Exception as e:
-            logger.error(f"Error saving data to {table_name}: {str(e)}")
-            raise DatabaseException(f"Failed to save data to {table_name}: {str(e)}")
+            logger.error(f"Error upserting data to {table_name}: {str(e)}")
+            raise DatabaseException(f"Failed to upsert data to {table_name}: {str(e)}")
 
     @staticmethod
     def save_aggregated_data_rows(
@@ -319,9 +340,15 @@ class GenericDashboardService:
                     from_date = from_date or "2025-01-01"
                     to_date = to_date or "2026-12-31"
                     
-                    # Build WHERE clause
-                    where_conditions = [f's."{date_field}" BETWEEN %s AND %s']
-                    where_params = [from_date, to_date]
+                    # ================================================================
+                    # BUG FIX: Build WHERE clause with proper parameter ordering
+                    # ================================================================
+                    where_conditions = []
+                    where_params = []
+                    
+                    # Add date range condition
+                    where_conditions.append(f's."{date_field}" BETWEEN %s AND %s')
+                    where_params.extend([from_date, to_date])
                     
                     # Process filters if any
                     if filters:
@@ -336,6 +363,15 @@ class GenericDashboardService:
                     # Get ID columns
                     source_id = f"{source_table}_id"
                     target_id = f"{target_table}_id"
+                    
+                    # ================================================================
+                    # Build complete parameter list in correct order:
+                    # The SQL has placeholders in this order:
+                    # 1. created_by (%s in SELECT clause - comes BEFORE WHERE)
+                    # 2. WHERE clause params (dates + filter values)
+                    # 3. updated_by (%s in ON CONFLICT clause)
+                    # ================================================================
+                    all_params = [user_email] + where_params + [user_email]
                     
                     # Copy data
                     copy_query = f"""
@@ -358,7 +394,7 @@ class GenericDashboardService:
                             updated_by = %s
                     """
                     
-                    cursor.execute(copy_query, where_params + [user_email, user_email])
+                    cursor.execute(copy_query, all_params)
                     copied_count = cursor.rowcount
                     conn.commit()
                     

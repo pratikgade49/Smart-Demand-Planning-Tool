@@ -28,24 +28,40 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard-Generic"])
 # ============================================================================
 
 class SaveDataRequest(BaseModel):
-    """Generic request to save data to any dynamic table."""
+    """Request to save/update data in any dynamic table using UPSERT."""
+    
     table_name: str = Field(
         ...,
         description="Normalized table name (e.g., 'product_manager', 'marketing_team')"
     )
-    record_id: Optional[str] = Field(
-        default=None,
-        description="Primary key for updates, None for inserts"
+    master_data: Dict[str, Any] = Field(
+        ...,
+        description="Master data fields to identify the record (e.g., {'product': 'P1', 'location': 'North'})"
     )
-    master_data: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Master data fields to resolve master_id"
-    )
-    date: Optional[DateType] = Field(
-        default=None,
+    date: DateType = Field(
+        ...,
         description="Record date (YYYY-MM-DD)"
     )
-    quantity: float = Field(..., description="Quantity value")
+    quantity: float = Field(
+        ...,
+        description="Quantity value"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "table_name": "product_manager",
+                "master_data": {
+                    "product": "P1",
+                    "location": "North"
+                },
+                "date": "2026-02-13",
+                "quantity": 100
+            }
+        }
+
+
+
 
 
 class SaveAggregatedDataRequest(BaseModel):
@@ -117,31 +133,49 @@ async def save_data(
     _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
 ):
     """
-    Save or update a data row in any dynamic table.
+    Save or update a data row in any dynamic table using UPSERT.
+    
+    **Uses master_data + date as the natural unique key.**
+    
+    - If a record exists for the given master_data combination + date → **UPDATE** quantity
+    - If no record exists → **INSERT** new record
+    - Atomic operation using PostgreSQL's ON CONFLICT clause
     
     **Parameters:**
-    - `table_name`: Normalized table name (lowercase, spaces replaced with underscores)
-    - `record_id`: Provide to update existing record, omit to insert new
-    - `master_data`: Required for new inserts (omit for updates)
-    - `date`: Required for new inserts (omit for updates)
-    - `quantity`: The quantity value
+    - `table_name`: Table name (e.g., 'product_manager', 'marketing_team')
+    - `master_data`: Fields that identify the master record (e.g., {"product": "P1", "location": "North"})
+    - `date`: Record date (YYYY-MM-DD)
+    - `quantity`: Quantity value
     
     **Example:**
     ```json
     {
         "table_name": "product_manager",
-        "master_data": {"product": "P1"},
+        "master_data": {
+            "product": "P1",
+            "location": "North"
+        },
         "date": "2026-02-13",
         "quantity": 100
     }
     ```
+    
+    - First call: Inserts new record with quantity 100
+    - Second call with same master_data + date but quantity 150: Updates to 150
+    - Call with different date: Inserts new record for that date
     """
     try:
-        result = GenericDashboardService.save_data_row(
+        # Validate required fields
+        if not request.master_data:
+            raise ValidationException("master_data is required")
+        if request.date is None:
+            raise ValidationException("date is required")
+        
+        # UPSERT: Insert new record or update if (master_id, date) exists
+        result = GenericDashboardService.upsert_data_row(
             database_name=tenant_data["database_name"],
             table_name=request.table_name,
             user_email=tenant_data["email"],
-            record_id=request.record_id,
             master_data=request.master_data,
             plan_date=request.date,
             quantity=request.quantity,
