@@ -2383,8 +2383,7 @@ This makes the trend robust to spikes and outliers
         
         try:
             # Get dynamic field names from metadata
-            from app.core.aggregation_service import AggregationService
-            target_field, date_field = AggregationService._get_field_names(tenant_id, database_name)
+            target_field, date_field = ForecastingService._get_field_names(tenant_id, database_name)
             standard_columns.update({target_field, date_field})
             
             # Get all dimension fields from field catalogue

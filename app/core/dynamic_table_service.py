@@ -193,25 +193,66 @@ class DynamicTableService:
         date_sql_type = "DATE"
         target_sql_type = "DECIMAL(18, 2)"
         
-        # Try to get field types from master_data if it exists
+        # FIX: Get field types from field_catalogue_metadata first (most authoritative)
+        # Then fall back to master_data structure, then to defaults
         try:
+            # First try: Get from field_catalogue_metadata
             cursor.execute("""
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_name = 'master_data'
-                ORDER BY ordinal_position
+                SELECT date_field_name, target_field_name
+                FROM field_catalogue_metadata
+                LIMIT 1
             """)
+            metadata_row = cursor.fetchone()
             
-            columns = cursor.fetchall()
-            for col_name, col_type in columns:
-                # Map common column types
-                if col_name == date_field_name and col_type.upper() in ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']:
-                    date_sql_type = col_type.upper()
-                elif col_name == target_field_name and 'NUMERIC' in col_type.upper():
-                    target_sql_type = col_type.upper()
-        except Exception:
-            # If we can't get from master_data, use defaults
-            pass
+            # Now get the actual types these fields have in sales_data or master_data
+            if metadata_row:
+                catalogue_date_field, catalogue_target_field = metadata_row
+                
+                # Get date field type from sales_data
+                cursor.execute("""
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'sales_data'
+                      AND column_name = %s
+                    LIMIT 1
+                """, (catalogue_date_field,))
+                date_result = cursor.fetchone()
+                if date_result:
+                    date_sql_type = date_result[0].upper()
+                
+                # Get target field type from sales_data
+                cursor.execute("""
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'sales_data'
+                      AND column_name = %s
+                    LIMIT 1
+                """, (catalogue_target_field,))
+                target_result = cursor.fetchone()
+                if target_result:
+                    target_sql_type = target_result[0].upper()
+        except Exception as e:
+            logger.warning(f"Could not get field types from metadata: {str(e)}, using defaults")
+            # If we can't get from metadata/sales_data, try master_data structure as fallback
+            try:
+                cursor.execute("""
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'master_data'
+                    ORDER BY ordinal_position
+                """)
+                
+                columns = cursor.fetchall()
+                for col_name, col_type in columns:
+                    # Map common column types
+                    if col_name == date_field_name and col_type.upper() in ['DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE']:
+                        date_sql_type = col_type.upper()
+                    elif col_name == target_field_name and 'NUMERIC' in col_type.upper():
+                        target_sql_type = col_type.upper()
+            except Exception:
+                # If we can't get from master_data, use defaults
+                logger.warning("Could not determine field types, using defaults")
+                pass
         
         # Create the table
         create_table_sql = f"""

@@ -39,6 +39,9 @@ class ForecastingService:
 
     # Supported forecast intervals
     FORECAST_INTERVALS = ["WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"]
+    
+    # Cache for field names to avoid repeated database queries
+    _field_names_cache: Dict[str, Tuple[str, str]] = {}
 
     @staticmethod
     def create_forecast_run(
@@ -392,6 +395,7 @@ class ForecastingService:
     def _get_field_names(tenant_id: str, database_name: str) -> Tuple[str, str]:
         """
         Get target and date field names from field catalogue metadata.
+        Uses caching to avoid repeated database queries.
         
         Args:
             tenant_id: Tenant identifier
@@ -400,6 +404,12 @@ class ForecastingService:
         Returns:
             Tuple of (target_field_name, date_field_name)
         """
+        # Check cache first
+        cache_key = f"{tenant_id}_{database_name}"
+        if cache_key in ForecastingService._field_names_cache:
+            logger.debug(f"Using cached field names for {database_name}")
+            return ForecastingService._field_names_cache[cache_key]
+        
         db_manager = get_db_manager()
         
         with db_manager.get_tenant_connection(database_name) as conn:
@@ -419,6 +429,10 @@ class ForecastingService:
                 
                 date_field, target_field = result[0], result[1]
                 logger.debug(f"Retrieved field names - Date: '{date_field}', Target: '{target_field}'")
+                
+                # Store in cache
+                ForecastingService._field_names_cache[cache_key] = (target_field, date_field)
+                
                 return target_field, date_field
                 
             finally:

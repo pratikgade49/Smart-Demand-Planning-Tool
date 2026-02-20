@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     DB_PORT: int = 5432
     DB_USER: str = "postgres"
     DB_PASSWORD: str = "root"
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 40
     
     # Tenant Database Settings
     TENANT_DB_PREFIX: str = "tenant_"  # Prefix for tenant databases

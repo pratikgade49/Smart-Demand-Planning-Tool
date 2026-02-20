@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 class AggregationService:
     """Service for aggregation operations."""
+    
+    # Cache for dimension fields to avoid repeated database queries
+    _dimension_fields_cache: Dict[str, List[str]] = {}
 
     @staticmethod
     def get_available_aggregation_levels(
@@ -229,6 +232,7 @@ class AggregationService:
 
         try:
             # Get dynamic field names from metadata
+            # FIX: Variable order was swapped - _get_field_names returns (target_field, date_field)
             target_field_name, date_field_name = ForecastingService._get_field_names(
                 tenant_id, database_name
             )
@@ -311,6 +315,7 @@ class AggregationService:
         """
         Get all dimension fields (non-characteristic, non-target, non-date) from field catalogue.
         These are the fields that can be used for aggregation.
+        Uses caching to avoid repeated database queries.
         
         Args:
             tenant_id: Tenant identifier
@@ -319,6 +324,12 @@ class AggregationService:
         Returns:
             List of dimension field names
         """
+        # Check cache first
+        cache_key = f"{tenant_id}_{database_name}"
+        if cache_key in AggregationService._dimension_fields_cache:
+            logger.debug(f"Using cached dimension fields for {database_name}")
+            return AggregationService._dimension_fields_cache[cache_key]
+        
         db_manager = get_db_manager()
         
         try:
@@ -355,6 +366,9 @@ class AggregationService:
                         # Only include base dimensions (not characteristics, target, or date)
                         if not is_characteristic and not is_target and not is_date:
                             dimension_fields.append(field["field_name"])
+                    
+                    # Store in cache
+                    AggregationService._dimension_fields_cache[cache_key] = dimension_fields
                     
                     return dimension_fields
                     

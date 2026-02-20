@@ -2,8 +2,10 @@
 Generic Dashboard Data Service Methods.
 Provides table-agnostic methods for saving, updating, and copying data across tables.
 
-BUG FIX: Fixed parameter ordering issue in copy_data_between_tables method
-that was causing date parser errors when filters were applied.
+BUG FIX 1: Fixed parameter ordering issue in copy_data_between_tables method
+           that was causing date parser errors when filters were applied.
+BUG FIX 2: Fixed UOM resolution in save_aggregated_data_rows - was fetching UOM
+           for a random master record instead of one in the group.
 """
 
 import logging
@@ -24,7 +26,6 @@ class GenericDashboardService:
     """Generic methods for dashboard data operations across any table."""
 
     @staticmethod
-
     def upsert_data_row(
         database_name: str,
         table_name: str,
@@ -58,15 +59,6 @@ class GenericDashboardService:
             - record_id: The record's ID (new or existing)
             - table_name: Table that was modified
             
-        Example:
-            First call:
-            master_data={"product": "P1"}, date="2026-02-13", quantity=100
-            → INSERT new record, returns action="inserted"
-            
-            Second call:
-            master_data={"product": "P1"}, date="2026-02-13", quantity=150
-            → UPDATE existing record, returns action="updated"
-            
         Raises:
             ValidationException: If parameters invalid
             NotFoundException: If table or master data not found
@@ -98,31 +90,50 @@ class GenericDashboardService:
                     else:
                         _, unit_price = GenericDashboardService._resolve_sales_info(cursor, master_id)
                     
+                    # FIX: forecast_data and sales_data are immutable tables created without
+                    # updated_at/updated_by columns. All DynamicTableService tables have them.
+                    # Check once and branch the ON CONFLICT clause accordingly.
+                    has_audit_cols = GenericDashboardService._has_update_audit_columns(cursor, table_name)
+
                     # ====================================================================
                     # UPSERT using PostgreSQL's ON CONFLICT clause
                     # ====================================================================
-                    # The unique constraint is on (master_id, date_field)
-                    # If this combination exists → UPDATE
-                    # If it doesn't exist → INSERT
-                    upsert_query = f"""
-                        INSERT INTO {table_name}
-                        (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (master_id, "{date_field}") 
-                        DO UPDATE SET
-                            "{target_field}" = EXCLUDED."{target_field}",
-                            uom = EXCLUDED.uom,
-                            unit_price = EXCLUDED.unit_price,
-                            updated_at = CURRENT_TIMESTAMP,
-                            updated_by = %s
-                        RETURNING {id_column}, 
-                                (xmax = 0) AS inserted
-                    """
-                    
-                    cursor.execute(
-                        upsert_query,
-                        (master_id, plan_date, quantity, uom, unit_price, user_email, user_email)
-                    )
+                    if has_audit_cols:
+                        upsert_query = f"""
+                            INSERT INTO {table_name}
+                            (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}") 
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price,
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = %s
+                            RETURNING {id_column},
+                                    (xmax = 0) AS inserted
+                        """
+                        cursor.execute(
+                            upsert_query,
+                            (master_id, plan_date, quantity, uom, unit_price, user_email, user_email)
+                        )
+                    else:
+                        upsert_query = f"""
+                            INSERT INTO {table_name}
+                            (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (master_id, "{date_field}") 
+                            DO UPDATE SET
+                                "{target_field}" = EXCLUDED."{target_field}",
+                                uom = EXCLUDED.uom,
+                                unit_price = EXCLUDED.unit_price
+                            RETURNING {id_column},
+                                    (xmax = 0) AS inserted
+                        """
+                        cursor.execute(
+                            upsert_query,
+                            (master_id, plan_date, quantity, uom, unit_price, user_email)
+                        )
                     
                     result = cursor.fetchone()
                     record_id = str(result[0])
@@ -240,15 +251,19 @@ class GenericDashboardService:
                         for master_id in master_ids:
                             ratios[master_id] = equal_ratio
                     
-                    # Get UOM and unit price from sales data
-                    cursor.execute("""
-                        SELECT uom, unit_price FROM sales_data
-                        WHERE master_id IN (SELECT master_id FROM master_data LIMIT 1)
-                        ORDER BY created_at DESC LIMIT 1
-                    """)
-                    result = cursor.fetchone()
-                    uom = result[0] if result else "UNIT"
-                    unit_price = result[1] if result else 0
+                    # ====================================================================
+                    # BUG FIX: Resolve UOM and unit_price per master_id from sales_data,
+                    # not from a random/unrelated master record.
+                    # ====================================================================
+                    def get_uom_for_master(mid: str):
+                        cursor.execute("""
+                            SELECT uom, unit_price
+                            FROM sales_data
+                            WHERE master_id = %s
+                            ORDER BY created_at DESC LIMIT 1
+                        """, (mid,))
+                        row = cursor.fetchone()
+                        return (row[0] if row else "UNIT", row[1] if row else 0)
                     
                     # Insert distributed quantities
                     id_column = f"{table_name}_id"
@@ -256,6 +271,8 @@ class GenericDashboardService:
                     
                     for master_id, ratio in ratios.items():
                         distributed_qty = quantity * ratio
+                        uom, unit_price = get_uom_for_master(master_id)
+                        
                         cursor.execute(
                             f"""
                             INSERT INTO {table_name}
@@ -340,6 +357,11 @@ class GenericDashboardService:
                     from_date = from_date or "2025-01-01"
                     to_date = to_date or "2026-12-31"
                     
+                    # FIX: Check whether target table has updated_at/updated_by columns.
+                    # forecast_data and sales_data are immutable and don't have them.
+                    # All DynamicTableService tables do.
+                    has_audit_cols = GenericDashboardService._has_update_audit_columns(cursor, target_table)
+
                     # ================================================================
                     # BUG FIX: Build WHERE clause with proper parameter ordering
                     # ================================================================
@@ -353,7 +375,7 @@ class GenericDashboardService:
                     # Process filters if any
                     if filters:
                         for f in filters:
-                            if f.values:  # Check if values list is not empty
+                            if f.values:
                                 placeholders = ",".join(["%s"] * len(f.values))
                                 where_conditions.append(f'm."{f.field_name}" IN ({placeholders})')
                                 where_params.extend(f.values)
@@ -363,37 +385,49 @@ class GenericDashboardService:
                     # Get ID columns
                     source_id = f"{source_table}_id"
                     target_id = f"{target_table}_id"
-                    
-                    # ================================================================
-                    # Build complete parameter list in correct order:
-                    # The SQL has placeholders in this order:
-                    # 1. created_by (%s in SELECT clause - comes BEFORE WHERE)
-                    # 2. WHERE clause params (dates + filter values)
-                    # 3. updated_by (%s in ON CONFLICT clause)
-                    # ================================================================
-                    all_params = [user_email] + where_params + [user_email]
-                    
-                    # Copy data
-                    copy_query = f"""
-                        INSERT INTO {target_table} 
-                        ({target_id}, master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
-                        SELECT 
-                            gen_random_uuid(),
-                            s.master_id,
-                            s."{date_field}",
-                            s."{target_field}",
-                            s.uom,
-                            s.unit_price,
-                            %s
-                        FROM {source_table} s
-                        JOIN master_data m ON s.master_id = m.master_id
-                        WHERE {where_clause}
-                        ON CONFLICT (master_id, "{date_field}") DO UPDATE
-                        SET "{target_field}" = EXCLUDED."{target_field}",
-                            updated_at = CURRENT_TIMESTAMP,
-                            updated_by = %s
-                    """
-                    
+
+                    if has_audit_cols:
+                        # Parameters: created_by, WHERE params, updated_by
+                        all_params = [user_email] + where_params + [user_email]
+                        copy_query = f"""
+                            INSERT INTO {target_table}
+                            ({target_id}, master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            SELECT
+                                gen_random_uuid(),
+                                s.master_id,
+                                s."{date_field}",
+                                s."{target_field}",
+                                s.uom,
+                                s.unit_price,
+                                %s
+                            FROM {source_table} s
+                            JOIN master_data m ON s.master_id = m.master_id
+                            WHERE {where_clause}
+                            ON CONFLICT (master_id, "{date_field}") DO UPDATE
+                            SET "{target_field}" = EXCLUDED."{target_field}",
+                                updated_at = CURRENT_TIMESTAMP,
+                                updated_by = %s
+                        """
+                    else:
+                        # No updated_at/updated_by — simpler ON CONFLICT
+                        all_params = [user_email] + where_params
+                        copy_query = f"""
+                            INSERT INTO {target_table}
+                            ({target_id}, master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
+                            SELECT
+                                gen_random_uuid(),
+                                s.master_id,
+                                s."{date_field}",
+                                s."{target_field}",
+                                s.uom,
+                                s.unit_price,
+                                %s
+                            FROM {source_table} s
+                            JOIN master_data m ON s.master_id = m.master_id
+                            WHERE {where_clause}
+                            ON CONFLICT (master_id, "{date_field}") DO UPDATE
+                            SET "{target_field}" = EXCLUDED."{target_field}"
+                        """
                     cursor.execute(copy_query, all_params)
                     copied_count = cursor.rowcount
                     conn.commit()
@@ -416,6 +450,24 @@ class GenericDashboardService:
         except Exception as e:
             logger.error(f"Error copying from {source_table} to {target_table}: {str(e)}")
             raise DatabaseException(f"Failed to copy data between tables: {str(e)}")
+
+    @staticmethod
+    def _has_update_audit_columns(cursor, table_name: str) -> bool:
+        """
+        Check whether a table has updated_at and updated_by columns.
+
+        forecast_data and sales_data are immutable tables created in schema_manager
+        without these columns. All tables created by DynamicTableService have them.
+        Used to branch ON CONFLICT clauses so we never reference columns that don't exist.
+        """
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+            AND table_name = %s
+            AND column_name IN ('updated_at', 'updated_by')
+        """, (table_name,))
+        return cursor.fetchone()[0] == 2
 
     @staticmethod
     def _table_exists(cursor, table_name: str) -> bool:

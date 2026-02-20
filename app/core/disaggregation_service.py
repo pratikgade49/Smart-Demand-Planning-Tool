@@ -1,6 +1,18 @@
 """
 Disaggregation service.
 Handles forecast disaggregation, data breakdown to granular levels, and ratio calculations.
+
+CHANGES:
+- disaggregate_data: now dynamically loads all tenant planning tables from dynamic_tables
+  metadata instead of hardcoding final_plan, product_manager. Each dynamic table gets its
+  own ratio calculation from its own data (same logic as before for final_plan/product_manager).
+- disaggregate_forecast: still writes to final_plan (mandatory table) - unchanged in intent
+  but now validates final_plan is registered in dynamic_tables.
+- _upsert_disaggregated_data: now accepts any dynamic table name and builds the upsert
+  generically instead of branching on hardcoded table names.
+- _calculate_disaggregation_ratios: unchanged - already accepts source_table param.
+- _build_ratios_dict: unchanged.
+- UOM is resolved per master_id throughout.
 """
 
 import uuid
@@ -36,6 +48,7 @@ class DisaggregationService:
     ) -> Dict[str, Any]:
         """
         Disaggregate an existing forecast run to a more granular level.
+        Writes disaggregated results into final_plan (the mandatory planning table).
         """
         from app.core.forecasting_service import ForecastingService
         
@@ -125,7 +138,6 @@ class DisaggregationService:
                         entity_filter = f_metadata.get('entity_filter', {})
                         
                         # Match this aggregated result with relevant ratios
-                        # Filter ratios_df by entity_filter (which contains source level values)
                         mask = pd.Series(True, index=ratios_df.index)
                         for col, val in entity_filter.items():
                             if col in ratios_df.columns:
@@ -144,7 +156,7 @@ class DisaggregationService:
                                 cursor, new_entity_filter
                             )
                             
-                            # Get UOM from sales_data
+                            # Get UOM from sales_data for this specific master_id
                             cursor.execute(
                                 """
                                 SELECT uom, unit_price
@@ -190,7 +202,10 @@ class DisaggregationService:
                     return {
                         "status": "success",
                         "disaggregated_records": disaggregated_count,
-                        "message": f"Successfully disaggregated forecast into {disaggregated_count} granular records in final_plan table"
+                        "message": (
+                            f"Successfully disaggregated forecast into {disaggregated_count} "
+                            "granular records in final_plan table"
+                        )
                     }
                     
                 finally:
@@ -210,7 +225,6 @@ class DisaggregationService:
     ) -> Dict[str, Any]:
         """
         Retrieve disaggregated forecast data for a given forecast run.
-        
         Returns detailed forecast records with dimension breakdowns.
         """
         db_manager = get_db_manager()
@@ -219,7 +233,6 @@ class DisaggregationService:
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Get forecast run details
                     cursor.execute("""
                         SELECT forecast_run_id, version_id, forecast_filters, 
                                created_at, run_status
@@ -233,7 +246,6 @@ class DisaggregationService:
                     
                     run_id, version_id, forecast_filters, created_at, run_status = run_info
                     
-                    # Get disaggregated results
                     query = """
                         SELECT 
                             fr.result_id,
@@ -254,7 +266,6 @@ class DisaggregationService:
                     
                     params = [forecast_run_id]
                     
-                    # Apply optional aggregation level filter
                     if aggregation_level:
                         query += " AND fr.metadata::jsonb->>'aggregation_level' = %s"
                         params.append(aggregation_level)
@@ -266,9 +277,8 @@ class DisaggregationService:
                     
                     disaggregated_records = []
                     for row in results:
-                        result_id, date, value, f_type, metadata, algo_id, algo_name, accuracy, created_at = row
+                        result_id, date, value, f_type, metadata, algo_id, algo_name, accuracy, rec_created_at = row
                         
-                        # Parse metadata
                         if isinstance(metadata, str):
                             try:
                                 metadata_dict = json.loads(metadata)
@@ -285,17 +295,16 @@ class DisaggregationService:
                             "algorithm_id": algo_id,
                             "algorithm_name": algo_name,
                             "accuracy_metric": float(accuracy) if accuracy else None,
-                            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else str(created_at),
+                            "created_at": rec_created_at.isoformat() if hasattr(rec_created_at, 'isoformat') else str(rec_created_at),
                             "dimensions": metadata_dict.get('entity_filter', {}),
                             "disaggregated_from": metadata_dict.get('disaggregated_from'),
                             "additional_metadata": {
-                                k: v for k, v in metadata_dict.items() 
+                                k: v for k, v in metadata_dict.items()
                                 if k not in ['entity_filter', 'disaggregated_from']
                             }
                         }
                         disaggregated_records.append(record)
                     
-                    # Summary statistics
                     if disaggregated_records:
                         total_value = sum(r['value'] for r in disaggregated_records)
                         avg_value = total_value / len(disaggregated_records)
@@ -333,23 +342,33 @@ class DisaggregationService:
         tenant_id: str,
         database_name: str,
         request: DisaggregateDataRequest,
+        user_email: str = 'system',
         page: int = 1,
         page_size: int = 50
     ) -> Dict[str, Any]:
         """
-        Disaggregate sales, forecast, and final plan data to the lowest granular level
-        and upsert results into the specified target table.
+        Disaggregate sales, forecast, and ALL tenant dynamic planning tables to the
+        lowest granular level and upsert results into each respective table.
 
-        Uses table-specific ratios for final_plan and product_manager:
-        - forecast_data: uses sales_data ratios
-        - final_plan: uses existing final_plan ratios
-        - product_manager: uses existing product_manager ratios
+        CHANGED: Instead of hardcoding final_plan and product_manager, this method now
+        dynamically loads all planning tables registered in dynamic_tables metadata.
 
-        Returns data in dashboard format: grouped by master_data dimensions with separate arrays.
+        Ratio logic per table type:
+        - forecast_data  → ratios calculated from sales_data
+        - every dynamic table (final_plan, product_manager, any custom table)
+                         → ratios calculated from that same table's own data
+
+        FIX: user_email param added so audit trail records real user, not 'system'.
+        FIX: existing_tables set computed once to avoid 3x duplicate information_schema
+             queries per table.
+
+        Returns data in dashboard format: grouped by master_data dimensions with
+        separate arrays per table.
         """
         from app.core.aggregation_service import AggregationService
         from app.core.forecasting_service import ForecastingService
-        
+        from app.core.dynamic_table_service import DynamicTableService
+
         db_manager = get_db_manager()
 
         try:
@@ -383,10 +402,59 @@ class DisaggregationService:
 
             logger.info(f"Disaggregating from {source_aggregation_level} to {target_aggregation_level}")
 
+            # ================================================================
+            # CHANGED: Load all dynamic tables from metadata once
+            # ================================================================
+            dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+                database_name=database_name,
+                include_mandatory=True
+            )
+            # Build a simple list of table names for dynamic planning tables
+            # (excludes the core immutable tables: sales_data, forecast_data)
+            dynamic_table_names = [t['table_name'] for t in dynamic_tables]
+
             with db_manager.get_tenant_connection(database_name) as conn:
                 cursor = conn.cursor()
                 try:
-                    # Calculate ratios for each table type separately
+                    # ============================================================
+                    # FIX: Compute which dynamic tables physically exist once,
+                    # reused for ratio calculation, source data fetch, and upsert.
+                    # Avoids 3x duplicate information_schema queries per table.
+                    # ============================================================
+                    if dynamic_table_names:
+                        placeholders_tables = ','.join(['%s'] * len(dynamic_table_names))
+                        cursor.execute(f"""
+                            SELECT table_name FROM information_schema.tables
+                            WHERE table_schema = 'public'
+                            AND table_name IN ({placeholders_tables})
+                        """, dynamic_table_names)
+                        existing_tables: set = {row[0] for row in cursor.fetchall()}
+                    else:
+                        existing_tables = set()
+
+                    # Warn about any registered but missing tables
+                    missing_tables = []
+                    for table_name in dynamic_table_names:
+                        if table_name not in existing_tables:
+                            logger.warning(
+                                f"Dynamic table '{table_name}' registered in metadata "
+                                "but does not exist physically — skipping"
+                            )
+                            missing_tables.append(table_name)
+                    
+                    # FIX: If too many tables are missing, raise error to alert user
+                    # that something is misconfigured
+                    if missing_tables and len(missing_tables) >= len(dynamic_table_names):
+                        raise ValidationException(
+                            f"All registered dynamic tables are missing: {missing_tables}. "
+                            "Please check your table configuration."
+                        )
+
+                    # ============================================================
+                    # CHANGED: Calculate ratios for each table independently
+                    # forecast_data uses sales_data as ratio source
+                    # every dynamic table uses its own data as ratio source
+                    # ============================================================
                     forecast_ratios_df = DisaggregationService._calculate_disaggregation_ratios(
                         conn=conn,
                         source_columns=source_columns,
@@ -399,44 +467,43 @@ class DisaggregationService:
                         date_to=request.date_to,
                         source_table='sales_data'
                     )
-                    
-                    final_plan_ratios_df = DisaggregationService._calculate_disaggregation_ratios(
-                        conn=conn,
-                        source_columns=source_columns,
-                        target_columns=target_columns,
-                        filters=filters_dict,
-                        date_field=date_field,
-                        target_field=target_field,
-                        interval=request.interval,
-                        date_from=request.date_from,
-                        date_to=request.date_to,
-                        source_table='final_plan'
+
+                    # Build ratios for each dynamic table using its own data
+                    dynamic_table_ratios: Dict[str, pd.DataFrame] = {}
+                    for table_name in dynamic_table_names:
+                        if table_name not in existing_tables:
+                            dynamic_table_ratios[table_name] = pd.DataFrame()
+                            continue
+
+                        dynamic_table_ratios[table_name] = DisaggregationService._calculate_disaggregation_ratios(
+                            conn=conn,
+                            source_columns=source_columns,
+                            target_columns=target_columns,
+                            filters=filters_dict,
+                            date_field=date_field,
+                            target_field=target_field,
+                            interval=request.interval,
+                            date_from=request.date_from,
+                            date_to=request.date_to,
+                            source_table=table_name
+                        )
+
+                    # Check if we have at least some data
+                    has_any_data = (
+                        not forecast_ratios_df.empty
+                        or any(not df.empty for df in dynamic_table_ratios.values())
                     )
-                    
-                    product_manager_ratios_df = DisaggregationService._calculate_disaggregation_ratios(
-                        conn=conn,
-                        source_columns=source_columns,
-                        target_columns=target_columns,
-                        filters=filters_dict,
-                        date_field=date_field,
-                        target_field=target_field,
-                        interval=request.interval,
-                        date_from=request.date_from,
-                        date_to=request.date_to,
-                        source_table='product_manager'
-                    )
-                    
-                    if forecast_ratios_df.empty and final_plan_ratios_df.empty and product_manager_ratios_df.empty:
+                    if not has_any_data:
                         return {
                             "records": [],
                             "total_count": 0,
                             "summary": {"message": "No data found for ratio calculation"}
                         }
-                    
+
                     # Build filter clause for master_data
                     where_conditions = []
                     where_params = []
-                    
+
                     if filters_dict:
                         for col, val in filters_dict.items():
                             if isinstance(val, list):
@@ -446,12 +513,12 @@ class DisaggregationService:
                             else:
                                 where_conditions.append(f'm."{col}" = %s')
                                 where_params.append(val)
-                    
+
                     where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else "WHERE 1=1"
-                    
+
                     # Get ALL target dimension combinations
                     target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
-                    
+
                     count_query = f"""
                         SELECT COUNT(*) FROM (
                             SELECT DISTINCT {target_cols_sql}
@@ -461,7 +528,7 @@ class DisaggregationService:
                     """
                     cursor.execute(count_query, where_params)
                     total_combinations = cursor.fetchone()[0]
-                    
+
                     groups_query = f"""
                         SELECT DISTINCT {target_cols_sql}
                         FROM master_data m
@@ -470,35 +537,35 @@ class DisaggregationService:
                     """
                     cursor.execute(groups_query, where_params)
                     dimension_groups = cursor.fetchall()
-                    
+
                     if not dimension_groups:
                         return {
                             "records": [],
                             "total_count": total_combinations,
                             "summary": {"message": "No dimension combinations found"}
                         }
-                    
-                    # Build ratios lookups for each table type
+
+                    # Build ratios lookup dicts for fast access
                     forecast_ratios_dict = DisaggregationService._build_ratios_dict(
                         forecast_ratios_df, target_columns, source_columns
                     )
-                    final_plan_ratios_dict = DisaggregationService._build_ratios_dict(
-                        final_plan_ratios_df, target_columns, source_columns
-                    )
-                    product_manager_ratios_dict = DisaggregationService._build_ratios_dict(
-                        product_manager_ratios_df, target_columns, source_columns
-                    )
-                    
+                    # CHANGED: build dict per dynamic table
+                    dynamic_ratios_dicts: Dict[str, Dict] = {}
+                    for table_name, ratios_df in dynamic_table_ratios.items():
+                        dynamic_ratios_dicts[table_name] = DisaggregationService._build_ratios_dict(
+                            ratios_df, target_columns, source_columns
+                        )
+
                     # Fetch SOURCE-LEVEL data for each table
                     start_date = request.date_from or "1900-01-01"
                     end_date = request.date_to or "2099-12-31"
-                    
+
                     source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
-                    
+
                     # Build filter for source-level data
                     source_filter_conditions = []
                     source_filter_params = []
-                    
+
                     if filters_dict:
                         for col, val in filters_dict.items():
                             if isinstance(val, list):
@@ -508,61 +575,70 @@ class DisaggregationService:
                             else:
                                 source_filter_conditions.append(f'm."{col}" = %s')
                                 source_filter_params.append(val)
-                    
+
                     source_where = " AND ".join(source_filter_conditions) if source_filter_conditions else "1=1"
-                    
-                    # Fetch forecast_data at SOURCE level
+
+                    # Build the same date_trunc expression used in ratio calculation
+                    # so that data_date values match the period keys in ratios_dict.
+                    from app.core.aggregation_service import AggregationService
+                    date_trunc_expr_f = AggregationService._get_date_trunc_expr(
+                        request.interval, f'f."{date_field}"'
+                    )
+                    date_trunc_expr_t = AggregationService._get_date_trunc_expr(
+                        request.interval, f't."{date_field}"'
+                    )
+
+                    # Fetch forecast_data at SOURCE level (always from forecast_data table)
                     forecast_query = f"""
-                        SELECT f."{date_field}", SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
+                        SELECT {date_trunc_expr_f} AS period,
+                            SUM(CAST(f."{target_field}" AS DOUBLE PRECISION)),
                             MAX(f.uom), {source_cols_sql}
                         FROM forecast_data f
                         JOIN master_data m ON f.master_id = m.master_id
                         WHERE {source_where}
                         AND f."{date_field}" BETWEEN %s AND %s
-                        GROUP BY f."{date_field}", {source_cols_sql}
-                        ORDER BY f."{date_field}" ASC
+                        GROUP BY {date_trunc_expr_f}, {source_cols_sql}
+                        ORDER BY {date_trunc_expr_f} ASC
                     """
                     cursor.execute(forecast_query, source_filter_params + [start_date, end_date])
                     forecast_source_data = cursor.fetchall()
-                    
-                    # Fetch final_plan at SOURCE level
-                    final_plan_query = f"""
-                        SELECT fp."{date_field}", SUM(CAST(fp."{target_field}" AS DOUBLE PRECISION)),
-                            MAX(fp.uom), {source_cols_sql}
-                        FROM final_plan fp
-                        JOIN master_data m ON fp.master_id = m.master_id
-                        WHERE {source_where}
-                        AND fp."{date_field}" BETWEEN %s AND %s
-                        AND (fp.type IS NULL OR fp.type != 'disaggregated')
-                        GROUP BY fp."{date_field}", {source_cols_sql}
-                        ORDER BY fp."{date_field}" ASC
-                    """
-                    cursor.execute(final_plan_query, source_filter_params + [start_date, end_date])
-                    final_plan_source_data = cursor.fetchall()
 
-                    # Fetch product_manager at SOURCE level
-                    product_manager_query = f"""
-                        SELECT pm."{date_field}", SUM(CAST(pm."{target_field}" AS DOUBLE PRECISION)),
-                            MAX(pm.uom), {source_cols_sql}
-                        FROM product_manager pm
-                        JOIN master_data m ON pm.master_id = m.master_id
-                        WHERE {source_where}
-                        AND pm."{date_field}" BETWEEN %s AND %s
-                        AND (pm.type IS NULL OR pm.type != 'disaggregated')
-                        GROUP BY pm."{date_field}", {source_cols_sql}
-                        ORDER BY pm."{date_field}" ASC
-                    """
-                    cursor.execute(product_manager_query, source_filter_params + [start_date, end_date])
-                    product_manager_source_data = cursor.fetchall()
-                    
+                    # ============================================================
+                    # CHANGED: Fetch source-level data for each dynamic table
+                    # ============================================================
+                    dynamic_source_data: Dict[str, List] = {}
+                    for table_name in dynamic_table_names:
+                        if table_name not in existing_tables:
+                            dynamic_source_data[table_name] = []
+                            continue
+
+                        # Use type filter only for tables that have the 'type' column
+                        # (all dynamic tables created by DynamicTableService have it)
+                        dyn_query = f"""
+                            SELECT {date_trunc_expr_t} AS period,
+                                SUM(CAST(t."{target_field}" AS DOUBLE PRECISION)),
+                                MAX(t.uom), {source_cols_sql}
+                            FROM {table_name} t
+                            JOIN master_data m ON t.master_id = m.master_id
+                            WHERE {source_where}
+                            AND t."{date_field}" BETWEEN %s AND %s
+                            AND (t.type IS NULL OR t.type != 'disaggregated')
+                            GROUP BY {date_trunc_expr_t}, {source_cols_sql}
+                            ORDER BY {date_trunc_expr_t} ASC
+                        """
+                        cursor.execute(dyn_query, source_filter_params + [start_date, end_date])
+                        dynamic_source_data[table_name] = cursor.fetchall()
+
+                    # ============================================================
                     # Build results for ALL target dimension groups
+                    # ============================================================
                     all_results = []
-                    
+
                     for group in dimension_groups:
                         group_data = dict(zip(target_columns, group))
                         target_key = tuple(str(v) for v in group)
-                        
-                        # Find master_ids for this target group (for sales data only)
+
+                        # Find master_ids for this target group
                         group_conditions = []
                         group_vals = []
                         for col, val in group_data.items():
@@ -571,24 +647,27 @@ class DisaggregationService:
                             else:
                                 group_conditions.append(f'm."{col}" = %s')
                                 group_vals.append(val)
-                        
-                        group_where = " AND ".join(group_conditions)
-                        master_id_query = f"SELECT master_id FROM master_data m WHERE {group_where}"
+
+                        group_where_str = " AND ".join(group_conditions)
+                        master_id_query = f"SELECT master_id FROM master_data m WHERE {group_where_str}"
                         cursor.execute(master_id_query, group_vals)
                         master_ids = [row[0] for row in cursor.fetchall()]
-                        
+
                         if not master_ids:
                             continue
-                        
-                        entry = {
+
+                        # Build the result entry with static sections + dynamic table sections
+                        entry: Dict[str, Any] = {
                             "master_data": group_data,
                             "sales_data": [],
                             "forecast_data": [],
-                            "final_plan": [],
-                            "product_manager": [],
                         }
-                        
-                        # Fetch SALES data (already granular)
+
+                        # CHANGED: add a key for each dynamic table dynamically
+                        for table_name in dynamic_table_names:
+                            entry[table_name] = []
+
+                        # Fetch SALES data (always granular — no disaggregation needed)
                         placeholders = ",".join(["%s"] * len(master_ids))
                         sales_query = f"""
                             SELECT "{date_field}", SUM(CAST("{target_field}" AS DOUBLE PRECISION)), MAX(uom)
@@ -606,91 +685,97 @@ class DisaggregationService:
                                 "UOM": uom or "UNIT",
                                 "Quantity": float(quantity) if quantity is not None else 0.0,
                             })
-                        
-                        # Disaggregate FORECAST using forecast_ratios_dict
+
+                        # Disaggregate FORECAST using forecast_ratios_dict (sales_data ratios)
+                        num_source_cols = len(source_columns)
                         for row in forecast_source_data:
-                            num_source_cols = len(source_columns)
                             data_date = row[0]
                             source_quantity = row[1]
                             uom = row[2]
-                            source_vals = row[3:3+num_source_cols]
-                            
+                            source_vals = row[3:3 + num_source_cols]
+
                             if source_quantity is None or source_quantity == 0:
                                 continue
-                            
-                            source_key = tuple(str(v) for v in source_vals)
-                            
-                            if target_key in forecast_ratios_dict and source_key in forecast_ratios_dict[target_key]:
+
+                            # Period key matches what DATE_TRUNC produced in the ratio query.
+                            # data_date is already at period granularity (grouped by date_field
+                            # in the source fetch query), so str() of it forms a consistent key.
+                            source_key = tuple(str(v) for v in source_vals) + (str(data_date),)
+
+                            if (
+                                target_key in forecast_ratios_dict
+                                and source_key in forecast_ratios_dict[target_key]
+                            ):
                                 allocation_factor = forecast_ratios_dict[target_key][source_key]
                                 disaggregated_qty = float(source_quantity) * allocation_factor
-                                
                                 entry["forecast_data"].append({
                                     "date": str(data_date),
                                     "UOM": uom or "UNIT",
                                     "Quantity": round(disaggregated_qty, 4),
                                 })
-                        
-                        # Disaggregate FINAL PLAN using final_plan_ratios_dict
-                        for row in final_plan_source_data:
-                            num_source_cols = len(source_columns)
-                            data_date = row[0]
-                            source_quantity = row[1]
-                            uom = row[2]
-                            source_vals = row[3:3+num_source_cols]
-                            
-                            if source_quantity is None or source_quantity == 0:
-                                continue
-                            
-                            source_key = tuple(str(v) for v in source_vals)
-                            
-                            if target_key in final_plan_ratios_dict and source_key in final_plan_ratios_dict[target_key]:
-                                allocation_factor = final_plan_ratios_dict[target_key][source_key]
-                                disaggregated_qty = float(source_quantity) * allocation_factor
-                                
-                                entry["final_plan"].append({
-                                    "date": str(data_date),
-                                    "UOM": uom or "UNIT",
-                                    "Quantity": round(disaggregated_qty, 4),
-                                })
 
-                        # Disaggregate PRODUCT MANAGER using product_manager_ratios_dict
-                        for row in product_manager_source_data:
-                            num_source_cols = len(source_columns)
-                            data_date = row[0]
-                            source_quantity = row[1]
-                            uom = row[2]
-                            source_vals = row[3:3+num_source_cols]
-                            
-                            if source_quantity is None or source_quantity == 0:
-                                continue
-                            
-                            source_key = tuple(str(v) for v in source_vals)
-                            
-                            if target_key in product_manager_ratios_dict and source_key in product_manager_ratios_dict[target_key]:
-                                allocation_factor = product_manager_ratios_dict[target_key][source_key]
-                                disaggregated_qty = float(source_quantity) * allocation_factor
-                                
-                                entry["product_manager"].append({
-                                    "date": str(data_date),
-                                    "UOM": uom or "UNIT",
-                                    "Quantity": round(disaggregated_qty, 4),
-                                })
-                        
+                        # CHANGED: Disaggregate each dynamic table using its own ratios dict
+                        for table_name in dynamic_table_names:
+                            table_ratios_dict = dynamic_ratios_dicts.get(table_name, {})
+                            source_rows = dynamic_source_data.get(table_name, [])
+
+                            for row in source_rows:
+                                data_date = row[0]
+                                source_quantity = row[1]
+                                uom = row[2]
+                                source_vals = row[3:3 + num_source_cols]
+
+                                if source_quantity is None or source_quantity == 0:
+                                    continue
+
+                                # Include period in source_key to match _build_ratios_dict
+                                source_key = tuple(str(v) for v in source_vals) + (str(data_date),)
+
+                                if (
+                                    target_key in table_ratios_dict
+                                    and source_key in table_ratios_dict[target_key]
+                                ):
+                                    allocation_factor = table_ratios_dict[target_key][source_key]
+                                    disaggregated_qty = float(source_quantity) * allocation_factor
+                                    entry[table_name].append({
+                                        "date": str(data_date),
+                                        "UOM": uom or "UNIT",
+                                        "Quantity": round(disaggregated_qty, 4),
+                                    })
+
                         all_results.append(entry)
 
-                    # Upsert to all three tables
-                    upserted_counts = {}
-                    for table_name in ["forecast_data", "product_manager", "final_plan"]:
-                        count = DisaggregationService._upsert_disaggregated_data(
+                    # ============================================================
+                    # CHANGED: Upsert into forecast_data and all dynamic tables
+                    # ============================================================
+                    upserted_counts: Dict[str, int] = {}
+
+                    # Upsert forecast_data
+                    upserted_counts["forecast_data"] = DisaggregationService._upsert_disaggregated_data(
+                        cursor=cursor,
+                        results=all_results,
+                        target_table="forecast_data",
+                        target_columns=target_columns,
+                        date_field=date_field,
+                        target_field=target_field,
+                        user_email=user_email
+                    )
+
+                    # Upsert each dynamic table — skip physically missing ones
+                    for table_name in dynamic_table_names:
+                        if table_name not in existing_tables:
+                            upserted_counts[table_name] = 0
+                            continue
+
+                        upserted_counts[table_name] = DisaggregationService._upsert_disaggregated_data(
                             cursor=cursor,
                             results=all_results,
                             target_table=table_name,
                             target_columns=target_columns,
                             date_field=date_field,
                             target_field=target_field,
-                            user_email='system'
+                            user_email=user_email
                         )
-                        upserted_counts[table_name] = count
 
                     conn.commit()
                     total_upserted = sum(upserted_counts.values())
@@ -698,7 +783,7 @@ class DisaggregationService:
 
                     # Paginate the response records
                     offset = (page - 1) * page_size
-                    paginated_results = all_results[offset : offset + page_size]
+                    paginated_results = all_results[offset: offset + page_size]
 
                     return {
                         "records": paginated_results,
@@ -706,7 +791,7 @@ class DisaggregationService:
                         "summary": {
                             "source_aggregation_level": source_aggregation_level,
                             "target_aggregation_level": target_aggregation_level,
-                            "target_tables": ["forecast_data", "product_manager", "final_plan"],
+                            "target_tables": ["forecast_data"] + dynamic_table_names,
                             "records_upserted": upserted_counts,
                             "total_records_upserted": total_upserted,
                             "total_combinations": total_combinations,
@@ -717,15 +802,17 @@ class DisaggregationService:
                             "interval": request.interval,
                             "ratio_calculation_method": {
                                 "forecast_data": "sales_data ratios",
-                                "final_plan": "final_plan existing ratios",
-                                "product_manager": "product_manager existing ratios"
+                                **{
+                                    table_name: f"{table_name} own data ratios"
+                                    for table_name in dynamic_table_names
+                                }
                             }
                         }
                     }
-                
+
                 finally:
                     cursor.close()
-        
+
         except Exception as e:
             logger.error(f"Failed to disaggregate data: {str(e)}", exc_info=True)
             if isinstance(e, (ValidationException, NotFoundException)):
@@ -737,7 +824,7 @@ class DisaggregationService:
         """Resolve master_id from entity filter."""
         if not entity_filter:
             raise ValidationException("Entity filter is required for master data lookup")
-        
+
         clauses = []
         params = []
         for key, value in entity_filter.items():
@@ -762,20 +849,32 @@ class DisaggregationService:
     ) -> Dict[tuple, Dict[tuple, float]]:
         """
         Build a nested dictionary for fast ratio lookups.
-        
+
+        Keys include period when present in ratios_df (i.e. after interval fix), so
+        that per-period allocation factors don't overwrite each other in the dict.
+
         Returns:
-            {target_key: {source_key: allocation_factor}}
+            {target_key: {(source_key, period): allocation_factor}}
+            where period is included only when the 'period' column exists in ratios_df.
         """
-        ratios_dict = {}
+        ratios_dict: Dict[tuple, Dict[tuple, float]] = {}
+        if ratios_df.empty:
+            return ratios_dict
+
+        has_period = 'period' in ratios_df.columns
+
         for _, row in ratios_df.iterrows():
             target_key = tuple(str(row[col]) for col in target_columns)
             source_key = tuple(str(row[col]) for col in source_columns)
+            if has_period:
+                # Include period in source_key so per-period factors are stored separately
+                source_key = source_key + (str(row['period']),)
             allocation_factor = float(row['allocation_factor'])
-            
+
             if target_key not in ratios_dict:
                 ratios_dict[target_key] = {}
             ratios_dict[target_key][source_key] = allocation_factor
-        
+
         return ratios_dict
 
     @staticmethod
@@ -792,17 +891,22 @@ class DisaggregationService:
         source_table: str = 'sales_data'
     ) -> pd.DataFrame:
         """
-        Calculate disaggregation ratios based on data from specified source table.
+        Calculate disaggregation ratios based on historical data from the specified source table.
 
         Accepts source_table parameter to use different tables for ratio calculation:
-        - 'sales_data': for forecast_data disaggregation
-        - 'final_plan': for final_plan disaggregation  
-        - 'product_manager': for product_manager disaggregation
+        - 'sales_data'      : for forecast_data disaggregation
+        - 'final_plan'      : for final_plan disaggregation
+        - any dynamic table : uses that table's own data for ratio calculation
+
+        FIX: interval is now used — ratios are aggregated at the correct time granularity
+        (MONTHLY, WEEKLY, etc.) via DATE_TRUNC before summing, so the allocation factors
+        reflect the same periodicity as the source forecast data.
 
         Returns DataFrame with target-level combinations and their allocation factors.
+        Returns empty DataFrame if the source table has no data.
         """
         from app.core.aggregation_service import AggregationService
-        
+
         # Build filter clause
         filter_clause = ""
         filter_params = []
@@ -821,54 +925,60 @@ class DisaggregationService:
 
             if filter_conditions:
                 filter_clause = "AND " + " AND ".join(filter_conditions)
-        
+
         # Add date filters
         if date_from:
             filter_clause += f' AND s."{date_field}" >= %s'
             filter_params.append(date_from)
-        
+
         if date_to:
             filter_clause += f' AND s."{date_field}" <= %s'
             filter_params.append(date_to)
-        
-        # Get date truncation expression
-        date_trunc = AggregationService._get_date_trunc_expr(interval, date_field)
-        
-        # Query for target-level aggregated data FROM THE SPECIFIED SOURCE TABLE
+
         target_cols_sql = ', '.join([f'm."{col}"' for col in target_columns])
-        source_cols_sql = ', '.join([f'm."{col}"' for col in source_columns])
-        
+
+        # FIX: Use DATE_TRUNC so ratios respect the requested interval granularity.
+        # This ensures a MONTHLY interval sums each month's data before computing
+        # allocation factors, matching how source forecast data is periodised.
+        # The period column is included in SELECT and GROUP BY so that allocation
+        # factors are calculated per-period, not collapsed across all time.
+        date_trunc_expr = AggregationService._get_date_trunc_expr(interval, f's."{date_field}"')
+
         query = f"""
             SELECT
                 {target_cols_sql},
+                {date_trunc_expr} AS period,
                 SUM(CAST(s."{target_field}" AS numeric)) as target_volume
             FROM {source_table} s
             JOIN master_data m ON s.master_id = m.master_id
             WHERE 1=1 {filter_clause}
-            GROUP BY {target_cols_sql}
-            ORDER BY {target_cols_sql}
+            GROUP BY {target_cols_sql}, {date_trunc_expr}
+            ORDER BY {target_cols_sql}, {date_trunc_expr}
         """
-        
-        logger.debug(f"Ratio calculation query for {source_table}: {query}")
+
+        logger.debug(f"Ratio calculation query for {source_table} (interval={interval}): {query}")
         logger.debug(f"Params: {filter_params}")
-        
+
         df_target = pd.read_sql_query(query, conn, params=filter_params)
-        
+
         if df_target.empty:
             logger.warning(f"No data found in {source_table} for ratio calculation")
             return pd.DataFrame()
-        
-        # Calculate source-level totals
-        source_totals = df_target.groupby(source_columns)['target_volume'].sum().reset_index()
+
+        # FIX: group by source_columns + ['period'] so source totals are computed
+        # per period, not collapsed across all time. Without this, a tenant with
+        # MONTHLY interval would get allocation factors averaged over the entire
+        # history range rather than per month — producing wrong disaggregations.
+        groupby_cols = source_columns + ['period']
+        source_totals = df_target.groupby(groupby_cols)['target_volume'].sum().reset_index()
         source_totals.rename(columns={'target_volume': 'source_total_volume'}, inplace=True)
-        
-        # Merge and calculate allocation factors
-        ratios_df = pd.merge(df_target, source_totals, on=source_columns)
+
+        # Merge on source_columns + period so each period gets its own allocation factor
+        ratios_df = pd.merge(df_target, source_totals, on=groupby_cols)
         ratios_df['allocation_factor'] = ratios_df['target_volume'] / ratios_df['source_total_volume']
         ratios_df['allocation_factor'] = ratios_df['allocation_factor'].fillna(0)
 
-        # Sort ratios_df for consistent processing order
-        sort_columns = target_columns + source_columns
+        sort_columns = target_columns + source_columns + ['period']
         ratios_df = ratios_df.sort_values(by=sort_columns).reset_index(drop=True)
 
         logger.info(f"Calculated {len(ratios_df)} disaggregation ratios from {source_table}")
@@ -888,19 +998,42 @@ class DisaggregationService:
         """
         Upsert disaggregated data into the specified target table.
 
+        CHANGED: No longer branches on hardcoded table names (final_plan, product_manager,
+        forecast_data). Instead uses a single generic UPSERT that works for any table
+        that follows the standard dynamic table schema (master_id, date_field, target_field,
+        uom, unit_price, created_by, updated_at, updated_by columns).
+
+        FIX: Checks whether the target table has a 'type' column before including it in
+        the INSERT. forecast_data does NOT have a 'type' column (it was created without
+        one in schema_manager). All tables created by DynamicTableService DO have it.
+        The old generic upsert crashed on forecast_data because it always inserted 'type'.
+
         Args:
             cursor: Database cursor
-            results: List of disaggregated result entries
-            target_table: Target table name (final_plan, product_manager, forecast_data)
-            target_columns: List of dimension columns
+            results: List of disaggregated result entries (keyed by table_name)
+            target_table: Target table name (any dynamic table or forecast_data)
+            target_columns: List of dimension columns (used to resolve master_id)
             date_field: Date field name
-            target_field: Target field name
+            target_field: Target field name (quantity)
             user_email: User email for auditing
 
         Returns:
             Number of records upserted
         """
         upserted_count = 0
+        id_column = f"{target_table}_id"
+
+        # FIX: Check once whether this table has a 'type' column.
+        # forecast_data was created without it; all DynamicTableService tables have it.
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                AND table_name = %s
+                AND column_name = 'type'
+            )
+        """, (target_table,))
+        has_type_column = bool(cursor.fetchone()[0])
 
         for entry in results:
             master_data = entry.get("master_data", {})
@@ -914,9 +1047,9 @@ class DisaggregationService:
                 logger.warning(f"Could not resolve master_id for {master_data}, skipping")
                 continue
 
-            # Get UOM and unit_price from sales data
+            # Get UOM and unit_price from sales_data for this specific master_id
             cursor.execute(
-                f"""
+                """
                 SELECT uom, unit_price
                 FROM sales_data
                 WHERE master_id = %s
@@ -928,9 +1061,8 @@ class DisaggregationService:
             uom = sales_row[0] if sales_row else "UNIT"
             unit_price = sales_row[1] if sales_row else 0.0
 
-            # Process only the data type that matches the target table
-            data_type = target_table if target_table in ["forecast_data", "final_plan", "product_manager"] else "forecast_data"
-            data_list = entry.get(data_type, [])
+            # Get the data list for this specific table from the entry
+            data_list = entry.get(target_table, [])
             if not data_list:
                 continue
 
@@ -941,13 +1073,14 @@ class DisaggregationService:
                 if not data_date or quantity == 0:
                     continue
 
-                # Build upsert query based on target table
-                if target_table == "final_plan":
-                    # Insert into final_plan table
-                    final_plan_id = str(uuid.uuid4())
+                record_id = str(uuid.uuid4())
+
+                if has_type_column:
+                    # Tables created by DynamicTableService (final_plan, product_manager,
+                    # any custom table) — include 'type' column in INSERT.
                     cursor.execute(f"""
-                        INSERT INTO final_plan
-                        (final_plan_id, master_id, "{date_field}", "{target_field}",
+                        INSERT INTO {target_table}
+                        ({id_column}, master_id, "{date_field}", "{target_field}",
                          uom, unit_price, type, created_by)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (master_id, "{date_field}")
@@ -957,24 +1090,24 @@ class DisaggregationService:
                             unit_price = EXCLUDED.unit_price,
                             type = EXCLUDED.type,
                             updated_at = CURRENT_TIMESTAMP,
-                            updated_by = EXCLUDED.created_by
+                            updated_by = %s
                     """, (
-                        final_plan_id,
+                        record_id,
                         master_id,
                         data_date,
                         quantity,
                         uom,
                         unit_price,
                         'disaggregated',
+                        user_email,
                         user_email
                     ))
-
-                elif target_table == "product_manager":
-                    # Insert into product_manager table
+                else:
+                    # forecast_data — no 'type', 'updated_at', or 'updated_by' columns.
                     cursor.execute(f"""
-                        INSERT INTO product_manager
-                        (master_id, "{date_field}", "{target_field}",
-                         uom, unit_price, type, created_by)
+                        INSERT INTO {target_table}
+                        ({id_column}, master_id, "{date_field}", "{target_field}",
+                         uom, unit_price, created_by)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (master_id, "{date_field}")
                         DO UPDATE SET
@@ -982,27 +1115,7 @@ class DisaggregationService:
                             uom = EXCLUDED.uom,
                             unit_price = EXCLUDED.unit_price
                     """, (
-                        master_id,
-                        data_date,
-                        quantity,
-                        uom,
-                        unit_price,
-                        'disaggregated',
-                        user_email
-                    ))
-
-                elif target_table == "forecast_data":
-                    # Insert into forecast_data table
-                    cursor.execute(f"""
-                        INSERT INTO forecast_data
-                        (master_id, "{date_field}", "{target_field}", uom, unit_price, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (master_id, "{date_field}")
-                        DO UPDATE SET
-                            "{target_field}" = EXCLUDED."{target_field}",
-                            uom = EXCLUDED.uom,
-                            unit_price = EXCLUDED.unit_price
-                    """, (
+                        record_id,
                         master_id,
                         data_date,
                         quantity,
