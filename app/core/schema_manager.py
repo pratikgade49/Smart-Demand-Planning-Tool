@@ -873,7 +873,7 @@ class SchemaManager:
                         confidence_level VARCHAR(20),
                         
                         -- Accuracy metrics (only for testing_forecast)
-                        accuracy_metric DECIMAL(5, 2),
+                        accuracy_metric DECIMAL(18, 4),
                         metric_type VARCHAR(50),
                         
                         metadata JSONB,

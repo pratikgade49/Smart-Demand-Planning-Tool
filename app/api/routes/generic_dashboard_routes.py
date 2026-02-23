@@ -137,8 +137,8 @@ async def save_data(
     
     **Uses master_data + date as the natural unique key.**
     
-    - If a record exists for the given master_data combination + date → **UPDATE** quantity
-    - If no record exists → **INSERT** new record
+    - If a record exists for the given master_data combination + date ->  **UPDATE** quantity
+    - If no record exists ->  **INSERT** new record
     - Atomic operation using PostgreSQL's ON CONFLICT clause
     
     **Parameters:**

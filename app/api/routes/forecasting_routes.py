@@ -1,7 +1,8 @@
-
 """
 Forecasting API Routes.
 Endpoints for forecast run management and execution.
+
+UPDATED: Added 'auto' metric resolution before job creation.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, BackgroundTasks
@@ -54,9 +55,127 @@ class DirectForecastExecutionRequest(BaseModel):
     algorithms: Optional[List[Dict[str, Any]]] = None
 
 
+def _resolve_auto_metrics_from_request(request_data: dict, tenant_data: dict) -> list:
+
+    from app.core.forecast_execution_service import ForecastExecutionService
+    from app.core.aggregation_service import AggregationService
+
+    selected_metrics = request_data.get('selected_metrics') or ['mape', 'accuracy']
+
+    if 'auto' not in selected_metrics:
+        return selected_metrics
+
+    logger.info("Auto metric selected - analysing historical data per combination")
+
+    try:
+        filters = request_data.get('forecast_filters') or {}
+        aggregation_level = filters.get('aggregation_level', 'product')
+        interval = filters.get('interval', 'MONTHLY')
+
+        # Build one filter dict per combination so each is analysed independently
+        filter_combinations = _build_filter_combinations(filters, aggregation_level)
+
+        mae_votes = 0
+        mape_votes = 0
+
+        for i, combo_filters in enumerate(filter_combinations):
+            try:
+                historical_data = AggregationService.prepare_aggregated_data(
+                    tenant_id=tenant_data['tenant_id'],
+                    database_name=tenant_data['database_name'],
+                    aggregation_level=aggregation_level,
+                    interval=interval,
+                    filters=combo_filters
+                )
+
+                if historical_data is None or (hasattr(historical_data, '__len__') and len(historical_data) == 0):
+                    logger.warning(f"Auto metric combo {i+1}: no data, skipping vote")
+                    continue
+
+                if isinstance(historical_data, tuple):
+                    historical_data = historical_data[0]
+
+                result = ForecastExecutionService._analyze_and_select_metrics(historical_data)
+
+                label = _combo_label(combo_filters, aggregation_level)
+                if 'mae' in result:
+                    mae_votes += 1
+                    logger.info(f"Auto metric combo {i+1}/{len(filter_combinations)} ({label}): voted MAE")
+                else:
+                    mape_votes += 1
+                    logger.info(f"Auto metric combo {i+1}/{len(filter_combinations)} ({label}): voted MAPE")
+
+            except Exception as combo_err:
+                logger.warning(f"Auto metric combo {i+1}: analysis failed ({combo_err}), skipping vote")
+
+        # Majority vote -- ties go to MAE (conservative)
+        total_votes = mae_votes + mape_votes
+        if total_votes == 0:
+            logger.warning("Auto metric: no votes cast, defaulting to mape+accuracy")
+            return ['mape', 'accuracy']
+
+        resolved = ['mae', 'accuracy'] if mae_votes >= mape_votes else ['mape', 'accuracy']
+        logger.info(
+            f"Auto metric vote result: MAE={mae_votes}, MAPE={mape_votes} "
+            f"({total_votes} combinations) -> {resolved[0].upper()}"
+        )
+        return resolved
+
+    except Exception as e:
+        logger.error(f"Auto metric resolution failed: {str(e)}, defaulting to mape+accuracy")
+        return ['mape', 'accuracy']
+
+
+def _build_filter_combinations(filters: dict, aggregation_level: str) -> list:
+
+    try:
+        dimensions = [dim.strip() for dim in aggregation_level.split('-')]
+
+        dim_values = {}
+        for dim in dimensions:
+            val = filters.get(dim)
+            if isinstance(val, list) and len(val) > 1:
+                dim_values[dim] = val
+
+        if not dim_values:
+            return [filters]
+
+        counts = {len(v) for v in dim_values.values()}
+        if len(counts) > 1:
+            logger.warning(
+                "Auto metric: dimension value counts differ across filter keys "
+                f"({list(dim_values.keys())}) - falling back to pooled analysis"
+            )
+            return [filters]
+
+        n_combos = counts.pop()
+        combos = []
+        for idx in range(n_combos):
+            combo = dict(filters)
+            for dim, values in dim_values.items():
+                combo[dim] = [values[idx]]
+            combos.append(combo)
+
+        return combos
+
+    except Exception as e:
+        logger.warning(f"Auto metric: could not split filter combinations ({e}), using pooled")
+        return [filters]
+
+
+def _combo_label(filters: dict, aggregation_level: str) -> str:
+    """Return a short human-readable label for a single combo filter, for logging."""
+    dimensions = [dim.strip() for dim in aggregation_level.split('-')]
+    parts = []
+    for dim in dimensions:
+        val = filters.get(dim)
+        if val:
+            parts.append(f"{dim}={val[0] if isinstance(val, list) else val}")
+    return '-'.join(parts) if parts else 'unknown'
+
 
 @router.post("/execute-forecast-async", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED)
-@monitor_endpoint("Forecast Request Submission", warn_threshold=3.0)  # Add monitoring decorator
+@monitor_endpoint("Forecast Request Submission", warn_threshold=3.0)
 async def execute_forecast_async(
     request_data: ForecastRunCreate,
     background_tasks: BackgroundTasks,
@@ -65,16 +184,22 @@ async def execute_forecast_async(
 ):
     """
     Asynchronously execute a forecast in the background with resource monitoring.
-    
-    This endpoint returns immediately with a job_id. Use the job_id to check 
+
+    This endpoint returns immediately with a job_id. Use the job_id to check
     the status and retrieve results via the /job-status/{job_id} endpoint.
-    
+
+    **selected_metrics options:**
+    - ``["mape", "accuracy"]`` — default
+    - ``["mae"]``, ``["rmse"]``, ``["mape"]``, ``["accuracy"]`` — explicit choice
+    - ``["auto"]`` — system analyses historical data and picks the best metric automatically
+
     Returns:
         - job_id: Unique identifier for tracking the forecast execution
         - status: Current job status (will be "pending")
         - created_at: Timestamp when the job was created
         - start_resources: System resources at job creation
-    
+        - resolved_metrics: The actual metrics that will be used (useful when 'auto' was chosen)
+
     Check job status with: GET /api/v1/forecasting/job-status/{job_id}
     """
     try:
@@ -92,12 +217,29 @@ async def execute_forecast_async(
             logger.info("Using default metrics: ['mape', 'accuracy']")
 
         # Convert Pydantic model to dict for processing
-        request_data = request_data.dict()
+        request_data_dict = request_data.dict()
+
+        # ----------------------------------------------------------------
+        # AUTO METRIC RESOLUTION
+        # If user passed ["auto"], analyse data and resolve to real metrics
+        # before any further processing or job creation.
+        # ----------------------------------------------------------------
+        original_metrics = request_data_dict.get('selected_metrics', [])
+        if 'auto' in original_metrics:
+            resolved_metrics = _resolve_auto_metrics_from_request(
+                request_data_dict, tenant_data
+            )
+            request_data_dict['selected_metrics'] = resolved_metrics
+            logger.info(
+                f"Auto metric selection complete: {original_metrics} -> {resolved_metrics}"
+            )
+        else:
+            resolved_metrics = original_metrics
 
         # Validate algorithm parameters before creating job
         algorithms_to_validate = []
-        if request_data.get('algorithms') and len(request_data['algorithms']) > 0:
-            algorithms_to_validate = request_data['algorithms']
+        if request_data_dict.get('algorithms') and len(request_data_dict['algorithms']) > 0:
+            algorithms_to_validate = request_data_dict['algorithms']
         else:
             algorithms_to_validate = [{'algorithm_id': 999}]  # Best Fit
 
@@ -115,13 +257,11 @@ async def execute_forecast_async(
                 # Update with validated parameters (including defaults)
                 algo['custom_parameters'] = validation_result.validated_parameters
 
-
-
         # Check for duplicate running jobs with same forecast parameters
         is_duplicate = ForecastJobService.check_duplicate_running_job(
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
-            new_request_data=request_data
+            new_request_data=request_data_dict
         )
         if is_duplicate:
             raise ValidationException("forecast in progress for selected sub item, kindly wait.")
@@ -130,24 +270,24 @@ async def execute_forecast_async(
         job_result = ForecastJobService.create_job(
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
-            request_data=request_data,
+            request_data=request_data_dict,
             user_email=tenant_data['email']
         )
-        
+
         job_id = job_result['job_id']
-        
+
         # Add background task to execute forecast
         background_tasks.add_task(
             BackgroundForecastExecutor.execute_forecast_async,
             job_id=job_id,
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
-            request_data=request_data,
+            request_data=request_data_dict,
             tenant_data=tenant_data
         )
-        
+
         logger.info(f"Created async forecast job {job_id}, added to background task queue")
-        
+
         return {
             "status": "success",
             "data": {
@@ -155,10 +295,13 @@ async def execute_forecast_async(
                 "status": "pending",
                 "created_at": job_result['created_at'],
                 "message": "Forecast execution started in background. Use job_id to check status.",
-                "start_resources": current_resources
+                "start_resources": current_resources,
+                # Surface resolved metrics so the caller knows what was chosen
+                "resolved_metrics": resolved_metrics,
+                "auto_metric_used": 'auto' in original_metrics
             }
         }
-    
+
     except ValidationException as e:
         logger.error(f"Validation error in async forecast execution: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -170,8 +313,6 @@ async def execute_forecast_async(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-
-
 @router.get("/job-status/{job_id}", response_model=Dict[str, Any])
 @monitor_endpoint("Forecast Job Status Check", warn_threshold=2.0)
 async def get_forecast_job_status(
@@ -181,7 +322,7 @@ async def get_forecast_job_status(
 ):
     """
     Get the status and results of a forecast job with performance metrics.
-    
+
     Returns:
         - job_id: Job identifier
         - status: Current status (pending, running, completed, failed)
@@ -194,21 +335,21 @@ async def get_forecast_job_status(
     """
     try:
         logger.info(f"Checking job status for {job_id}")
-        
+
         job_status = ForecastJobService.get_job_status(
             tenant_id=tenant_data['tenant_id'],
             database_name=tenant_data['database_name'],
             job_id=job_id
         )
-        
+
         if job_status.get('status') == 'not_found':
             raise HTTPException(status_code=404, detail="Job not found")
-        
+
         return {
             "status": "success",
             "data": job_status
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -237,10 +378,10 @@ async def get_forecast_job_history(
 ):
     """
     Get the history of forecast jobs for the current user.
-    
+
     Parameters:
         - limit: Maximum number of jobs to return (1-200, default 50)
-    
+
     Returns:
         - jobs: List of job summaries with their status and timestamps
     """
@@ -284,12 +425,12 @@ async def get_forecast_job_history(
             created_to=created_to_dt,
             timezone_name=timezone_name
         )
-        
+
         return ResponseHandler.success(
             data={"jobs": jobs, "total": len(jobs)},
             status_code=200
         )
-    
+
     except Exception as e:
         logger.error(f"Error getting job history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -383,16 +524,16 @@ async def get_disaggregated_forecast(
 ):
     """
     Get disaggregated forecast data for a forecast run.
-    
+
     - **forecast_run_id**: ID of the forecast run
     - **aggregation_level**: Optional filter by aggregation level (e.g., 'product', 'region')
-    
+
     Returns disaggregated forecast results with detailed breakdown by dimensions.
     """
     try:
         if not forecast_run_id.strip():
             raise HTTPException(status_code=400, detail="forecast_run_id is required")
-        
+
         logger.info(f"Retrieving disaggregated forecast for run {forecast_run_id}")
         result = DisaggregationService.get_disaggregated_forecast_data(
             tenant_id=tenant_data["tenant_id"],
@@ -415,7 +556,7 @@ async def create_forecast_version(
 ):
     """
     Create a new forecast version.
-    
+
     - **version_name**: Unique name for the version
     - **version_type**: Type (Baseline, Simulation, Final)
     - **is_active**: Whether this version is active
@@ -448,7 +589,7 @@ async def list_forecast_versions(
 ):
     """
     List all forecast versions for the tenant.
-    
+
     - **version_type**: Filter by version type
     - **is_active**: Filter by active status
     """
@@ -461,7 +602,7 @@ async def list_forecast_versions(
             page=page,
             page_size=page_size
         )
-        
+
         logger.info(f"Retrieved {total_count} forecast versions for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.list_response(
             data=versions,
@@ -507,7 +648,7 @@ async def update_forecast_version(
 ):
     """
     Update forecast version.
-    
+
     - Can update version_name and is_active status
     - Only one version of each type can be active at a time
     """
@@ -541,7 +682,7 @@ async def create_external_factor(
 ):
     """
     Create a new external factor record.
-    
+
     External factors can include:
     - Weather data (temperature, precipitation)
     - Economic indicators (GDP, inflation)
@@ -578,7 +719,7 @@ async def list_external_factors(
 ):
     """
     List external factors with optional filters.
-    
+
     - **factor_name**: Filter by factor name
     - **date_from**: Start date for filtering
     - **date_to**: End date for filtering
@@ -593,7 +734,7 @@ async def list_external_factors(
             page=page,
             page_size=page_size
         )
-        
+
         logger.info(f"Retrieved {total_count} external factors for tenant {tenant_data['tenant_id']}")
         return ResponseHandler.list_response(
             data=factors,
@@ -615,10 +756,10 @@ async def get_aggregation_levels(
 ):
     """
     Get available aggregation levels based on tenant's master data structure.
-    
+
     Returns all fields from the finalized field catalogue that can be used
     for aggregation, including suggested single and multi-dimensional combinations.
-    
+
     **Usage**:
     - Use field names from the response to build custom aggregation levels
     - Single dimension: Use any single field name (e.g., "product", "location")
@@ -645,7 +786,7 @@ async def compare_forecast_results(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     result_type: Optional[str] = Query(
-        "future_forecast", 
+        "future_forecast",
         description="Type of results to compare",
         pattern="^(testing_actual|testing_forecast|future_forecast)$"
     ),
@@ -653,9 +794,9 @@ async def compare_forecast_results(
 ):
     """
     Compare results across all algorithms for a forecast run.
-    
+
     Returns aggregated comparison data showing each algorithm's performance.
-    
+
     Parameters:
         - forecast_run_id: ID of the forecast run
         - date_from: Optional start date filter
@@ -668,27 +809,26 @@ async def compare_forecast_results(
     try:
         from app.core.database import get_db_manager
         db_manager = get_db_manager()
-        
+
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
-                # Build WHERE clause - UPDATED to use new columns
+                # Build WHERE clause
                 where_clauses = ["fr.forecast_run_id = %s", "fr.type = %s"]
                 params = [forecast_run_id, result_type]
-                
+
                 if date_from:
-                    where_clauses.append("fr.date >= %s")  # Changed from date
+                    where_clauses.append("fr.date >= %s")
                     params.append(date_from)
-                
+
                 if date_to:
-                    where_clauses.append("fr.date <= %s")  # Changed from date
+                    where_clauses.append("fr.date <= %s")
                     params.append(date_to)
-                
+
                 where_sql = " AND ".join(where_clauses)
-                
-                # Get comparison data - UPDATED to use new columns
+
                 cursor.execute(f"""
-                    SELECT 
+                    SELECT
                         a.algorithm_id,
                         a.algorithm_name,
                         fr.type,
@@ -703,7 +843,7 @@ async def compare_forecast_results(
                     GROUP BY a.algorithm_id, a.algorithm_name, fr.type
                     ORDER BY a.algorithm_name
                 """, params)
-                
+
                 comparison = []
                 for row in cursor.fetchall():
                     comparison.append({
@@ -716,17 +856,17 @@ async def compare_forecast_results(
                         "max_value": round(float(row[6]), 2) if row[6] else None,
                         "avg_accuracy_metric": round(float(row[7]), 2) if row[7] else None
                     })
-                
+
                 logger.info(f"Generated algorithm comparison for forecast run {forecast_run_id}: {len(comparison)} algorithms")
                 return ResponseHandler.success(data={
                     "forecast_run_id": forecast_run_id,
                     "result_type": result_type,
                     "algorithm_comparison": comparison
                 })
-                
+
             finally:
                 cursor.close()
-                
+
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
@@ -742,23 +882,23 @@ async def list_algorithms(
 ):
     """
     List available forecasting algorithms.
-    
+
     - **algorithm_type**: Filter by type (ML, Statistic, Hybrid)
     """
     try:
         from app.core.database import get_db_manager
         db_manager = get_db_manager()
-        
+
         with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
             cursor = conn.cursor()
             try:
                 where_clause = ""
                 params = []
-                
+
                 if algorithm_type:
                     where_clause = "WHERE algorithm_type = %s"
                     params.append(algorithm_type)
-                
+
                 cursor.execute(f"""
                     SELECT algorithm_id, algorithm_name, default_parameters,
                            algorithm_type, description, created_at, updated_at
@@ -766,7 +906,7 @@ async def list_algorithms(
                     {where_clause}
                     ORDER BY algorithm_name
                 """, params)
-                
+
                 algorithms = []
                 for row in cursor.fetchall():
                     algorithms.append({
@@ -778,19 +918,19 @@ async def list_algorithms(
                         "created_at": row[5].isoformat() if row[5] else None,
                         "updated_at": row[6].isoformat() if row[6] else None
                     })
-                
+
                 logger.info(f"Retrieved {len(algorithms)} algorithms for tenant {tenant_data['tenant_id']}")
                 return ResponseHandler.success(data=algorithms)
-                
+
             finally:
                 cursor.close()
-                
+
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except Exception as e:
         logger.error(f"Unexpected error listing algorithms: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
+
 
 @router.get("/metrics/performance", response_model=Dict[str, Any])
 async def get_performance_metrics(
@@ -798,17 +938,17 @@ async def get_performance_metrics(
 ):
     """
     Get performance metrics for forecasting operations.
-    
+
     Returns:
         - current_resources: Current system resource usage
         - performance_summary: Summary of all tracked operations
     """
     from app.core.resource_monitor import performance_tracker
-    
+
     summary = performance_tracker.get_summary()
     current_resources = ResourceMonitor.get_system_resources()
     resource_warnings = ResourceMonitor.check_resource_warnings(current_resources)
-    
+
     return {
         "status": "success",
         "data": {
@@ -839,10 +979,10 @@ async def save_forecast(
 ):
     """
     Save forecast results into forecast_data table.
-    
+
     This commits the results of a specific forecast run (the best performing algorithm)
     into the forecast_data table for future reference or use in other processes.
-    
+
     Parameters:
         - forecast_run_id: ID of the forecast run to save
         - entity_identifier: Optional specific entity to save (e.g., "1001-Loc1")
@@ -850,7 +990,7 @@ async def save_forecast(
     """
     try:
         logger.info(f"Saving forecast results for run {request.forecast_run_id} (Tenant: {tenant_data['tenant_id']})")
-        
+
         result = ForecastingService.save_forecast_results(
             tenant_id=tenant_data["tenant_id"],
             database_name=tenant_data["database_name"],
@@ -859,9 +999,9 @@ async def save_forecast(
             entity_identifier=request.entity_identifier,
             aggregation_level=request.aggregation_level
         )
-        
+
         return ResponseHandler.success(data=result)
-    
+
     except (ValidationException, NotFoundException) as e:
         status_code = 404 if isinstance(e, NotFoundException) else 400
         raise HTTPException(status_code=status_code, detail=str(e))
@@ -914,51 +1054,6 @@ async def disaggregate_data(
 ):
     """
     Disaggregate sales, forecast, and final plan data to the lowest granular level.
-
-    This endpoint takes aggregated data and breaks it down to the finest granularity
-    (all dimension fields from master_data) using historical sales distribution,
-    then upserts the results into the specified target table.
-
-    **Process:**
-    1. Auto-determines target level as all dimension fields from master_data
-    2. Calculates historical distribution ratios from sales_data
-    3. Returns granular sales data (already at target level)
-    4. Disaggregates forecast_data using calculated ratios
-    5. Disaggregates final_plan using calculated ratios
-    6. Upserts disaggregated results into the specified target table
-
-    **Example Request:**
-```json
-    {
-        "filters": [
-            {
-                "field_name": "product",
-                "values": ["18320"]
-            },
-            {
-                "field_name": "location",
-                "values": ["3110"]
-            }
-        ],
-        "date_from": "2025-01-01",
-        "date_to": "2026-04-01",
-        "interval": "MONTHLY"
-    }
-```
-
-    **Response Format (Same as before):**
-    - `records`: Array of dimension groups with their sales, forecast, and final plan data
-    - `total_count`: Total number of unique dimension combinations
-    - Each record contains:
-      - `master_data`: The dimension values for this group
-      - `sales_data`: Array with date, UOM, Quantity
-      - `forecast_data`: Array with date, UOM, Quantity
-      - `final_plan`: Array with date, UOM, Quantity
-
-    **Note:** This API automatically saves disaggregated data to all three tables:
-    - `final_plan`: Final plan table
-    - `product_manager`: Product manager table
-    - `forecast_data`: Forecast data table
     """
     try:
         logger.info(

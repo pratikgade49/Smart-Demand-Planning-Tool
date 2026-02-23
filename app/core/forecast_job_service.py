@@ -1,6 +1,9 @@
 """
 Forecast Job Service - Manages async forecast execution and job tracking.
 Handles job status, results storage, and background execution.
+
+UPDATED: selected_metrics now surfaced in get_job_status, get_user_jobs,
+         and get_forecast_results responses.
 """
 
 import uuid
@@ -39,20 +42,20 @@ class ForecastJobService:
     ) -> Dict[str, Any]:
         """
         Create a new forecast job record.
-        
+
         Args:
             tenant_id: Tenant identifier
             database_name: Database name for tenant
             request_data: The forecast request data
             user_email: Email of user who initiated the job
-        
+
         Returns:
             Job details including job_id
         """
         db_manager = get_db_manager()
         job_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc)
-        
+
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 with conn.cursor() as cursor:
@@ -73,9 +76,8 @@ class ForecastJobService:
                             updated_at TIMESTAMP NOT NULL
                         )
                     """)
-                    
                     cursor.execute("""
-                        INSERT INTO forecast_jobs 
+                        INSERT INTO forecast_jobs
                         (job_id, tenant_id, status, request_data, selected_metrics, created_at, created_by, updated_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
@@ -83,22 +85,18 @@ class ForecastJobService:
                         tenant_id,
                         JobStatus.PENDING.value,
                         json.dumps(request_data, default=str),
-                        request_data.get('selected_metrics', ['mape', 'accuracy']),  #   Extract and store
+                        request_data.get('selected_metrics', ['mape', 'accuracy']),
                         created_at,
                         user_email,
                         created_at
                     ))
-                                        
                     conn.commit()
-            
             logger.info(f"Created forecast job {job_id} for tenant {tenant_id}")
-            
             return {
                 "job_id": job_id,
                 "status": JobStatus.PENDING.value,
                 "created_at": created_at.isoformat()
             }
-        
         except Exception as e:
             logger.error(f"Failed to create forecast job: {str(e)}", exc_info=True)
             raise
@@ -111,60 +109,67 @@ class ForecastJobService:
     ) -> Dict[str, Any]:
         """
         Get the current status and details of a forecast job.
-        
+
         Args:
             tenant_id: Tenant identifier
             database_name: Database name for tenant
             job_id: Job identifier
-        
+
         Returns:
-            Job details including status and results if completed
+            Job details including status, results if completed,
+            and selected_metrics (resolved — never 'auto').
         """
         db_manager = get_db_manager()
-        
+
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT 
-                            job_id, 
-                            status, 
-                            result_data, 
-                            error_message, 
-                            created_at, 
-                            started_at, 
+                        SELECT
+                            job_id,
+                            status,
+                            result_data,
+                            error_message,
+                            selected_metrics,
+                            created_at,
+                            started_at,
                             completed_at
                         FROM forecast_jobs
                         WHERE job_id = %s AND tenant_id = %s
                     """, (job_id, tenant_id))
-                    
+
                     row = cursor.fetchone()
-                    
+
                     if not row:
                         return {
                             "job_id": job_id,
                             "status": "not_found",
                             "error": "Job not found"
                         }
-                    
-                    job_id, status, result_data, error_msg, created_at, started_at, completed_at = row
-                    
+
+                    (
+                        job_id_val, status, result_data, error_msg,
+                        selected_metrics, created_at, started_at, completed_at
+                    ) = row
+
                     response = {
-                        "job_id": str(job_id),
+                        "job_id": str(job_id_val),
                         "status": status,
+                        # Always show the resolved metrics (auto is already resolved before job creation)
+                        "selected_metrics": selected_metrics or ['mape', 'accuracy'],
                         "created_at": created_at.isoformat() if created_at else None,
                         "started_at": started_at.isoformat() if started_at else None,
-                        "completed_at": completed_at.isoformat() if completed_at else None
+                        "completed_at": completed_at.isoformat() if completed_at else None,
                     }
-                    
+
                     if result_data:
                         response["result"] = result_data
-                    
+
                     if error_msg:
                         response["error"] = error_msg
-                    
+
                     return response
-        
+
         except Exception as e:
             logger.error(f"Failed to get job status: {str(e)}", exc_info=True)
             raise
@@ -178,6 +183,9 @@ class ForecastJobService:
         """
         Get forecast results for a job ID by combining job result data and
         forecast results from the database.
+
+        Returns selected_metrics so the caller knows which metric was used
+        to evaluate and select algorithms.
         """
         db_manager = get_db_manager()
 
@@ -185,7 +193,7 @@ class ForecastJobService:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT result_data
+                    SELECT result_data, selected_metrics
                     FROM forecast_jobs
                     WHERE job_id = %s AND tenant_id = %s
                     """,
@@ -196,7 +204,8 @@ class ForecastJobService:
         if not row:
             raise NotFoundException("forecast_job", job_id)
 
-        result_data = row[0]
+        result_data, selected_metrics = row
+
         if not result_data:
             raise NotFoundException("forecast_results", job_id)
 
@@ -235,16 +244,15 @@ class ForecastJobService:
                             mapping_ids_by_run.setdefault(run_id, str(mapping_id))
                         if not result_type:
                             continue
-                        
+
                         result_item = {
                             "date": date.isoformat() if date else None,
                             "quantity": float(value) if value is not None else None
                         }
-                        
-                        # Include accuracy metrics if available in metadata
+
                         if metadata and isinstance(metadata, dict) and 'test_metrics' in metadata:
                             result_item["metrics"] = metadata['test_metrics']
-                        
+
                         results_by_run_type.setdefault(run_id, {}).setdefault(
                             result_type, []
                         ).append(result_item)
@@ -265,6 +273,8 @@ class ForecastJobService:
 
         return {
             "job_id": job_id,
+            # Surface the resolved metrics alongside results
+            "selected_metrics": selected_metrics or ['mape', 'accuracy'],
             "results": results
         }
 
@@ -637,7 +647,7 @@ class ForecastJobService:
     ) -> None:
         """
         Update job status and optionally store results.
-        
+
         Args:
             tenant_id: Tenant identifier
             database_name: Database name for tenant
@@ -648,21 +658,15 @@ class ForecastJobService:
             **kwargs: Additional arguments (e.g., metadata)
         """
         db_manager = get_db_manager()
-        
+
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 with conn.cursor() as cursor:
                     updated_at = datetime.utcnow()
-                    
-                    # Determine started_at and completed_at based on status
-                    started_at = None
-                    completed_at = None
-                    
+
                     if status == JobStatus.RUNNING:
-                        # Check if metadata is provided
                         metadata = kwargs.get('metadata')
                         if metadata:
-                            # Store metadata in result_data for RUNNING state
                             result_json = json.dumps(metadata, default=str)
                             cursor.execute("""
                                 UPDATE forecast_jobs
@@ -675,12 +679,12 @@ class ForecastJobService:
                                 SET status = %s, started_at = %s, updated_at = %s
                                 WHERE job_id = %s AND tenant_id = %s
                             """, (status.value, updated_at, updated_at, job_id, tenant_id))
-                    
+
                     elif status in [JobStatus.COMPLETED, JobStatus.FAILED]:
                         result_json = json.dumps(result_data, default=str) if result_data else None
                         cursor.execute("""
                             UPDATE forecast_jobs
-                            SET status = %s, result_data = %s, error_message = %s, 
+                            SET status = %s, result_data = %s, error_message = %s,
                                 completed_at = %s, updated_at = %s
                             WHERE job_id = %s AND tenant_id = %s
                         """, (
@@ -692,18 +696,18 @@ class ForecastJobService:
                             job_id,
                             tenant_id
                         ))
-                    
+
                     else:
                         cursor.execute("""
                             UPDATE forecast_jobs
                             SET status = %s, updated_at = %s
                             WHERE job_id = %s AND tenant_id = %s
                         """, (status.value, updated_at, job_id, tenant_id))
-                    
+
                     conn.commit()
-            
+
             logger.info(f"Updated forecast job {job_id} status to {status.value}")
-        
+
         except Exception as e:
             logger.error(f"Failed to update job status: {str(e)}", exc_info=True)
             raise
@@ -716,14 +720,6 @@ class ForecastJobService:
     ) -> bool:
         """
         Check if there's a running job with the same forecast parameters.
-
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Database name for tenant
-            new_request_data: The new forecast request data
-
-        Returns:
-            True if duplicate running job found, False otherwise
         """
         db_manager = get_db_manager()
 
@@ -741,7 +737,6 @@ class ForecastJobService:
                     for row in rows:
                         existing_request_data = row[0]
 
-                        # Compare key fields that determine the forecast sub-items
                         if (existing_request_data.get('forecast_filters') == new_request_data.get('forecast_filters') and
                             existing_request_data.get('forecast_start') == new_request_data.get('forecast_start') and
                             existing_request_data.get('forecast_end') == new_request_data.get('forecast_end') and
@@ -752,7 +747,7 @@ class ForecastJobService:
 
         except Exception as e:
             logger.error(f"Failed to check for duplicate running job: {str(e)}", exc_info=True)
-            return False  # On error, allow creation to avoid blocking
+            return False
 
     @staticmethod
     def get_user_jobs(
@@ -766,18 +761,12 @@ class ForecastJobService:
     ) -> list:
         """
         Get all forecast jobs for a specific user.
-        
-        Args:
-            tenant_id: Tenant identifier
-            database_name: Database name for tenant
-            user_email: User email
-            limit: Maximum number of jobs to return
-        
-        Returns:
-            List of job summaries
+
+        Returns selected_metrics in each job summary so the caller knows
+        which metric was resolved and used (never 'auto').
         """
         db_manager = get_db_manager()
-        
+
         try:
             with db_manager.get_tenant_connection(database_name) as conn:
                 with conn.cursor() as cursor:
@@ -795,26 +784,27 @@ class ForecastJobService:
                     params.append(limit)
 
                     cursor.execute(f"""
-                        SELECT 
-                            job_id, 
-                            status, 
+                        SELECT
+                            job_id,
+                            status,
                             request_data,
-                            created_at, 
-                            started_at, 
+                            selected_metrics,
+                            created_at,
+                            started_at,
                             completed_at
                         FROM forecast_jobs
                         WHERE {where_sql}
                         ORDER BY created_at DESC
                         LIMIT %s
                     """, params)
-                    
+
                     rows = cursor.fetchall()
-                    
+
                     algorithm_ids = set()
                     raw_rows = []
-                    for job_id, status, request_data, created_at, started_at, completed_at in rows:
+                    for job_id, status, request_data, selected_metrics, created_at, started_at, completed_at in rows:
                         raw_rows.append(
-                            (job_id, status, request_data, created_at, started_at, completed_at)
+                            (job_id, status, request_data, selected_metrics, created_at, started_at, completed_at)
                         )
                         if isinstance(request_data, dict):
                             algo_id = request_data.get("algorithm_id")
@@ -854,7 +844,8 @@ class ForecastJobService:
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
                         return dt.astimezone(target_tz).isoformat()
-                    for job_id, status, request_data, created_at, started_at, completed_at in raw_rows:
+
+                    for job_id, status, request_data, selected_metrics, created_at, started_at, completed_at in raw_rows:
                         request_payload = request_data
                         if isinstance(request_payload, dict):
                             algo_id = request_payload.get("algorithm_id")
@@ -880,17 +871,20 @@ class ForecastJobService:
                                 if updated_algorithms:
                                     request_payload = dict(request_payload)
                                     request_payload["algorithms"] = updated_algorithms
+
                         jobs.append({
                             "job_id": str(job_id),
-                            "status": status,   
+                            "status": status,
                             "request_data": request_payload,
+                            # Resolved metrics stored at job creation time (never 'auto')
+                            "selected_metrics": selected_metrics or ['mape', 'accuracy'],
                             "created_at": to_tz(created_at),
                             "started_at": to_tz(started_at),
                             "completed_at": to_tz(completed_at)
                         })
-                    
+
                     return jobs
-        
+
         except Exception as e:
             logger.error(f"Failed to get user jobs: {str(e)}", exc_info=True)
             return []

@@ -354,9 +354,9 @@ class DisaggregationService:
         dynamically loads all planning tables registered in dynamic_tables metadata.
 
         Ratio logic per table type:
-        - forecast_data  → ratios calculated from sales_data
+        - forecast_data  ->  ratios calculated from sales_data
         - every dynamic table (final_plan, product_manager, any custom table)
-                         → ratios calculated from that same table's own data
+                         ->  ratios calculated from that same table's own data
 
         FIX: user_email param added so audit trail records real user, not 'system'.
         FIX: existing_tables set computed once to avoid 3x duplicate information_schema

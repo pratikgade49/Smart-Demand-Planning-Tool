@@ -42,6 +42,125 @@ class ForecastExecutionService:
     """Service for executing forecast algorithms and storing results."""
 
     @staticmethod
+    def _analyze_and_select_metrics(historical_data) -> list:
+        """
+        Analyse historical data characteristics and automatically select
+        the most appropriate evaluation metric(s).
+
+        Decision rules (applied in priority order):
+          1. >5% zero values          -> avoid MAPE (div-by-zero)  -> ['mae', 'accuracy']
+          2. >10% outliers (3-sigma)  -> MAE is more robust        -> ['mae', 'accuracy']
+          3. CV (std/mean) > 0.5      -> high volatility            -> ['mae', 'accuracy']
+          4. n < 12 (short series)    -> simple metric              -> ['mape', 'accuracy']
+          5. abs(Skewness) > 1.5      -> skewed data (either dir)   -> ['mae', 'accuracy']
+          6. Otherwise                -> stable data (default)      -> ['mape', 'accuracy']
+
+        Args:
+            historical_data: pd.DataFrame with 'total_quantity' or 'quantity' column.
+
+        Returns:
+            List of concrete metric strings, e.g. ['mae', 'accuracy'].
+        """
+        try:
+            if 'total_quantity' in historical_data.columns:
+                y = historical_data['total_quantity'].dropna().values.astype(float)
+            elif 'quantity' in historical_data.columns:
+                y = historical_data['quantity'].dropna().values.astype(float)
+            else:
+                logger.warning("Auto metric: no quantity column found -> mape+accuracy")
+                return ['mape', 'accuracy']
+
+            n = len(y)
+            if n == 0:
+                logger.warning("Auto metric: empty series -> mape+accuracy")
+                return ['mape', 'accuracy']
+
+            mean_val   = float(np.mean(y))
+            std_val    = float(np.std(y))
+            zero_ratio = float(np.sum(y == 0) / n)
+            cv         = (std_val / mean_val) if mean_val > 0 else float('inf')
+
+            if std_val > 0:
+                outlier_ratio = float(np.sum(np.abs(y - mean_val) > 3 * std_val) / n)
+            else:
+                outlier_ratio = 0.0
+
+            skewness = (
+                float(np.mean((y - mean_val) ** 3) / (std_val ** 3))
+                if std_val > 0 and n >= 3
+                else 0.0
+            )
+
+            logger.info(
+                f"Auto metric analysis -> n={n}, zero_ratio={zero_ratio:.3f}, "
+                f"cv={cv:.3f}, outlier_ratio={outlier_ratio:.3f}, skewness={skewness:.3f}"
+            )
+
+            # Rule 1: significant zeros -> MAE
+            if zero_ratio > 0.05:
+                logger.info(
+                    f"Auto metric: {zero_ratio:.1%} zeros -> MAE (avoids MAPE div-by-zero)"
+                )
+                return ['mae', 'accuracy']
+
+            # Rule 2: many outliers -> MAE
+            if outlier_ratio > 0.10:
+                logger.info(
+                    f"Auto metric: {outlier_ratio:.1%} outliers -> MAE (robust)"
+                )
+                return ['mae', 'accuracy']
+
+            # Rule 3: high volatility -> MAE
+            if cv > 0.5:
+                logger.info(
+                    f"Auto metric: high volatility CV={cv:.2f} -> MAE"
+                )
+                return ['mae', 'accuracy']
+
+            # Rule 4: short series -> MAPE (simple & interpretable)
+            if n < 12:
+                logger.info(
+                    f"Auto metric: short series (n={n}) -> MAPE + accuracy"
+                )
+                return ['mape', 'accuracy']
+
+            # Rule 5: strongly skewed in either direction -> MAE
+            # abs() used because both left & right skew distort MAPE equally
+            if abs(skewness) > 1.5:
+                logger.info(
+                    f"Auto metric: skewed data (skewness={skewness:.2f}) -> MAE"
+                )
+                return ['mae', 'accuracy']
+
+            # Rule 6: stable, well-behaved data -> default
+            logger.info("Auto metric: stable data -> MAPE + accuracy (default)")
+            return ['mape', 'accuracy']
+
+        except Exception as e:
+            logger.error(f"Auto metric analysis failed: {e} -> defaulting to mape+accuracy")
+            return ['mape', 'accuracy']
+
+    @staticmethod
+    def resolve_auto_metrics(selected_metrics: list, historical_data) -> list:
+        """
+        If 'auto' is in selected_metrics, replace it with data-driven metric selection.
+        Otherwise return selected_metrics unchanged.
+
+        Args:
+            selected_metrics: List from request (may contain 'auto').
+            historical_data:  pd.DataFrame used to analyse data characteristics.
+
+        Returns:
+            Resolved list of concrete metric names (never contains 'auto').
+        """
+        if 'auto' not in selected_metrics:
+            return selected_metrics
+
+        resolved = ForecastExecutionService._analyze_and_select_metrics(historical_data)
+        logger.info(f"resolve_auto_metrics: 'auto' -> {resolved}")
+        return resolved
+
+    @staticmethod
     def validate_algorithm_parameters(algorithm_id: int, custom_params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Centralized parameter validation for all forecasting algorithms.

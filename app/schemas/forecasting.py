@@ -3,6 +3,7 @@ Updated app/schemas/forecasting.py
 
 Changes:
 - ForecastResultResponse now uses date, value, type instead of forecast_date, forecast_quantity
+- Added 'auto' as a valid metric option in selected_metrics
 """
 
 from pydantic import BaseModel, Field, validator
@@ -69,7 +70,12 @@ class ForecastRunCreate(BaseModel):
     history_end: Optional[str] = Field(None, description="End date of historic data to use (YYYY-MM-DD)")
     selected_metrics: Optional[List[str]] = Field(
         None,
-        description="List of accuracy metrics to calculate. Options: mae, rmse, mape, accuracy. Default: ['mape', 'accuracy']",
+        description=(
+            "List of accuracy metrics to calculate. "
+            "Options: mae, rmse, mape, accuracy, auto. "
+            "Use 'auto' (alone) to let the system choose the best metric based on data characteristics. "
+            "Default: ['mape', 'accuracy']"
+        ),
         min_items=1
     )
 
@@ -78,10 +84,23 @@ class ForecastRunCreate(BaseModel):
     @validator('selected_metrics')
     def validate_selected_metrics(cls, v):
         if v is not None:
+            # 'auto' must be used alone
+            if 'auto' in v:
+                if len(v) > 1:
+                    raise ValueError(
+                        "'auto' cannot be combined with other metrics. "
+                        "Use ['auto'] alone to let the system decide."
+                    )
+                # Valid: ['auto'] by itself
+                return v
+
             valid_metrics = {'mae', 'rmse', 'mape', 'accuracy'}
             invalid_metrics = set(v) - valid_metrics
             if invalid_metrics:
-                raise ValueError(f"Invalid metrics: {invalid_metrics}. Valid options: {valid_metrics}")
+                raise ValueError(
+                    f"Invalid metrics: {invalid_metrics}. "
+                    f"Valid options: {valid_metrics | {'auto'}}"
+                )
         return v
 
 
