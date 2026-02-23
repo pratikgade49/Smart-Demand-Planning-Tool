@@ -355,9 +355,7 @@ def _process_entity_forecast(
                 # Get primary metric value
                 primary_metric_value = algo_metrics.get(primary_metric)
                 if primary_metric_value is not None:
-                    #   Apply safety capping for accuracy_metric DECIMAL(18, 4)
-                    primary_metric_value = min(999999999999.99, max(-999999999999.99, float(primary_metric_value)))
-                    primary_metric_value = round(float(primary_metric_value), 4)
+                    primary_metric_value = round(float(primary_metric_value), 2)
 
                 # 2. Insert testing_forecast records
                 for test_date, forecast_value in zip(test_dates, test_forecasts):

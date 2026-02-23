@@ -25,6 +25,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 
+def _build_entity_label(entity_filter: dict, aggregation_level: str) -> str:
+    """Build a label for an entity that matches the label from forecasting_routes._combo_label."""
+    dimensions = [dim.strip() for dim in aggregation_level.split('-')]
+    parts = []
+    for dim in dimensions:
+        val = entity_filter.get(dim)
+        if val:
+            parts.append(f"{dim}={val[0] if isinstance(val, list) else val}")
+    return '-'.join(parts) if parts else 'unknown'
+
+
 class BackgroundForecastExecutor:
     """Executes forecast jobs in the background with resource monitoring."""
 
@@ -172,13 +183,24 @@ class BackgroundForecastExecutor:
                 
                 modified_request = ModifiedRequest(request_data)
                 
+                # Get per-entity metrics mapping (if available) for 'auto' metric selection
+                per_entity_metrics = request_data.get('selected_metrics_per_entity', None)
+                
                 # Execute in parallel with monitoring
                 db_manager = get_db_manager()
                 max_workers = min(len(entity_combinations), settings.NUMBER_OF_THREADS)
                 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_entity = {
-                        executor.submit(
+                    future_to_entity = {}
+                    for entity_filter in entity_combinations:
+                        # Determine metrics for this specific entity
+                        if per_entity_metrics:
+                            entity_label = _build_entity_label(entity_filter, aggregation_level)
+                            entity_metrics = per_entity_metrics.get(entity_label, ['mape', 'accuracy'])
+                        else:
+                            entity_metrics = request_data.get('selected_metrics', ['mape', 'accuracy'])
+                        
+                        future = executor.submit(
                             _process_entity_forecast,
                             entity_filter,
                             tenant_data,
@@ -192,10 +214,10 @@ class BackgroundForecastExecutor:
                             forecast_dates,
                             algorithms_to_execute,
                             db_manager,
-                            external_factors_df,  # Pass pre-loaded factors
-                            request_data.get('selected_metrics', ['mape', 'accuracy'])  # Pass selected_metrics
-                        ): entity_filter for entity_filter in entity_combinations
-                    }
+                            external_factors_df,
+                            entity_metrics
+                        )
+                        future_to_entity[future] = entity_filter
                     
                     for future in as_completed(future_to_entity):
                         entity_filter = future_to_entity[future]

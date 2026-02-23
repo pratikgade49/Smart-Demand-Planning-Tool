@@ -55,7 +55,7 @@ class DirectForecastExecutionRequest(BaseModel):
     algorithms: Optional[List[Dict[str, Any]]] = None
 
 
-def _resolve_auto_metrics_from_request(request_data: dict, tenant_data: dict) -> list:
+def _resolve_auto_metrics_from_request(request_data: dict, tenant_data: dict) -> dict:
 
     from app.core.forecast_execution_service import ForecastExecutionService
     from app.core.aggregation_service import AggregationService
@@ -63,20 +63,18 @@ def _resolve_auto_metrics_from_request(request_data: dict, tenant_data: dict) ->
     selected_metrics = request_data.get('selected_metrics') or ['mape', 'accuracy']
 
     if 'auto' not in selected_metrics:
-        return selected_metrics
+        return {'_global': selected_metrics}
 
-    logger.info("Auto metric selected - analysing historical data per combination")
+    logger.info("Auto metric selected - analysing historical data per entity")
 
     try:
         filters = request_data.get('forecast_filters') or {}
         aggregation_level = filters.get('aggregation_level', 'product')
         interval = filters.get('interval', 'MONTHLY')
 
-        # Build one filter dict per combination so each is analysed independently
         filter_combinations = _build_filter_combinations(filters, aggregation_level)
 
-        mae_votes = 0
-        mape_votes = 0
+        per_entity_metrics = {}
 
         for i, combo_filters in enumerate(filter_combinations):
             try:
@@ -89,41 +87,41 @@ def _resolve_auto_metrics_from_request(request_data: dict, tenant_data: dict) ->
                 )
 
                 if historical_data is None or (hasattr(historical_data, '__len__') and len(historical_data) == 0):
-                    logger.warning(f"Auto metric combo {i+1}: no data, skipping vote")
+                    logger.warning(f"Auto metric combo {i+1}: no data, skipping analysis")
                     continue
 
                 if isinstance(historical_data, tuple):
                     historical_data = historical_data[0]
 
                 result = ForecastExecutionService._analyze_and_select_metrics(historical_data)
-
                 label = _combo_label(combo_filters, aggregation_level)
-                if 'mae' in result:
-                    mae_votes += 1
-                    logger.info(f"Auto metric combo {i+1}/{len(filter_combinations)} ({label}): voted MAE")
-                else:
-                    mape_votes += 1
-                    logger.info(f"Auto metric combo {i+1}/{len(filter_combinations)} ({label}): voted MAPE")
+                primary = result[0] if result else 'mape'
+                metrics_for_entity = [primary, 'accuracy']
+
+                per_entity_metrics[label] = metrics_for_entity
+                
+                logger.info(
+                    f"Auto metric combo {i+1}/{len(filter_combinations)} "
+                    f"({label}): selected {metrics_for_entity}"
+                )
 
             except Exception as combo_err:
-                logger.warning(f"Auto metric combo {i+1}: analysis failed ({combo_err}), skipping vote")
+                logger.warning(f"Auto metric combo {i+1}: analysis failed ({combo_err}), using default")
+                label = _combo_label(combo_filters, aggregation_level)
+                per_entity_metrics[label] = ['mape', 'accuracy']
 
-        # Majority vote -- ties go to MAE (conservative)
-        total_votes = mae_votes + mape_votes
-        if total_votes == 0:
-            logger.warning("Auto metric: no votes cast, defaulting to mape+accuracy")
-            return ['mape', 'accuracy']
+        if not per_entity_metrics:
+            logger.warning("Auto metric: no entities analysed, using global default")
+            return {'_global': ['mape', 'accuracy']}
 
-        resolved = ['mae', 'accuracy'] if mae_votes >= mape_votes else ['mape', 'accuracy']
         logger.info(
-            f"Auto metric vote result: MAE={mae_votes}, MAPE={mape_votes} "
-            f"({total_votes} combinations) -> {resolved[0].upper()}"
+            f"Auto metric selection complete: {len(per_entity_metrics)} entities mapped to their best metrics"
         )
-        return resolved
+        return per_entity_metrics
 
     except Exception as e:
-        logger.error(f"Auto metric resolution failed: {str(e)}, defaulting to mape+accuracy")
-        return ['mape', 'accuracy']
+        logger.error(f"Auto metric resolution failed: {str(e)}, defaulting to global mape+accuracy")
+        return {'_global': ['mape', 'accuracy']}
 
 
 def _build_filter_combinations(filters: dict, aggregation_level: str) -> list:
@@ -223,18 +221,29 @@ async def execute_forecast_async(
         # AUTO METRIC RESOLUTION
         # If user passed ["auto"], analyse data and resolve to real metrics
         # before any further processing or job creation.
+        # Returns either:
+        #   - {'_global': [...]} for non-auto or fallback case (backward compat)
+        #   - {'entity_label': [...], 'entity_label2': [...], ...} for per-entity metrics
         # ----------------------------------------------------------------
         original_metrics = request_data_dict.get('selected_metrics', [])
         if 'auto' in original_metrics:
-            resolved_metrics = _resolve_auto_metrics_from_request(
+            metrics_dict = _resolve_auto_metrics_from_request(
                 request_data_dict, tenant_data
             )
-            request_data_dict['selected_metrics'] = resolved_metrics
+            if '_global' in metrics_dict:
+                request_data_dict['selected_metrics'] = metrics_dict['_global']
+                request_data_dict['selected_metrics_per_entity'] = None
+                resolved_metrics = metrics_dict['_global']
+            else:
+                request_data_dict['selected_metrics_per_entity'] = metrics_dict
+                request_data_dict['selected_metrics'] = ['mape', 'accuracy']
+                resolved_metrics = metrics_dict
             logger.info(
                 f"Auto metric selection complete: {original_metrics} -> {resolved_metrics}"
             )
         else:
             resolved_metrics = original_metrics
+            request_data_dict['selected_metrics_per_entity'] = None
 
         # Validate algorithm parameters before creating job
         algorithms_to_validate = []

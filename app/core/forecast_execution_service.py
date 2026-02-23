@@ -48,18 +48,54 @@ class ForecastExecutionService:
         the most appropriate evaluation metric(s).
 
         Decision rules (applied in priority order):
-          1. >5% zero values          -> avoid MAPE (div-by-zero)  -> ['mae', 'accuracy']
-          2. >10% outliers (3-sigma)  -> MAE is more robust        -> ['mae', 'accuracy']
-          3. CV (std/mean) > 0.5      -> high volatility            -> ['mae', 'accuracy']
-          4. n < 12 (short series)    -> simple metric              -> ['mape', 'accuracy']
-          5. abs(Skewness) > 1.5      -> skewed data (either dir)   -> ['mae', 'accuracy']
-          6. Otherwise                -> stable data (default)      -> ['mape', 'accuracy']
+
+        0. mean < 50 AND cv < 0.5
+                -> small absolute values, MAPE too noisy on tiny numbers
+                -> ['mae', 'accuracy']
+
+        1. >5% zero values
+                -> MAPE undefined / misleading (div-by-zero risk)
+                -> ['mae', 'accuracy']
+
+        2. >10% outliers (3-sigma)
+                rmse/mae > 1.5   -> large sporadic spikes, penalise heavily
+                                -> ['rmse', 'accuracy']
+                rmse/mae <= 1.5  -> uniform errors, need robustness
+                                -> ['mae', 'accuracy']
+
+        3a. CV > 1.0  (truly high volatility)
+                rmse/mae > 1.5   -> volatile WITH big spikes
+                                -> ['rmse', 'accuracy']
+                rmse/mae <= 1.5  -> volatile but uniform errors
+                                -> ['mae', 'accuracy']
+
+        3b. CV > 0.5  (moderate volatility — real-world demand data commonly falls here)
+                rmse/mae > 1.5   -> moderate volatility with big spikes
+                                -> ['rmse', 'accuracy']
+                abs(skewness) > 1.0  -> moderately volatile AND skewed
+                                -> ['mae', 'accuracy']
+                else              -> not truly problematic, fall through to later rules
+
+        4. n < 12  (short series)
+                -> not enough data for reliable stats, keep it simple
+                -> ['mape', 'accuracy']
+
+        5. abs(skewness) > 1.5  (strongly skewed in either direction)
+                -> skewed data distorts MAPE equally left or right
+                -> ['mae', 'accuracy']
+
+        6. Default (stable, well-behaved data)
+                rmse/mae > 1.5   -> occasional large errors even in stable series
+                                -> ['rmse', 'accuracy']
+                else              -> truly stable, percentage errors meaningful
+                                -> ['mape', 'accuracy']
 
         Args:
             historical_data: pd.DataFrame with 'total_quantity' or 'quantity' column.
 
         Returns:
-            List of concrete metric strings, e.g. ['mae', 'accuracy'].
+            List of concrete metric strings e.g. ['mape', 'accuracy'].
+            Never returns ['auto'].
         """
         try:
             if 'total_quantity' in historical_data.columns:
@@ -75,10 +111,10 @@ class ForecastExecutionService:
                 logger.warning("Auto metric: empty series -> mape+accuracy")
                 return ['mape', 'accuracy']
 
-            mean_val   = float(np.mean(y))
-            std_val    = float(np.std(y))
-            zero_ratio = float(np.sum(y == 0) / n)
-            cv         = (std_val / mean_val) if mean_val > 0 else float('inf')
+            mean_val      = float(np.mean(y))
+            std_val       = float(np.std(y))
+            zero_ratio    = float(np.sum(y == 0) / n)
+            cv            = (std_val / mean_val) if mean_val > 0 else float('inf')
 
             if std_val > 0:
                 outlier_ratio = float(np.sum(np.abs(y - mean_val) > 3 * std_val) / n)
@@ -91,54 +127,170 @@ class ForecastExecutionService:
                 else 0.0
             )
 
+            # ----------------------------------------------------------------
+            # RMSE/MAE ratio — 2 extra numpy ops, negligible cost.
+            # Ratio ~1.0-1.25 -> errors are uniform (normal-like distribution)
+            # Ratio  > 1.5    -> large sporadic spikes dominate
+            # ----------------------------------------------------------------
+            abs_errors     = np.abs(y - mean_val)
+            mae_val        = float(np.mean(abs_errors))
+            rmse_val       = float(np.sqrt(np.mean((y - mean_val) ** 2)))
+            rmse_mae_ratio = (rmse_val / mae_val) if mae_val > 0 else 1.0
+
             logger.info(
-                f"Auto metric analysis -> n={n}, zero_ratio={zero_ratio:.3f}, "
-                f"cv={cv:.3f}, outlier_ratio={outlier_ratio:.3f}, skewness={skewness:.3f}"
+                f"Auto metric analysis -> n={n}, mean={mean_val:.3f}, "
+                f"zero_ratio={zero_ratio:.3f}, cv={cv:.3f}, "
+                f"outlier_ratio={outlier_ratio:.3f}, skewness={skewness:.3f}, "
+                f"mae={mae_val:.3f}, rmse={rmse_val:.3f}, "
+                f"rmse/mae_ratio={rmse_mae_ratio:.3f}"
             )
 
-            # Rule 1: significant zeros -> MAE
+            # ----------------------------------------------------------------
+            # Rule 0: Small absolute scale
+            # When mean < 50 and data is stable (cv < 0.5), MAPE is too
+            # sensitive — e.g. error of 2 on value 10 = 20% MAPE.
+            # MAE is more meaningful at this scale.
+            # The cv < 0.5 guard ensures volatile low-value series fall
+            # through to Rule 3a/3b where they belong.
+            # ----------------------------------------------------------------
+            SMALL_VALUE_THRESHOLD = 50
+
+            if mean_val > 0 and mean_val < SMALL_VALUE_THRESHOLD and cv < 0.5:
+                logger.info(
+                    f"Auto metric: small absolute scale "
+                    f"(mean={mean_val:.2f} < {SMALL_VALUE_THRESHOLD}, CV={cv:.2f}) "
+                    f"-> MAE (MAPE too sensitive on small values)"
+                )
+                return ['mae', 'accuracy']
+
+            # ----------------------------------------------------------------
+            # Rule 1: Significant zeros -> MAE
+            # MAPE is undefined / misleading when actuals contain zeros.
+            # ----------------------------------------------------------------
             if zero_ratio > 0.05:
                 logger.info(
-                    f"Auto metric: {zero_ratio:.1%} zeros -> MAE (avoids MAPE div-by-zero)"
+                    f"Auto metric: {zero_ratio:.1%} zeros "
+                    f"-> MAE (avoids MAPE div-by-zero)"
                 )
                 return ['mae', 'accuracy']
 
-            # Rule 2: many outliers -> MAE
+            # ----------------------------------------------------------------
+            # Rule 2: Many outliers (>10% of points beyond 3 sigma)
+            # Check RMSE/MAE ratio to distinguish between:
+            #   - large sporadic spikes (ratio high) -> RMSE penalises heavily
+            #   - uniform errors with some outliers   -> MAE for robustness
+            # ----------------------------------------------------------------
             if outlier_ratio > 0.10:
-                logger.info(
-                    f"Auto metric: {outlier_ratio:.1%} outliers -> MAE (robust)"
-                )
-                return ['mae', 'accuracy']
+                if rmse_mae_ratio > 1.5:
+                    logger.info(
+                        f"Auto metric: {outlier_ratio:.1%} outliers "
+                        f"with high rmse/mae={rmse_mae_ratio:.2f} "
+                        f"-> RMSE (large sporadic spikes, penalise heavily)"
+                    )
+                    return ['rmse', 'accuracy']
+                else:
+                    logger.info(
+                        f"Auto metric: {outlier_ratio:.1%} outliers "
+                        f"with uniform rmse/mae={rmse_mae_ratio:.2f} "
+                        f"-> MAE (robust to outliers)"
+                    )
+                    return ['mae', 'accuracy']
 
-            # Rule 3: high volatility -> MAE
+            # ----------------------------------------------------------------
+            # Rule 3a: Truly high volatility (CV > 1.0)
+            # CV > 1.0 means std exceeds the mean — genuinely erratic data.
+            # Most real-world demand data does NOT reach this level.
+            # ----------------------------------------------------------------
+            if cv > 1.0:
+                if rmse_mae_ratio > 1.5:
+                    logger.info(
+                        f"Auto metric: truly high volatility CV={cv:.2f} "
+                        f"with high rmse/mae={rmse_mae_ratio:.2f} "
+                        f"-> RMSE (volatile with large spikes)"
+                    )
+                    return ['rmse', 'accuracy']
+                else:
+                    logger.info(
+                        f"Auto metric: truly high volatility CV={cv:.2f} "
+                        f"with uniform rmse/mae={rmse_mae_ratio:.2f} "
+                        f"-> MAE"
+                    )
+                    return ['mae', 'accuracy']
+
+            # ----------------------------------------------------------------
+            # Rule 3b: Moderate volatility (0.5 < CV <= 1.0)
+            # Real-world demand data commonly falls in this band.
+            # Don't immediately return MAE — only do so if there is an
+            # additional signal (large spikes OR meaningful skewness).
+            # Otherwise fall through to later rules.
+            # ----------------------------------------------------------------
             if cv > 0.5:
-                logger.info(
-                    f"Auto metric: high volatility CV={cv:.2f} -> MAE"
-                )
-                return ['mae', 'accuracy']
+                if rmse_mae_ratio > 1.5:
+                    logger.info(
+                        f"Auto metric: moderate volatility CV={cv:.2f} "
+                        f"with high rmse/mae={rmse_mae_ratio:.2f} "
+                        f"-> RMSE (moderate volatility with large spikes)"
+                    )
+                    return ['rmse', 'accuracy']
+                elif abs(skewness) > 1.0:
+                    logger.info(
+                        f"Auto metric: moderate volatility CV={cv:.2f} "
+                        f"with skewness={skewness:.2f} "
+                        f"-> MAE (moderately volatile and skewed)"
+                    )
+                    return ['mae', 'accuracy']
+                else:
+                    # Not truly problematic — fall through to Rules 4, 5, 6
+                    logger.info(
+                        f"Auto metric: moderate volatility CV={cv:.2f} "
+                        f"but rmse/mae={rmse_mae_ratio:.2f} and "
+                        f"skewness={skewness:.2f} are within acceptable range "
+                        f"-> falling through to later rules"
+                    )
 
-            # Rule 4: short series -> MAPE (simple & interpretable)
+            # ----------------------------------------------------------------
+            # Rule 4: Short series (n < 12)
+            # Not enough data for reliable statistical conclusions.
+            # MAPE is simple and interpretable for short series.
+            # ----------------------------------------------------------------
             if n < 12:
                 logger.info(
                     f"Auto metric: short series (n={n}) -> MAPE + accuracy"
                 )
                 return ['mape', 'accuracy']
 
-            # Rule 5: strongly skewed in either direction -> MAE
-            # abs() used because both left & right skew distort MAPE equally
+            # ----------------------------------------------------------------
+            # Rule 5: Strongly skewed in either direction (abs skewness > 1.5)
+            # Both left and right skew distort MAPE equally.
+            # ----------------------------------------------------------------
             if abs(skewness) > 1.5:
                 logger.info(
                     f"Auto metric: skewed data (skewness={skewness:.2f}) -> MAE"
                 )
                 return ['mae', 'accuracy']
 
-            # Rule 6: stable, well-behaved data -> default
-            logger.info("Auto metric: stable data -> MAPE + accuracy (default)")
+            # ----------------------------------------------------------------
+            # Rule 6: Stable, well-behaved data (default)
+            # Even stable series can have occasional large errors — check
+            # RMSE/MAE ratio one final time before defaulting to MAPE.
+            # ----------------------------------------------------------------
+            if rmse_mae_ratio > 1.5:
+                logger.info(
+                    f"Auto metric: stable data but rmse/mae={rmse_mae_ratio:.2f} "
+                    f"indicates occasional large errors -> RMSE"
+                )
+                return ['rmse', 'accuracy']
+
+            logger.info(
+                f"Auto metric: stable data, rmse/mae={rmse_mae_ratio:.2f} "
+                f"-> MAPE + accuracy (default)"
+            )
             return ['mape', 'accuracy']
 
         except Exception as e:
             logger.error(f"Auto metric analysis failed: {e} -> defaulting to mape+accuracy")
             return ['mape', 'accuracy']
+
 
     @staticmethod
     def resolve_auto_metrics(selected_metrics: list, historical_data) -> list:
