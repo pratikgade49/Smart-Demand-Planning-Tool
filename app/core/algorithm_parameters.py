@@ -32,16 +32,6 @@ class AlgorithmParametersService:
                     list_item_type="int",
                     min_value=0,
                     max_value=10
-                ),
-                ParameterDefinition(
-                    name="seasonal_order",
-                    type="list",
-                    description="ARIMA seasonal order (P, D, Q, s)",
-                    required=False,
-                    default_value=[0, 0, 0, 0],
-                    list_item_type="int",
-                    min_value=0,
-                    max_value=12
                 )
             ]
         },
@@ -78,11 +68,12 @@ class AlgorithmParametersService:
             "description": "Simple exponential smoothing",
             "parameters": [
                 ParameterDefinition(
-                    name="alpha",
-                    type="float",
-                    description="Smoothing factor (0-1)",
+                    name="alphas",
+                    type="list",
+                    description="List of smoothing factors to try",
                     required=True,
-                    default_value=0.3,
+                    default_value=[0.3],
+                    list_item_type="float",
                     min_value=0.0,
                     max_value=1.0
                 )
@@ -124,15 +115,6 @@ class AlgorithmParametersService:
             "description": "Facebook Prophet forecasting model",
             "parameters": [
                 ParameterDefinition(
-                    name="window",
-                    type="int",
-                    description="Window size for trend detection",
-                    required=True,
-                    default_value=3,
-                    min_value=1,
-                    max_value=30
-                ),
-                ParameterDefinition(
                     name="changepoint_prior_scale",
                     type="float",
                     description="Flexibility of the automatic changepoint selection",
@@ -148,11 +130,11 @@ class AlgorithmParametersService:
             "description": "Long Short-Term Memory neural network",
             "parameters": [
                 ParameterDefinition(
-                    name="window",
+                    name="sequence_length",
                     type="int",
                     description="Lookback window size",
                     required=True,
-                    default_value=3,
+                    default_value=12,
                     min_value=1,
                     max_value=50
                 )
@@ -304,29 +286,8 @@ class AlgorithmParametersService:
         },
         15: {  # SARIMA
             "algorithm_name": "SARIMA",
-            "description": "Seasonal AutoRegressive Integrated Moving Average - Statistical time series forecasting with seasonality",
-            "parameters": [
-                ParameterDefinition(
-                    name="order",
-                    type="list",
-                    description="SARIMA order (p, d, q) - autoregressive, differencing, moving average components",
-                    required=True,
-                    default_value=[1, 1, 1],
-                    list_item_type="int",
-                    min_value=0,
-                    max_value=10
-                ),
-                ParameterDefinition(
-                    name="seasonal_order",
-                    type="list",
-                    description="SARIMA seasonal order (P, D, Q, s)",
-                    required=True,
-                    default_value=[1, 1, 1, 12],
-                    list_item_type="int",
-                    min_value=0,
-                    max_value=12
-                )
-            ]
+            "description": "Seasonal AutoRegressive Integrated Moving Average - uses auto_arima for parameter selection",
+            "parameters": []  # SARIMA uses auto_arima internally - no custom parameters
         },
         16: {  # Random Forest
             "algorithm_name": "Random Forest",
