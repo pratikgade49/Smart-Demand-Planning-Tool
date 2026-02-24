@@ -201,12 +201,15 @@ def _process_entity_forecast(
                 # Execute the algorithm
                 # ================================================================
                 
+                all_combination_results = []
+                process_log = []  # Initialize process log for individual algorithm runs
+                
                 if algo_config.algorithm_id == 999:
                     # Best Fit algorithm (Single-pass)
                     forecast_result = ForecastExecutionService.generate_forecast(
                     historical_data=historical_data,
                     config={'interval': interval, 'periods': periods},
-                    process_log=[],
+                    process_log=process_log,
                     tenant_id=tenant_data["tenant_id"],
                     database_name=tenant_data["database_name"],
                     aggregation_level=aggregation_level,
@@ -224,6 +227,10 @@ def _process_entity_forecast(
                         'process_log': forecast_result.get('process_log', []),
                         'algorithms_evaluated': len(forecast_result.get('all_algorithms', []))
                     }
+                    
+                    # Capture parameter_details and process_log from the result
+                    all_combination_results = forecast_result.get('parameter_details', [])
+                    process_log = forecast_result.get('process_log', process_log)
 
                     # Update forecast_runs table with selected algorithm and accuracy
                     with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
@@ -245,29 +252,106 @@ def _process_entity_forecast(
                         finally:
                             cursor.close()
                 else:
-                    # Specific algorithm (Single-pass)
-                    algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
-                        algorithm_name=_get_algorithm_name_by_id(algo_config.algorithm_id),
-                        data=historical_data.copy(),
-                        periods=periods,
-                        target_column='total_quantity',
-                        tenant_id=tenant_data["tenant_id"],
-                        database_name=tenant_data["database_name"],
-                        aggregation_level=aggregation_level
+                    # Specific algorithm - Generate parameter combinations and execute each
+                    algo_name = _get_algorithm_name_by_id(algo_config.algorithm_id)
+                    process_log.append("Loading data for forecasting...")
+                    process_log.append(f"Data loaded: {len(historical_data)} records")
+                    
+                    logger.info(f"Algorithm {algo_config.algorithm_id}: Input custom_parameters = {algo_config.custom_parameters}")
+                    parameter_combinations = ForecastExecutionService._generate_parameter_combinations(
+                        algo_config.custom_parameters or {}
                     )
-                    if algorithm_name_result['accuracy'] == 0 and not algorithm_name_result.get('forecast'):
-                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed, skipping")
+                    
+                    process_log.append(f"Testing {len(parameter_combinations)} parameter combination(s)...")
+                    logger.info(f"Algorithm {algo_config.algorithm_id}: Generated {len(parameter_combinations)} parameter combinations: {parameter_combinations}")
+                    
+                    # Execute all parameter combinations and track results
+                    best_result = None
+                    best_accuracy = -1
+                    best_param_combo = {}
+                    
+                    for param_idx, param_combo in enumerate(parameter_combinations, 1):
+                        try:
+                            # Format parameter string for logging
+                            param_str = ", ".join([f"{k}={v}" for k, v in param_combo.items()]) if param_combo else "default"
+                            process_log.append(f"  Testing parameter set {param_idx}: {param_str}")
+                            
+                            # Execute algorithm with this parameter combination
+                            algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
+                                algorithm_name=algo_name,
+                                data=historical_data.copy(),
+                                periods=periods,
+                                target_column='total_quantity',
+                                tenant_id=tenant_data["tenant_id"],
+                                database_name=tenant_data["database_name"],
+                                aggregation_level=aggregation_level,
+                                custom_parameters=param_combo,
+                                selected_metrics=selected_metrics
+                            )
+                            
+                            # Add preprocessing logs from algorithm result
+                            algo_logs = algorithm_name_result.get('process_log', [])
+                            if algo_logs:
+                                for log_msg in algo_logs:
+                                    process_log.append(f"  {log_msg}")
+                            
+                            # Store combination result
+                            combo_result = {
+                                'parameters': param_combo,
+                                'mae': algorithm_name_result.get('mae'),
+                                'mape': algorithm_name_result.get('mape'),
+                                'rmse': algorithm_name_result.get('rmse'),
+                                'accuracy': algorithm_name_result.get('accuracy', 0)
+                            }
+                            all_combination_results.append(combo_result)
+                            
+                            # Add detailed results to process log
+                            accuracy = algorithm_name_result.get('accuracy', 0)
+                            mae = algorithm_name_result.get('mae')
+                            mape = algorithm_name_result.get('mape')
+                            rmse = algorithm_name_result.get('rmse')
+                            
+                            metrics_str = f"accuracy: {accuracy:.2f}%"
+                            if mae is not None:
+                                metrics_str += f", mae: {mae:.2f}"
+                            if mape is not None:
+                                metrics_str += f", mape: {mape:.2f}%"
+                            if rmse is not None:
+                                metrics_str += f", rmse: {rmse:.2f}"
+                            
+                            process_log.append(f"    Result: {metrics_str}")
+                            
+                            # Track best result (highest accuracy)
+                            current_accuracy = algorithm_name_result.get('accuracy', -1)
+                            if current_accuracy > best_accuracy:
+                                best_accuracy = current_accuracy
+                                best_result = algorithm_name_result
+                                best_param_combo = param_combo
+                                
+                        except Exception as e:
+                            logger.warning(f"Parameter combination {param_combo} failed: {str(e)}")
+                            process_log.append(f"    Error: {str(e)}")
+                            continue
+                    
+                    if not best_result or best_result['accuracy'] == 0 and not best_result.get('forecast'):
+                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed all parameter combinations, skipping")
+                        process_log.append(f"Algorithm {algo_name} failed all parameter combinations")
                         return None
 
-                    algo_name_for_result = algorithm_name_result['algorithm']
-                    algo_accuracy = algorithm_name_result.get('accuracy')
-                    algo_forecast = algorithm_name_result['forecast']
-                    test_forecasts = algorithm_name_result.get('test_forecast', [])
+                    algo_name_for_result = best_result['algorithm']
+                    algo_accuracy = best_result.get('accuracy')
+                    algo_forecast = best_result['forecast']
+                    test_forecasts = best_result.get('test_forecast', [])
                     algo_metrics = {
-                        'mae': algorithm_name_result.get('mae'),
-                        'rmse': algorithm_name_result.get('rmse'),
-                        'mape': algorithm_name_result.get('mape')
+                        'mae': best_result.get('mae'),
+                        'rmse': best_result.get('rmse'),
+                        'mape': best_result.get('mape')
                     }
+                    
+                    # Add selection summary to process log with actual parameters
+                    best_param_str = ", ".join([f"{k}={v}" for k, v in best_param_combo.items()]) if best_param_combo else "default"
+                    process_log.append(f"Selected best parameters: {best_param_str}")
+                    process_log.append(f"Best accuracy: {algo_accuracy:.2f}%")
 
                     # Update forecast_runs table with algorithm name and accuracy
                     with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
@@ -429,7 +513,13 @@ def _process_entity_forecast(
                     finally:
                         cursor.close()
 
-                # Update algorithm mapping
+                # Build parameter details with accuracy for each parameter combination tested
+                # Store all tested combinations with their respective accuracy metrics
+                parameter_details = all_combination_results
+                logger.info(f"Algorithm {algo_config.algorithm_id}: Storing {len(parameter_details)} parameter combinations in details")
+
+                # Update algorithm mapping with parameter_details
+
                 with db_manager.get_tenant_connection(tenant_data["database_name"]) as conn:
                     cursor = conn.cursor()
                     try:
@@ -445,7 +535,9 @@ def _process_entity_forecast(
                                 'entity_filter': entity_filter,
                                 **algo_metrics,
                                 'test_records': len(test_actuals),
-                                'forecast_records': len(forecast_dates)
+                                'forecast_records': len(forecast_dates),
+                                'parameter_details': parameter_details,
+                                'process_log': process_log
                             }),
                             datetime.utcnow(),
                             algo_mapping_id

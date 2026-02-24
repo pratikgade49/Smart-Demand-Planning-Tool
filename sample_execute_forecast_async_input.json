@@ -1,0 +1,142 @@
+{
+  "version_id": "ver-001",
+  "forecast_filters": {
+    "product": ["PROD-001", "PROD-002"],
+    "location": ["LOC-001"],
+    "aggregation_level": "product-location",
+    "interval": "MONTHLY"
+  },
+  "forecast_start": "2025-01-01",
+  "forecast_end": "2025-12-31",
+  "history_start": "2022-01-01",
+  "history_end": "2024-12-31",
+  "selected_metrics": ["mape", "accuracy"],
+  "algorithms": [
+    {
+      "algorithm_id": 1,
+      "execution_order": 1,
+      "custom_parameters": {
+        "order": [2, 1, 2]
+      }
+    },
+    {
+      "algorithm_id": 2,
+      "execution_order": 2,
+      "custom_parameters": {
+        "fit_intercept": false
+      }
+    },
+    {
+      "algorithm_id": 3,
+      "execution_order": 3,
+      "custom_parameters": {
+        "degree": 3
+      }
+    },
+    {
+      "algorithm_id": 4,
+      "execution_order": 4,
+      "custom_parameters": {
+        "alphas": [0.2, 0.4, 0.6, 0.8]
+      }
+    },
+    {
+      "algorithm_id": 5,
+      "execution_order": 5,
+      "custom_parameters": {
+        "alphas": [0.1, 0.3, 0.5, 0.7]
+      }
+    },
+    {
+      "algorithm_id": 6,
+      "execution_order": 6,
+      "custom_parameters": {
+        "season_length": 6,
+        "alpha": 0.4,
+        "beta": 0.2,
+        "gamma": 0.3
+      }
+    },
+    {
+      "algorithm_id": 7,
+      "execution_order": 7,
+      "custom_parameters": {
+        "seasonality_mode": "multiplicative",
+        "changepoint_prior_scale": 0.1
+      }
+    },
+    {
+      "algorithm_id": 8,
+      "execution_order": 8,
+      "custom_parameters": {
+        "sequence_length": 12,
+        "epochs": 100,
+        "batch_size": 32
+      }
+    },
+    {
+      "algorithm_id": 9,
+      "execution_order": 9,
+      "custom_parameters": {
+        "n_estimators": 200,
+        "max_depth": 8,
+        "learning_rate": 0.05
+      }
+    },
+    {
+      "algorithm_id": 10,
+      "execution_order": 10,
+      "custom_parameters": {
+        "C": 10.0,
+        "epsilon": 0.05,
+        "kernel": "poly"
+      }
+    },
+    {
+      "algorithm_id": 11,
+      "execution_order": 11,
+      "custom_parameters": {
+        "n_neighbors": 7
+      }
+    },
+    {
+      "algorithm_id": 12,
+      "execution_order": 12,
+      "custom_parameters": {
+        "kernel": "Matern",
+        "alpha": 1e-5
+      }
+    },
+    {
+      "algorithm_id": 13,
+      "execution_order": 13,
+      "custom_parameters": {
+        "hidden_layers": [128, 64, 32],
+        "epochs": 200,
+        "batch_size": 64
+      }
+    },
+    {
+      "algorithm_id": 14,
+      "execution_order": 14,
+      "custom_parameters": {
+        "window": 6
+      }
+    },
+    {
+      "algorithm_id": 15,
+      "execution_order": 15,
+      "custom_parameters": {}
+    },
+    {
+      "algorithm_id": 16,
+      "execution_order": 16,
+      "custom_parameters": {
+        "n_estimators": 150,
+        "max_depth": 15,
+        "min_samples_split": 5,
+        "min_samples_leaf": 2
+      }
+    }
+  ]
+}

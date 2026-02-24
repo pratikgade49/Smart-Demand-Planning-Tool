@@ -42,6 +42,130 @@ class ForecastExecutionService:
     """Service for executing forecast algorithms and storing results."""
 
     @staticmethod
+    def detect_and_log_preprocessing(data: pd.DataFrame, process_log: List[str]) -> Dict[str, Any]:
+        """
+        Detect and log preprocessing information including outliers, data statistics, etc.
+        
+        Args:
+            data: Historical data to analyze
+            process_log: List to append log messages
+            
+        Returns:
+            Dictionary with preprocessing details
+        """
+        try:
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].dropna().values.astype(float)
+            elif 'quantity' in data.columns:
+                y = data['quantity'].dropna().values.astype(float)
+            else:
+                process_log.append("No quantity column found for preprocessing analysis")
+                return {}
+            
+            n = len(y)
+            if n == 0:
+                process_log.append("Empty data series - cannot perform preprocessing analysis")
+                return {}
+            
+            mean_val = float(np.mean(y))
+            std_val = float(np.std(y))
+            min_val = float(np.min(y))
+            max_val = float(np.max(y))
+            median_val = float(np.median(y))
+            zero_count = int(np.sum(y == 0))
+            zero_ratio = float(zero_count / n)
+            
+            if std_val > 0:
+                outlier_mask = np.abs(y - mean_val) > 3 * std_val
+                outlier_count = int(np.sum(outlier_mask))
+                outlier_ratio = float(outlier_count / n)
+                outlier_indices = np.where(outlier_mask)[0].tolist()
+            else:
+                outlier_count = 0
+                outlier_ratio = 0.0
+                outlier_indices = []
+            
+            skewness = (
+                float(np.mean((y - mean_val) ** 3) / (std_val ** 3))
+                if std_val > 0 and n >= 3
+                else 0.0
+            )
+            
+            cv = (std_val / mean_val) if mean_val > 0 else float('inf')
+            
+            preprocessing_log = (
+                f"Preprocessing Analysis: records={n}, "
+                f"mean={mean_val:.2f}, std={std_val:.2f}, "
+                f"min={min_val:.2f}, max={max_val:.2f}, median={median_val:.2f}, "
+                f"cv={cv:.3f}, skewness={skewness:.3f}"
+            )
+            process_log.append(preprocessing_log)
+            
+            if outlier_count > 0:
+                outlier_log = (
+                    f"Outlier Detection (3-sigma): detected {outlier_count} outliers "
+                    f"({outlier_ratio*100:.1f}% of {n} records) at indices: {outlier_indices}"
+                )
+                process_log.append(outlier_log)
+            else:
+                process_log.append("Outlier Detection (3-sigma): no outliers detected")
+            
+            if zero_count > 0:
+                process_log.append(f"Zero Value Detection: {zero_count} zero values found ({zero_ratio*100:.1f}%)")
+            
+            return {
+                'n': n,
+                'mean': mean_val,
+                'std': std_val,
+                'min': min_val,
+                'max': max_val,
+                'median': median_val,
+                'cv': cv,
+                'skewness': skewness,
+                'outlier_count': outlier_count,
+                'outlier_ratio': outlier_ratio,
+                'outlier_indices': outlier_indices,
+                'zero_count': zero_count,
+                'zero_ratio': zero_ratio
+            }
+        except Exception as e:
+            process_log.append(f"Preprocessing analysis failed: {str(e)}")
+            logger.error(f"Error in preprocessing analysis: {str(e)}", exc_info=True)
+            return {}
+
+    @staticmethod
+    def get_algorithm_default_parameters(algorithm_name: str) -> Dict[str, Any]:
+        """
+        Get default parameters for a given algorithm.
+        
+        Args:
+            algorithm_name: Name of the algorithm
+            
+        Returns:
+            Dictionary with default parameter names and values
+        """
+        defaults = {
+                    'linear_regression': {},
+            'polynomial_regression': {'degree': 2},
+            'exponential_smoothing': {'alphas': [0.1, 0.3, 0.5]},
+            'holt_winters': {'season_length': 12, 'alpha': 0.3, 'beta': 0.1, 'gamma': 0.1},
+            'arima': {'order': [1, 1, 1]},  # Note: arima_forecast accepts 'order' only
+            'prophet': {'seasonality_mode': 'additive', 'changepoint_prior_scale': 0.05},  # Note: prophet doesn't accept 'window'
+            'lstm': {'sequence_length': 12, 'epochs': 50, 'batch_size': 32},  # Note: lstm uses 'sequence_length' not 'window'
+            'xgboost': {'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1},
+            'svr': {'C': 1.0, 'epsilon': 0.1, 'kernel': 'rbf'},
+            'knn': {'n_neighbors': 5},
+            'gaussian_process': {'kernel': 'RBF', 'alpha': 1e-6},
+            'mlp_neural_network': {'hidden_layers': [64, 32], 'epochs': 100, 'batch_size': 32},
+            'simple_moving_average': {'window': 3},
+            'seasonal_decomposition': {'season_length': 12},
+            'moving_average': {'window': 3},
+            'sarima': {},  # Note: sarima uses auto_arima - no custom params
+            'random_forest': {'n_estimators': 100, 'max_depth': 10}
+        }
+        return defaults.get(algorithm_name, {})
+
+    @staticmethod
     def _analyze_and_select_metrics(historical_data) -> list:
         """
         Analyse historical data characteristics and automatically select
@@ -330,6 +454,15 @@ class ForecastExecutionService:
         validated_params = custom_params.copy()
 
         try:
+
+            # CRITICAL: Skip validation for parameters with _list suffix
+            # These are meant to be parameter combinations that get expanded later
+            list_params = {k: v for k, v in validated_params.items() if k.endswith('_list')}
+            non_list_params = {k: v for k, v in validated_params.items() if not k.endswith('_list')}
+            
+            # Only validate non-list parameters
+            validated_params = non_list_params.copy()
+            
             if algorithm_id == 1:  # ARIMA
                 # order: [p, d, q] - integers >= 0
                 if 'order' in validated_params:
@@ -490,6 +623,56 @@ class ForecastExecutionService:
 
         except (ValueError, TypeError) as e:
             raise ValidationException(f"Invalid parameter format for algorithm {algorithm_id}: {str(e)}")
+        
+
+    @staticmethod
+    def _generate_parameter_combinations(custom_params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate all parameter combinations from parameters with _list suffix.
+        
+        Parameters with _list suffix indicate multiple values to test.
+        Example: {'n_neighbors_list': [7, 10, 11]} -> [{'n_neighbors': 7}, {'n_neighbors': 10}, {'n_neighbors': 11}]
+        
+        Args:
+            custom_params: Dictionary potentially containing _list suffixed parameters
+            
+        Returns:
+            List of parameter dictionaries, one per combination
+        """
+        from itertools import product
+        
+        if not custom_params:
+            return [{}]
+        
+        # Separate list parameters from regular parameters
+        list_params = {}
+        regular_params = {}
+        
+        for param_name, param_value in custom_params.items():
+            if param_name.endswith('_list'):
+                # Remove _list suffix to get actual parameter name
+                actual_param_name = param_name[:-5]  # Remove '_list'
+                list_params[actual_param_name] = param_value if isinstance(param_value, list) else [param_value]
+            else:
+                regular_params[param_name] = param_value
+        
+        # If no list parameters, return single combination with regular params
+        if not list_params:
+            return [regular_params]
+        
+        # Generate all combinations of list parameters
+        combinations = []
+        list_param_names = list(list_params.keys())
+        list_param_values = [list_params[name] for name in list_param_names]
+        
+        for combo in product(*list_param_values):
+            combo_dict = regular_params.copy()
+            for param_name, param_value in zip(list_param_names, combo):
+                combo_dict[param_name] = param_value
+            combinations.append(combo_dict)
+        
+        logger.info(f"Generated {len(combinations)} parameter combinations from {list(list_params.keys())}")
+        return combinations
 
     @staticmethod
     def _get_system_resources() -> Dict[str, float]:
@@ -972,226 +1155,6 @@ class ForecastExecutionService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"\n{'='*80}")
-            logger.error(f"ALGORITHM {algorithm_name} FAILED")
-            logger.error(f"ERROR: {str(e)}")
-            logger.error(f"{'='*80}\n", exc_info=True)
-            ForecastExecutionService._update_algorithm_status(
-                database_name, mapping_id, 'Failed', str(e)
-            )
-            raise
-        """Execute a single algorithm with detailed debugging."""
-        
-        mapping_id = algorithm_mapping['mapping_id']
-        algorithm_id = algorithm_mapping['algorithm_id']
-        algorithm_name = algorithm_mapping['algorithm_name']
-        custom_params = algorithm_mapping.get('custom_parameters') or {}
-
-        try:
-            custom_params = ForecastExecutionService.validate_algorithm_parameters(algorithm_id, custom_params)
-        except Exception as e:
-            logger.error(f"Parameter validation failed for algorithm {algorithm_name}: {str(e)}")
-            raise
-
-        logger.info(f"\n{'='*80}")
-        logger.info(f"STARTING ALGORITHM: {algorithm_name} (ID: {algorithm_id})")
-        logger.info(f"{'='*80}")
-
-        ForecastExecutionService._update_algorithm_status(database_name, mapping_id, 'Running')
-        
-        try:
-            forecast_start_date = datetime.fromisoformat(forecast_start).date()
-            forecast_end_date = datetime.fromisoformat(forecast_end).date()
-            
-            future_periods = ForecastExecutionService._calculate_periods(
-                forecast_start_date,
-                forecast_end_date,
-                interval
-            )
-            
-            logger.info(f"Future periods to forecast: {future_periods}")
-            
-            # Merge external factors
-            if not external_factors.empty:
-                logger.info(f"Merging {len(external_factors)} external factor records")
-                historical_data = historical_data.merge(
-                    external_factors,
-                    left_on='period',
-                    right_on='date',
-                    how='left'
-                )
-            
-            # Get aggregation level from forecast run
-            from app.core.forecasting_service import ForecastingService
-            forecast_run = ForecastingService.get_forecast_run(
-                tenant_id, database_name, forecast_run_id
-            )
-            aggregation_level = forecast_run.get('forecast_filters', {}).get('aggregation_level')
-            
-            # Train-test split
-            train_ratio = 0.85
-            n = len(historical_data)
-            split_index = max(2, int(n * train_ratio))
-            
-            train_data = historical_data.iloc[:split_index].copy()
-            test_data = historical_data.iloc[split_index:].copy()
-            test_periods = len(test_data)
-            
-            logger.info(f"\nDATA SPLIT:")
-            logger.info(f"  Total historical data: {n} periods")
-            logger.info(f"  Training data: {len(train_data)} periods (indices 0-{split_index-1})")
-            logger.info(f"  Test data: {len(test_data)} periods (indices {split_index}-{n-1})")
-            logger.info(f"  Future forecast: {future_periods} periods")
-            
-            # Get test actuals and dates
-            if 'total_quantity' in test_data.columns:
-                test_actuals = test_data['total_quantity'].values
-            elif 'quantity' in test_data.columns:
-                test_actuals = test_data['quantity'].values
-            else:
-                test_actuals = np.array([])
-            
-            test_dates = test_data['period'].tolist() if 'period' in test_data.columns else []
-            
-            logger.info(f"\nTEST SET ACTUALS:")
-            logger.info(f"  Count: {len(test_actuals)}")
-            if len(test_actuals) > 0:
-                logger.info(f"  Range: [{test_actuals.min():.0f}, {test_actuals.max():.0f}]")
-                logger.info(f"  First 3 values: {test_actuals[:3]}")
-                logger.info(f"  Last 3 values: {test_actuals[-3:]}")
-            
-            # ====================================================================
-            # GENERATE TEST FORECAST
-            # ====================================================================
-            test_forecast = np.array([])
-            test_metrics = {}
-
-            if test_periods > 0:
-                logger.info(f"\n{'='*80}")
-                logger.info(f"GENERATING TEST FORECAST")
-                logger.info(f"{'='*80}")
-                logger.info(f"Training on: {len(train_data)} periods")
-                logger.info(f"Predicting: {test_periods} future periods")
-                
-                # Call algorithm with tenant context
-                test_forecast_result, train_metrics = ForecastExecutionService._route_algorithm(
-                    algorithm_id=algorithm_id,
-                    algorithm_name=algorithm_name,
-                    data=train_data,
-                    periods=test_periods,
-                    custom_params=custom_params,
-                    tenant_id=tenant_id,
-                    database_name=database_name,
-                    aggregation_level=aggregation_level
-                )
-                
-                test_forecast = np.array(test_forecast_result)
-                
-                logger.info(f"\nTEST FORECAST RESULT:")
-                logger.info(f"  Type: {type(test_forecast)}")
-                logger.info(f"  Length: {len(test_forecast)}")
-                logger.info(f"  Range: [{test_forecast.min():.0f}, {test_forecast.max():.0f}]")
-                logger.info(f"  First 3 values: {test_forecast[:3]}")
-                logger.info(f"  Last 3 values: {test_forecast[-3:]}")
-                
-                # ⚠️ CRITICAL CHECK
-                if len(test_forecast) != test_periods:
-                    logger.error(f"❌ LENGTH MISMATCH! Expected {test_periods}, got {len(test_forecast)}")
-                
-                # Calculate test metrics
-                if len(test_actuals) > 0 and len(test_forecast) > 0:
-                    min_len = min(len(test_actuals), len(test_forecast))
-                    test_metrics = ForecastExecutionService.calculate_metrics(
-                        test_actuals[:min_len],
-                        test_forecast[:min_len],
-                        selected_metrics=selected_metrics
-                    )
-                    logger.info(f"\nTEST SET METRICS:")
-                    for metric, value in test_metrics.items():
-                        logger.info(f"  {metric.upper()}: {value:.2f}{'%' if metric == 'mape' else ''}")
-                else:
-                    # Use default metrics if no test data available
-                    test_metrics = ForecastExecutionService.calculate_metrics(
-                        np.array([1.0]), np.array([1.0]), selected_metrics=selected_metrics
-                    ) if selected_metrics else {'accuracy': 0.0, 'mae': 0.0, 'rmse': 0.0, 'mape': 100.0}
-                    logger.warning("Using default metrics for test set (no actuals available)")
-
-            # ====================================================================
-            # GENERATE FUTURE FORECAST
-            # ====================================================================
-            logger.info(f"\n{'='*80}")
-            logger.info(f"GENERATING FUTURE FORECAST")
-            logger.info(f"{'='*80}")
-            logger.info(f"Training on: {len(historical_data)} periods (ALL historical data)")
-            logger.info(f"Predicting: {future_periods} future periods")
-            
-            # Call algorithm with tenant context
-            future_forecast_result, future_metrics = ForecastExecutionService._route_algorithm(
-                algorithm_id=algorithm_id,
-                algorithm_name=algorithm_name,
-                data=historical_data,
-                periods=future_periods,
-                custom_params=custom_params,
-                tenant_id=tenant_id,
-                database_name=database_name,
-                aggregation_level=aggregation_level
-            )
-            
-            future_forecast = np.array(future_forecast_result)
-            
-            logger.info(f"\nFUTURE FORECAST RESULT:")
-            logger.info(f"  Type: {type(future_forecast)}")
-            logger.info(f"  Length: {len(future_forecast)}")
-            logger.info(f"  Range: [{future_forecast.min():.0f}, {future_forecast.max():.0f}]")
-            logger.info(f"  First 3 values: {future_forecast[:3]}")
-            logger.info(f"  Last 3 values: {future_forecast[-3:]}")
-            
-            # Generate future dates
-            future_dates = ForecastExecutionService._generate_forecast_dates(
-                forecast_start_date,
-                future_periods,
-                interval
-            )
-            
-            # ====================================================================
-            # STORE RESULTS
-            # ====================================================================
-            logger.info(f"\n{'='*80}")
-            logger.info(f"STORING RESULTS")
-            logger.info(f"{'='*80}")
-            logger.info(f"Test dates: {len(test_dates)}")
-            logger.info(f"Test actuals: {len(test_actuals)}")
-            logger.info(f"Test forecast: {len(test_forecast)}")
-            logger.info(f"Future dates: {len(future_dates)}")
-            logger.info(f"Future forecast: {len(future_forecast)}")
-            
-            results = ForecastExecutionService._store_forecast_results_v2(
-                tenant_id=tenant_id,
-                database_name=database_name,
-                forecast_run_id=forecast_run_id,
-                version_id=algorithm_mapping.get('version_id'),
-                mapping_id=mapping_id,
-                algorithm_id=algorithm_id,
-                test_dates=test_dates,
-                test_actuals=test_actuals,
-                test_forecast=test_forecast,
-                test_metrics=test_metrics,
-                future_dates=future_dates,
-                future_forecast=future_forecast,
-                user_email=user_email
-            )
-            
-            ForecastExecutionService._update_algorithm_status(
-                database_name, mapping_id, 'Completed'
-            )
-            
-            logger.info(f"\n{'='*80}")
-            logger.info(f"ALGORITHM {algorithm_name} COMPLETED SUCCESSFULLY")
-            logger.info(f"{'='*80}\n")
-            
-            return results
-            
         except Exception as e:
             logger.error(f"\n{'='*80}")
             logger.error(f"ALGORITHM {algorithm_name} FAILED")
@@ -3766,6 +3729,9 @@ This makes the trend robust to spikes and outliers
             raise ValueError("Insufficient data for forecasting")
         
         process_log.append(f"Data loaded: {len(historical_data)} records")
+        
+        ForecastExecutionService.detect_and_log_preprocessing(historical_data, process_log)
+        
         process_log.append(f"Running best fit algorithm selection based on {primary_metric}...")
         
         # Define all available algorithms
@@ -3826,10 +3792,38 @@ This makes the trend robust to spikes and outliers
                     result = future.result()
                     algorithm_results.append(result)
                     
+                    # Add preprocessing logs from algorithm to main process log
+                    algo_logs = result.get('process_log', [])
+                    if algo_logs:
+                        process_log.append(f"Algorithm {algorithm_name}:")
+                        for log_msg in algo_logs:
+                            process_log.append(f"  {log_msg}")
+                    
                     metric_value = result.get(primary_metric, 0)
-                    process_log.append(
-                        f"  Algorithm {algorithm_name} completed with {primary_metric}: {metric_value:.2f}{'%' if primary_metric in ['accuracy', 'mape'] else ''}"
-                    )
+                    
+                    # Get the parameters used for this algorithm
+                    used_params = result.get('used_parameters', {})
+                    
+                    # Build detailed result message with available metrics (avoiding duplicates)
+                    metrics_str = f"{primary_metric}: {metric_value:.2f}{'%' if primary_metric in ['accuracy', 'mape'] else ''}"
+                    
+                    mae = result.get('mae')
+                    mape = result.get('mape')
+                    rmse = result.get('rmse')
+                    accuracy = result.get('accuracy', 0)
+                    
+                    if mae is not None and primary_metric != 'mae':
+                        metrics_str += f", mae: {mae:.2f}"
+                    if mape is not None and primary_metric != 'mape':
+                        metrics_str += f", mape: {mape:.2f}%"
+                    if rmse is not None and primary_metric != 'rmse':
+                        metrics_str += f", rmse: {rmse:.2f}"
+                    
+                    metrics_str += f", accuracy: {accuracy:.2f}%"
+                    
+                    # Add parameters to the log message
+                    params_str = str(used_params) if used_params else "default"
+                    process_log.append(f"  Algorithm {algorithm_name} completed with parameters: {params_str}, {metrics_str}")
                     
                     # Track best performing algorithm based on selected metric
                     is_better = False
@@ -3871,6 +3865,20 @@ This makes the trend robust to spikes and outliers
             else:
                 process_log.append("All algorithms failed to produce forecasts; using simple moving average fallback")
                 sma_forecast, sma_metrics = ForecastExecutionService.simple_moving_average(historical_data, periods=periods)
+                
+                # Build parameter_details from all evaluated algorithms
+                parameter_details = []
+                for algo_result in algorithm_results:
+                    param_detail = {
+                        'algorithm_name': algo_result.get('algorithm', 'unknown'),
+                        'parameters': algo_result.get('used_parameters', {}),
+                        'mae': algo_result.get('mae'),
+                        'mape': algo_result.get('mape'),
+                        'rmse': algo_result.get('rmse'),
+                        'accuracy': algo_result.get('accuracy', 0)
+                    }
+                    parameter_details.append(param_detail)
+                
                 return {
                     'selected_algorithm': 'simple_moving_average (fallback)',
                     'accuracy': sma_metrics.get('accuracy', 0),
@@ -3879,6 +3887,7 @@ This makes the trend robust to spikes and outliers
                     'mape': sma_metrics.get('mape'),
                     'forecast': sma_forecast.tolist() if isinstance(sma_forecast, np.ndarray) else sma_forecast,
                     'all_algorithms': algorithm_results,
+                    'parameter_details': parameter_details,
                     'process_log': process_log
                 }
         
@@ -3952,6 +3961,19 @@ This makes the trend robust to spikes and outliers
         
         process_log.append(f"Best algorithm selected: {best_algorithm} ({primary_metric}: {best_metrics.get(primary_metric):.2f})")
         
+        # Build parameter_details from all evaluated algorithms (each with their used parameters)
+        parameter_details = []
+        for algo_result in algorithm_results:
+            param_detail = {
+                'algorithm_name': algo_result.get('algorithm', 'unknown'),
+                'parameters': algo_result.get('used_parameters', {}),
+                'mae': algo_result.get('mae'),
+                'mape': algo_result.get('mape'),
+                'rmse': algo_result.get('rmse'),
+                'accuracy': algo_result.get('accuracy', 0)
+            }
+            parameter_details.append(param_detail)
+        
         # Determine summary accuracy percentage for DB storage
         if primary_metric == 'mape':
             summary_value = 100.0 - best_metrics.get('mape', 0)
@@ -3971,6 +3993,7 @@ This makes the trend robust to spikes and outliers
             'forecast': best_model['forecast'],
             'test_forecast': best_model.get('test_forecast', []),
             'all_algorithms': algorithm_results,
+            'parameter_details': parameter_details,
             'process_log': process_log
         }
     
@@ -3998,7 +4021,8 @@ This makes the trend robust to spikes and outliers
         tenant_id: str = None,
         database_name: str = None,
         aggregation_level: str = None,
-        selected_metrics: List[str] = None
+        selected_metrics: List[str] = None,
+        custom_parameters: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Safely run an algorithm and return results.
@@ -4012,6 +4036,7 @@ This makes the trend robust to spikes and outliers
             database_name: Database name (for dynamic field detection)
             aggregation_level: Current aggregation level (e.g., "product")
             selected_metrics: List of metrics to calculate
+            custom_parameters: Custom parameters for the algorithm
 
         Returns:
             Dictionary with algorithm results
@@ -4033,6 +4058,12 @@ This makes the trend robust to spikes and outliers
             # Debug: Log data information
             logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
             logger.info(f"Algorithm {algorithm_name}: Data shape: {data.shape}")
+            
+            # Log preprocessing analysis for this algorithm
+            algo_process_log = []
+            preprocessing_info = ForecastExecutionService.detect_and_log_preprocessing(data, algo_process_log)
+            for log_msg in algo_process_log:
+                logger.info(f"Algorithm {algorithm_name}: {log_msg}")
 
             # Ensure we have target_column (rename if needed)
             if 'quantity' in data.columns and target_column not in data.columns:
@@ -4065,20 +4096,40 @@ This makes the trend robust to spikes and outliers
             if algorithm_func is None:
                 raise ValueError(f"Unknown algorithm: {algorithm_name}")
             
+            # Determine parameters that will be used
+            used_parameters = custom_parameters.copy() if custom_parameters else {}
+            if not used_parameters:
+                used_parameters = ForecastExecutionService.get_algorithm_default_parameters(algorithm_name)
+            
             def execute(input_data: pd.DataFrame, horizon: int) -> Tuple[np.ndarray, Dict[str, float]]:
                 """Execute algorithm and ensure it returns exactly 2 values"""
                 target_data = input_data if input_data is not None else data
                 if target_data is None or target_data.empty:
                     target_data = data
                 
-                # Call the algorithm with tenant context for ML algorithms
+                algo_params = used_parameters.copy()
+                logger.info(f"Algorithm {algorithm_name}: Executing with parameters = {algo_params}")
+                
+                # Call the algorithm with appropriate parameters
                 if algorithm_name in ['xgboost', 'svr', 'knn', 'random_forest']:
+                    # ML algorithms with custom parameters and tenant context
+                    logger.info(f"Algorithm {algorithm_name}: Using ML algorithm path with tenant context and params {algo_params}")
                     result = algorithm_func(
                         target_data, 
                         max(1, horizon),
                         tenant_id=tenant_id,
                         database_name=database_name,
-                        aggregation_level=aggregation_level
+                        aggregation_level=aggregation_level,
+                        **algo_params  # Unpack custom parameters
+                    )
+                elif algorithm_name in ['knn', 'xgboost', 'svr', 'random_forest', 'polynomial_regression',
+                                       'exponential_smoothing', 'holt_winters', 'arima', 'prophet', 
+                                       'lstm', 'gaussian_process', 'mlp_neural_network', 'moving_average', 'sarima']:
+                    # Algorithms that support custom parameters
+                    result = algorithm_func(
+                        target_data,
+                        max(1, horizon),
+                        **algo_params  # Unpack custom parameters
                     )
                 else:
                     result = algorithm_func(target_data, max(1, horizon))
@@ -4127,6 +4178,8 @@ This makes the trend robust to spikes and outliers
                 'algorithm': algorithm_name,
                 'forecast': forecast_list,
                 'test_forecast': test_forecast_list,
+                'used_parameters': used_parameters,
+                'process_log': algo_process_log,
                 **metrics
             }
             
