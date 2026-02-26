@@ -18,6 +18,10 @@ from app.core.exceptions import AppException, ValidationException, NotFoundExcep
 from app.core.responses import ResponseHandler
 from app.schemas.sales_data import SalesDataFilter
 
+from app.schemas.disaggregation_schema import DisaggregateTableRequest
+from app.core.table_disaggregation_service import TableDisaggregationService
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard-Generic"])
@@ -381,3 +385,207 @@ async def delete_table(
     except Exception as e:
         logger.error(f"Unexpected error in delete_table: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.get("/disaggregation-methods", response_model=Dict[str, Any])
+async def get_disaggregation_methods(
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard")),
+):
+    """
+    Returns the three supported disaggregation methods and the list of tables
+    that can be used as a key figure reference.
+
+    **Response shape:**
+    ```json
+    {
+      "methods": [
+        { "value": "own_ratio",   "label": "Own Ratio",          "description": "..." },
+        { "value": "key_figure",  "label": "Key Figure",         "description": "..." },
+        { "value": "equal",       "label": "Equal Distribution", "description": "..." }
+      ],
+      "available_key_figure_tables": [
+        { "table_name": "sales_data",    "display_name": "Sales History" },
+        { "table_name": "forecast_data", "display_name": "Baseline Forecast" },
+        { "table_name": "final_plan",    "display_name": "Final Consensus Plan" },
+        ...
+      ]
+    }
+    ```
+    """
+    try:
+        dynamic_tables = DynamicTableService.get_tenant_dynamic_tables(
+            database_name=tenant_data["database_name"],
+            include_mandatory=True,
+        )
+
+        core_tables = [
+            {"table_name": "sales_data",    "display_name": "Sales History"},
+            {"table_name": "forecast_data", "display_name": "Baseline Forecast"},
+        ]
+
+        dynamic_names = {t["table_name"] for t in dynamic_tables}
+        key_figure_tables = [t for t in core_tables if t["table_name"] not in dynamic_names]
+        key_figure_tables += [
+            {"table_name": t["table_name"], "display_name": t["display_name"]}
+            for t in dynamic_tables
+        ]
+
+        return ResponseHandler.success(
+            data={
+                "methods": [
+                    {
+                        "value": "own_ratio",
+                        "label": "Own Ratio",
+                        "description": (
+                            "Ratios are calculated from the target table's existing data. "
+                            "The new total is redistributed proportionally."
+                        ),
+                    },
+                    {
+                        "value": "key_figure",
+                        "label": "Key Figure",
+                        "description": (
+                            "Ratios are derived from a different reference table "
+                            "(e.g. Sales History or another plan). "
+                            "Select the reference table via key_figure_table."
+                        ),
+                    },
+                    {
+                        "value": "equal",
+                        "label": "Equal Distribution",
+                        "description": (
+                            "The total is divided equally across all lower-level members. "
+                            "No historical data is needed."
+                        ),
+                    },
+                ],
+                "available_key_figure_tables": key_figure_tables,
+            }
+        )
+
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error in get_disaggregation_methods: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST /dashboard/disaggregate-table
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/disaggregate-table", response_model=Dict[str, Any])
+async def disaggregate_table(
+    request: DisaggregateTableRequest,
+    tenant_data: Dict = Depends(get_tenant_database),
+    _: Dict = Depends(require_object_access("Dashboard", min_role_id=2)),
+):
+    """
+    Disaggregate an aggregated quantity into lower-level member records
+    using one of three distribution methods.
+
+    ---
+
+    ### Two modes
+
+    **Single-date mode** — disaggregate one specific cell:
+    ```json
+    {
+      "target_table": "final_plan",
+      "master_data":  { "product": "P1" },
+      "quantity":     1200,
+      "date":         "2026-03-01",
+      "method":       "own_ratio"
+    }
+    ```
+
+    **Date-range mode** — disaggregate every period that has data in the
+    source table within the range (no `quantity` needed — totals are read
+    from the table automatically):
+    ```json
+    {
+      "target_table": "final_plan",
+      "master_data":  { "product": "P1" },
+      "date_from":    "2026-01-01",
+      "date_to":      "2026-12-31",
+      "method":       "own_ratio"
+    }
+    ```
+
+    ---
+
+    ### Methods
+
+    | method       | Ratio source                          | key_figure_table |
+    |--------------|---------------------------------------|------------------|
+    | `own_ratio`  | Target table's own existing data      | Not required     |
+    | `key_figure` | A separate reference table you choose | **Required**     |
+    | `equal`      | No data needed — equal split          | Not required     |
+
+    ---
+
+    ### Notes
+    - **Zero quantity** is allowed and will write `0` to every member row.
+    - If the ratio source table has no data, the service **falls back to
+      equal distribution** automatically and logs a warning.
+    - In date-range mode the **source table** used to read period totals is:
+        - `own_ratio` / `equal` → `target_table`
+        - `key_figure` → `key_figure_table`
+    - `ratio_date_from` / `ratio_date_to` control the **look-back window**
+      for ratio calculation and are independent of `date_from` / `date_to`.
+
+    ---
+
+    ### Response
+    ```json
+    {
+      "status": "success",
+      "method": "own_ratio",
+      "target_table": "final_plan",
+      "mode": "range",
+      "date_from": "2026-01-01",
+      "date_to": "2026-12-31",
+      "periods_processed": 12,
+      "members_count": 3,
+      "records_upserted": 36,
+      "periods": [
+        {
+          "date": "2026-01-01",
+          "total_quantity": 900,
+          "records_upserted": 3,
+          "distribution": [
+            { "master_id": "...", "ratio": 0.5,  "quantity": 450 },
+            { "master_id": "...", "ratio": 0.3,  "quantity": 270 },
+            { "master_id": "...", "ratio": 0.2,  "quantity": 180 }
+          ]
+        },
+        ...
+      ]
+    }
+    ```
+    """
+    try:
+        logger.info(
+            f"Disaggregate-table request: table={request.target_table}, "
+            f"method={request.method}, master_data={request.master_data}, "
+            f"mode={'range' if request.date_from else 'single'}"
+        )
+
+        result = TableDisaggregationService.disaggregate_table_data(
+            database_name=tenant_data["database_name"],
+            request=request,
+            user_email=tenant_data["email"],
+        )
+
+        return ResponseHandler.success(data=result)
+
+    except (ValidationException, NotFoundException) as e:
+        status_code = 404 if isinstance(e, NotFoundException) else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except AppException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        logger.error(f"Error in disaggregate_table: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+

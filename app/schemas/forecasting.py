@@ -9,6 +9,8 @@ Changes:
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Any, Dict
 from app.schemas.sales_data import SalesDataFilter
+from app.schemas.disaggregation_schema import DisaggregateTableRequest
+
 
 # Parameter Schema Models
 class ParameterDefinition(BaseModel):
