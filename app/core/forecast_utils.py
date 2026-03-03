@@ -275,6 +275,7 @@ def _process_entity_forecast(
                             # Format parameter string for logging
                             param_str = ", ".join([f"{k}={v}" for k, v in param_combo.items()]) if param_combo else "default"
                             process_log.append(f"  Testing parameter set {param_idx}: {param_str}")
+                            logger.info(f"Algorithm {algo_config.algorithm_id}: Calling _run_algorithm_safe with {param_str}")
                             
                             # Execute algorithm with this parameter combination
                             algorithm_name_result = ForecastExecutionService._run_algorithm_safe(
@@ -288,6 +289,21 @@ def _process_entity_forecast(
                                 custom_parameters=param_combo,
                                 selected_metrics=selected_metrics
                             )
+                            
+                            logger.info(f"Algorithm {algo_config.algorithm_id}: Returned from _run_algorithm_safe")
+                            
+                            # Debug: Log the result structure
+                            if algorithm_name_result is None:
+                                logger.error(f"Algorithm {algo_name} returned None result for parameters {param_combo}")
+                                process_log.append(f"    ERROR: Algorithm returned None result")
+                                continue
+                            
+                            if not isinstance(algorithm_name_result, dict):
+                                logger.error(f"Algorithm {algo_name} returned non-dict result: {type(algorithm_name_result)}")
+                                process_log.append(f"    ERROR: Algorithm returned non-dict result: {type(algorithm_name_result)}")
+                                continue
+                            
+                            logger.info(f"Algorithm {algo_name} result keys: {list(algorithm_name_result.keys())}")
                             
                             # Add preprocessing logs from algorithm result
                             algo_logs = algorithm_name_result.get('process_log', [])
@@ -333,8 +349,22 @@ def _process_entity_forecast(
                             process_log.append(f"    Error: {str(e)}")
                             continue
                     
-                    if not best_result or best_result['accuracy'] == 0 and not best_result.get('forecast'):
-                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed all parameter combinations, skipping")
+                    # Detailed validation check with logging
+                    if best_result:
+                        best_accuracy = best_result.get('accuracy', -1)
+                        best_forecast = best_result.get('forecast')
+                        forecast_len = len(best_forecast) if best_forecast is not None else 0
+                        logger.info(f"Algorithm {algo_config.algorithm_id} ({algo_name}): best_result validation: accuracy={best_accuracy}, forecast_length={forecast_len}, has_forecast={best_forecast is not None and len(best_forecast) > 0}")
+                    
+                    # Reject only if: NO result exists OR (result has NO forecast AND accuracy is zero)
+                    if not best_result:
+                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed all parameter combinations - no result returned")
+                        process_log.append(f"Algorithm {algo_name} failed all parameter combinations")
+                        return None
+                    
+                    forecast_exists = best_result.get('forecast') is not None and len(best_result.get('forecast', [])) > 0
+                    if not forecast_exists and best_result.get('accuracy', 0) == 0:
+                        logger.warning(f"Algorithm {algo_config.algorithm_id} failed all parameter combinations - no forecast and zero accuracy")
                         process_log.append(f"Algorithm {algo_name} failed all parameter combinations")
                         return None
 

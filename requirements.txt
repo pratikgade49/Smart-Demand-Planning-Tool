@@ -29,3 +29,4 @@ holidays>=0.25
 tensorflow==2.20.0
 keras==3.10.0
 plotly==5.15.0
+apscheduler==3.10.4

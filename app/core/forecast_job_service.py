@@ -38,7 +38,10 @@ class ForecastJobService:
         tenant_id: str,
         database_name: str,
         request_data: Dict[str, Any],
-        user_email: str
+        user_email: str = None,
+        job_id: str = None,
+        status: JobStatus = JobStatus.PENDING,
+        created_by: str = None
     ) -> Dict[str, Any]:
         """
         Create a new forecast job record.
@@ -47,13 +50,17 @@ class ForecastJobService:
             tenant_id: Tenant identifier
             database_name: Database name for tenant
             request_data: The forecast request data
-            user_email: Email of user who initiated the job
+            user_email: Email of user who initiated the job (deprecated in favor of created_by)
+            job_id: Optional job identifier (will be generated if not provided)
+            status: Initial job status
+            created_by: Name/Email of who created the job
 
         Returns:
             Job details including job_id
         """
         db_manager = get_db_manager()
-        job_id = str(uuid.uuid4())
+        job_id = job_id or str(uuid.uuid4())
+        created_by = created_by or user_email or "system"
         created_at = datetime.now(timezone.utc)
 
         try:
@@ -83,18 +90,18 @@ class ForecastJobService:
                     """, (
                         job_id,
                         tenant_id,
-                        JobStatus.PENDING.value,
+                        status.value if hasattr(status, 'value') else status,
                         json.dumps(request_data, default=str),
                         request_data.get('selected_metrics', ['mape', 'accuracy']),
                         created_at,
-                        user_email,
+                        created_by,
                         created_at
                     ))
                     conn.commit()
             logger.info(f"Created forecast job {job_id} for tenant {tenant_id}")
             return {
                 "job_id": job_id,
-                "status": JobStatus.PENDING.value,
+                "status": status.value if hasattr(status, 'value') else status,
                 "created_at": created_at.isoformat()
             }
         except Exception as e:

@@ -914,6 +914,43 @@ class SchemaManager:
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_run ON forecast_audit_log(forecast_run_id);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_timestamp ON forecast_audit_log(performed_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_forecast_audit_action ON forecast_audit_log(action);
+
+                    -- ========================================================================
+                    -- Forecast Schedules table (FULL AUDIT TRAIL + SOFT DELETE)
+                    -- For managing recurring forecast executions via APScheduler
+                    -- ========================================================================
+                    CREATE TABLE IF NOT EXISTS forecast_schedules (
+                        schedule_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        schedule_name VARCHAR(255) NOT NULL,
+                        description TEXT,
+                        request_data JSONB NOT NULL,
+                        cron_expression VARCHAR(100) NOT NULL,
+                        schedule_type VARCHAR(50) NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        
+                        -- Tracking fields
+                        last_run TIMESTAMP,
+                        next_run TIMESTAMP,
+                        last_job_id UUID,
+                        last_run_status VARCHAR(50),
+                        last_run_error TEXT,
+                        execution_count INTEGER DEFAULT 0,
+                        
+                        -- Audit fields (full trail with soft delete)
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by VARCHAR(255),
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_by VARCHAR(255),
+                        deleted_at TIMESTAMP,
+                        
+                        CONSTRAINT check_schedule_type CHECK (schedule_type IN ('once', 'hourly', 'daily', 'weekly', 'monthly', 'custom')),
+                        CONSTRAINT check_run_status CHECK (last_run_status IS NULL OR last_run_status IN ('Pending', 'In-Progress', 'Completed', 'Completed with Errors', 'Failed', 'Cancelled')),
+                        CONSTRAINT unique_schedule_name UNIQUE(schedule_name)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_forecast_schedules_active ON forecast_schedules(is_active) WHERE deleted_at IS NULL;
+                    CREATE INDEX IF NOT EXISTS idx_forecast_schedules_next_run ON forecast_schedules(next_run) WHERE is_active = TRUE AND deleted_at IS NULL;
+                    CREATE INDEX IF NOT EXISTS idx_forecast_schedules_created ON forecast_schedules(created_at DESC);
                     
                     -- ========================================================================
                     -- Create triggers for auto-updating updated_at columns
@@ -933,6 +970,12 @@ class SchemaManager:
                     DROP TRIGGER IF EXISTS update_forecast_runs_updated_at ON forecast_runs;
                     CREATE TRIGGER update_forecast_runs_updated_at 
                         BEFORE UPDATE ON forecast_runs
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                    
+                    DROP TRIGGER IF EXISTS update_forecast_schedules_updated_at ON forecast_schedules;
+                    CREATE TRIGGER update_forecast_schedules_updated_at 
+                        BEFORE UPDATE ON forecast_schedules
                         FOR EACH ROW
                         EXECUTE FUNCTION update_updated_at_column();
                     """

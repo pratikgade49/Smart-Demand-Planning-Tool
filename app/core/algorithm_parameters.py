@@ -137,6 +137,24 @@ class AlgorithmParametersService:
                     default_value=12,
                     min_value=1,
                     max_value=50
+                ),
+                ParameterDefinition(
+                    name="epochs",
+                    type="int",
+                    description="Number of training epochs",
+                    required=False,
+                    default_value=50,
+                    min_value=1,
+                    max_value=500
+                ),
+                ParameterDefinition(
+                    name="batch_size",
+                    type="int",
+                    description="Training batch size",
+                    required=False,
+                    default_value=32,
+                    min_value=1,
+                    max_value=256
                 )
             ]
         },

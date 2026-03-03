@@ -29,8 +29,10 @@ from app.api.routes import sales_data_routes
 from app.api.routes import dashboard_routes
 from app.api.routes import generic_dashboard_routes
 from app.api.routes import master_data_routes
+from app.api.routes import forecast_schedules_routes
 from app.api.middleware.monitoring_middleware import ResourceMonitoringMiddleware
 from app.api.middleware.request_audit_middleware import RequestAuditMiddleware
+from app.core.forecast_scheduler_service import ForecastSchedulerService
 
 
 
@@ -70,12 +72,34 @@ async def lifespan(app: FastAPI):
         log_operation_end(logger, "database_initialization", success=False, error=str(e))
         raise
     
+    # Initialize APScheduler for forecast scheduling
+    try:
+        log_operation_start(logger, "scheduler_initialization")
+        ForecastSchedulerService.initialize_scheduler()
+        ForecastSchedulerService.load_all_active_schedules()
+        logger.info("Forecast scheduler initialized successfully")
+        log_operation_end(logger, "scheduler_initialization", success=True)
+    except Exception as e:
+        logger.warning(f"Failed to initialize scheduler: {str(e)}", exc_info=True)
+        log_operation_end(logger, "scheduler_initialization", success=False, error=str(e))
+        # Don't raise - scheduler is optional
+    
     yield
     
     # Shutdown
     logger.info("=" * 80)
     logger.info("Shutting down Smart Demand Planning Tool API")
     logger.perf.log_performance_snapshot("Application Shutdown")
+    
+    # Shutdown scheduler
+    try:
+        log_operation_start(logger, "scheduler_shutdown")
+        ForecastSchedulerService.shutdown_scheduler()
+        logger.info("Forecast scheduler shutdown successfully")
+        log_operation_end(logger, "scheduler_shutdown", success=True)
+    except Exception as e:
+        logger.warning(f"Error during scheduler shutdown: {str(e)}", exc_info=True)
+        log_operation_end(logger, "scheduler_shutdown", success=False, error=str(e))
     
     try:
         log_operation_start(logger, "database_shutdown")
@@ -274,6 +298,8 @@ app.include_router(external_factors_routes.router, prefix="/api/v1")
 logger.debug("Registered external factors routes")
 app.include_router(forecast_comparison_routes.router, prefix="/api/v1")
 logger.debug("Registered forecast comparison routes")
+app.include_router(forecast_schedules_routes.router, prefix="/api/v1")
+logger.debug("Registered forecast schedules routes")
 app.include_router(sap_ibp_routes.router, prefix="/api/v1")
 logger.debug("Registered SAP IBP routes")
 app.include_router(master_data_routes.router, prefix="/api/v1")

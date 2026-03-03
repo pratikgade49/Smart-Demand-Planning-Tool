@@ -2036,9 +2036,7 @@ This makes the trend robust to spikes and outliers
             import numpy as np
             import tensorflow as tf
             
-            random.seed(42)
-            np.random.seed(42)
-            tf.random.set_seed(42)
+
             warnings.filterwarnings('ignore')
 
             # Prepare quantity data
@@ -2277,9 +2275,6 @@ This makes the trend robust to spikes and outliers
             import numpy as np
             import tensorflow as tf
             
-            random.seed(42)
-            np.random.seed(42)
-            tf.random.set_seed(42)
             
             if 'total_quantity' in data.columns:
                 y = data['total_quantity'].values
@@ -2552,7 +2547,6 @@ This makes the trend robust to spikes and outliers
                     stepwise=True,
                     suppress_warnings=True,
                     error_action='ignore',
-                    random_state=42,
 
                     trace=False
                 )
@@ -2841,7 +2835,6 @@ This makes the trend robust to spikes and outliers
                 n_estimators=n_estimators,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
-                random_state=42,  # Fixed random state for reproducible results
                 n_jobs=-1,
                 verbosity=0
             )
@@ -3369,7 +3362,9 @@ This makes the trend robust to spikes and outliers
                 result['mape'] = round(mape, 2)
 
             # Calculate accuracy if requested (derived from MAPE)
-            if 'accuracy' in selected_metrics:
+            # NOTE: Always calculate accuracy even if not explicitly requested - 
+            # it's needed for algorithm ranking/selection logic in forecast_utils.py
+            if 'accuracy' not in result:
                 if 'mape' not in result:
                     # Calculate MAPE if not already calculated
                     mask = actual != 0
@@ -3379,8 +3374,11 @@ This makes the trend robust to spikes and outliers
                     else:
                         mape = 100.0
                     mape = min(float(mape), 100.0)
+                    result['mape'] = round(mape, 2)
+                else:
+                    mape = result.get('mape', 100.0)
 
-                accuracy = max(0.0, 100.0 - result.get('mape', mape))
+                accuracy = max(0.0, 100.0 - mape)
                 result['accuracy'] = round(accuracy, 2)
 
             logger.debug(f"Calculated metrics: {result}")
@@ -4174,7 +4172,8 @@ This makes the trend robust to spikes and outliers
             # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
             
-            return {
+            # Build return dictionary
+            result_dict = {
                 'algorithm': algorithm_name,
                 'forecast': forecast_list,
                 'test_forecast': test_forecast_list,
@@ -4182,6 +4181,9 @@ This makes the trend robust to spikes and outliers
                 'process_log': algo_process_log,
                 **metrics
             }
+            
+            logger.info(f"Algorithm {algorithm_name}: Successfully built result dict with keys: {list(result_dict.keys())}, forecast length: {len(result_dict.get('forecast', []))}, accuracy: {result_dict.get('accuracy', 'N/A')}")
+            return result_dict
             
         except Exception as e:
             logger.error(f"Error running algorithm {algorithm_name}: {str(e)}", exc_info=True)
