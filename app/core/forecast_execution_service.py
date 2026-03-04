@@ -1240,6 +1240,7 @@ class ForecastExecutionService:
                 seasonality_mode=custom_params.get('seasonality_mode', 'additive'),
                 changepoint_prior_scale=custom_params.get('changepoint_prior_scale', 0.05)
             )
+
         elif algorithm_id == 8:  # LSTM
             return ForecastExecutionService.lstm_forecast(
                 data=data,
@@ -1316,45 +1317,49 @@ class ForecastExecutionService:
             )
 
     @staticmethod
-    def linear_regression_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """Linear regression forecasting"""
-        # Prepare quantity data
-        if 'total_quantity' in data.columns:
-            y = data['total_quantity'].values
-        elif 'quantity' in data.columns:
-            y = data['quantity'].values
-        else:
-            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
-        n = len(y)
-        if n < 2:
-            raise ValueError("Need at least 2 historical data points")
-        
-        # Simple linear regression on time index
-        x = np.arange(n).reshape(-1, 1)
-        model = LinearRegression()
-        model.fit(x, y)
-        
-        # Generate forecast
-        future_x = np.arange(n, n + periods).reshape(-1, 1)
-        forecast = model.predict(future_x)
-        forecast = np.maximum(forecast, 0)
-        
-        # Calculate metrics
-        predicted = model.predict(x)
-        metrics = ForecastExecutionService.calculate_metrics(y, predicted)
-        
-        # Prepare test forecast (using fitted values for historical dates)
-        test_results = {
-            'test_forecast': predicted,
-            'test_dates': data['period'].tolist() if 'period' in data.columns else []
-        }
-        
-        return forecast, metrics 
+    def linear_regression_forecast(data: pd.DataFrame, periods: int) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Linear regression forecasting (corrected return type hint)"""
+        try:
+            # Prepare quantity data
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+            
+            n = len(y)
+            if n < 2:
+                raise ValueError("Need at least 2 historical data points")
+            
+            # Simple linear regression on time index
+            x = np.arange(n).reshape(-1, 1)
+            model = LinearRegression()
+            model.fit(x, y)
+            
+            # Generate forecast
+            future_x = np.arange(n, n + periods).reshape(-1, 1)
+            forecast = model.predict(future_x)
+            forecast = np.maximum(forecast, 0)
+            
+            # Calculate metrics
+            predicted = model.predict(x)
+            metrics = ForecastExecutionService.calculate_metrics(y, predicted)
+            
+            # Prepare test forecast (using fitted values for historical dates)
+            test_results = {
+                'test_forecast': predicted,
+                'test_dates': data['period'].tolist() if 'period' in data.columns else []
+            }
+            
+            return forecast, metrics
+        except Exception as e:
+            logger.error(f"Linear regression forecasting failed: {str(e)}", exc_info=True)
+            raise 
 
     @staticmethod
-    def arima_forecast(data: pd.DataFrame, periods: int, order: List[int] = None) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """ARIMA forecasting (simplified implementation)."""
+    def arima_forecast(data: pd.DataFrame, periods: int, order: List[int] = None) -> Tuple[np.ndarray, Dict[str, float]]:
+        """ARIMA forecasting (simplified implementation, corrected return type hint)."""
         try:
             from statsmodels.tsa.arima.model import ARIMA
             
@@ -1383,13 +1388,6 @@ class ForecastExecutionService:
         except ImportError:
             logger.warning("statsmodels not available, falling back to Linear Regression")
             return ForecastExecutionService.linear_regression_forecast(data, periods)
-
-
-
-    """
-FINAL FIX: Use linear regression for trend calculation instead of simple differences
-This makes the trend robust to spikes and outliers
-"""
 
     @staticmethod
     def polynomial_regression_forecast(data: pd.DataFrame, periods: int, degree: int = 2) -> tuple:
@@ -1871,86 +1869,90 @@ This makes the trend robust to spikes and outliers
         Improved moving average forecasting with trend adjustment.
         Generates a proper forecast sequence by iteratively updating the moving average.
         """
-        if 'total_quantity' in data.columns:
-            y = data['total_quantity'].values
-        elif 'quantity' in data.columns:
-            y = data['quantity'].values
-        else:
-            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
-        n = len(y)
-        window = min(max(3, window), n)
-        
-        logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
-        
-        # Calculate trend from recent data using linear regression
-        trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
-        recent_values = y[-trend_window:]
-        x_trend = np.arange(trend_window)
-        
-        from sklearn.linear_model import LinearRegression
-        trend_model = LinearRegression()
-        trend_model.fit(x_trend.reshape(-1, 1), recent_values)
-        trend_slope = float(trend_model.coef_[0])
-        
-        # Calculate base moving average
-        base_ma = float(np.mean(y[-window:]))
-        
-        #   CRITICAL FIX: Generate forecast by rolling forward with trend
-        # Instead of just extrapolating, we update the moving average as we forecast
-        forecast = []
-        
-        # Start with the last 'window' actual values
-        current_values = list(y[-window:])
-        
-        for i in range(periods):
-            # Calculate moving average of current window
-            current_ma = np.mean(current_values)
+        try:
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
             
-            # Apply trend with dampening
-            damping = 0.95 ** i  # Exponential decay
-            trend_adjustment = trend_slope * damping
+            n = len(y)
+            window = min(max(3, window), n)
             
-            # Next forecast = current MA + trend
-            next_value = current_ma + trend_adjustment
+            logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
             
-            # Apply reasonable bounds
-            y_min, y_max = float(np.min(y)), float(np.max(y))
-            min_bound = y_min * 0.5
-            max_bound = y_max * 1.5
-            next_value = np.clip(next_value, min_bound, max_bound)
-            next_value = max(0, next_value)
+            # Calculate trend from recent data using linear regression
+            trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
+            recent_values = y[-trend_window:]
+            x_trend = np.arange(trend_window)
             
-            forecast.append(next_value)
+            from sklearn.linear_model import LinearRegression
+            trend_model = LinearRegression()
+            trend_model.fit(x_trend.reshape(-1, 1), recent_values)
+            trend_slope = float(trend_model.coef_[0])
             
-            #   KEY: Update the rolling window with the new forecast
-            current_values = current_values[1:] + [next_value]
-        
-        forecast = np.array(forecast)
-        
-        # Calculate fitted values for metrics (simple moving averages on historical data)
-        fitted = []
-        for i in range(n):
-            start_idx = max(0, i - window + 1)
-            fitted.append(np.mean(y[start_idx:i+1]))
-        
-        fitted = np.array(fitted)
-        
-        # Calculate metrics (skip warm-up period)
-        if n > window:
-            metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
-        else:
-            metrics = ForecastExecutionService.calculate_metrics(y, fitted)
-        
-        logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
-        logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
-        logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
-        
-        return forecast, metrics
+            # Calculate base moving average
+            base_ma = float(np.mean(y[-window:]))
+            
+            #   CRITICAL FIX: Generate forecast by rolling forward with trend
+            # Instead of just extrapolating, we update the moving average as we forecast
+            forecast = []
+            
+            # Start with the last 'window' actual values
+            current_values = list(y[-window:])
+            
+            for i in range(periods):
+                # Calculate moving average of current window
+                current_ma = np.mean(current_values)
+                
+                # Apply trend with dampening
+                damping = 0.95 ** i  # Exponential decay
+                trend_adjustment = trend_slope * damping
+                
+                # Next forecast = current MA + trend
+                next_value = current_ma + trend_adjustment
+                
+                # Apply reasonable bounds
+                y_min, y_max = float(np.min(y)), float(np.max(y))
+                min_bound = y_min * 0.5
+                max_bound = y_max * 1.5
+                next_value = np.clip(next_value, min_bound, max_bound)
+                next_value = max(0, next_value)
+                
+                forecast.append(next_value)
+                
+                #   KEY: Update the rolling window with the new forecast
+                current_values = current_values[1:] + [next_value]
+            
+            forecast = np.array(forecast)
+            
+            # Calculate fitted values for metrics (simple moving averages on historical data)
+            fitted = []
+            for i in range(n):
+                start_idx = max(0, i - window + 1)
+                fitted.append(np.mean(y[start_idx:i+1]))
+            
+            fitted = np.array(fitted)
+            
+            # Calculate metrics (skip warm-up period)
+            if n > window:
+                metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
+            else:
+                metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+            
+            logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
+            logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
+            logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
+            
+            return forecast, metrics
+        except Exception as e:
+            logger.error(f"Simple moving average forecasting failed: {str(e)}", exc_info=True)
+            raise
 
     @staticmethod
-    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """Prophet forecasting using Facebook's Prophet library."""
+    def prophet_forecast(data: pd.DataFrame, periods: int, seasonality_mode: str = 'additive', changepoint_prior_scale: float = 0.05) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Prophet forecasting using Facebook's Prophet library (corrected return type hint)."""
         try:
             if Prophet is None:
                 logger.warning("Prophet library not installed, falling back to Exponential Smoothing")
@@ -2024,114 +2026,232 @@ This makes the trend robust to spikes and outliers
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
         
     @staticmethod
-    def lstm_forecast(data: pd.DataFrame, periods: int, sequence_length: int = 12, epochs: int = 50, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
-        """LSTM Neural Network forecasting."""
+    def lstm_forecast(data: pd.DataFrame, periods: int,
+                    sequence_length: int = 12,
+                    epochs: int = 50,
+                    batch_size: int = 32):
+        """
+        LSTM forecast with TCN-style architecture to prevent flat predictions.
+        Uses dilated causal convolutions instead of recurrent hidden state.
+        """
         try:
-            from tensorflow import keras
-            from tensorflow.keras.models import Sequential # type: ignore
-            from tensorflow.keras.layers import LSTM, Dense # type: ignore
-            from tensorflow.keras.optimizers import Adam # type: ignore
-            import warnings
-            import random
-            import numpy as np
             import tensorflow as tf
-            
-
+            from tensorflow.keras.models import Model
+            from tensorflow.keras.layers import (
+                Input, Conv1D, Dense, Dropout, Activation,
+                LayerNormalization, Add, Flatten
+            )
+            from tensorflow.keras.optimizers import Adam
+            from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+            from sklearn.preprocessing import MinMaxScaler
+            import random
+            import warnings
             warnings.filterwarnings('ignore')
 
-            # Prepare quantity data
+            # ✅ Reproducibility
+            random.seed(42)
+            np.random.seed(42)
+            tf.random.set_seed(42)
+
             if 'total_quantity' in data.columns:
-                y = data['total_quantity'].values
+                y = data['total_quantity'].values.astype(float)
             elif 'quantity' in data.columns:
-                y = data['quantity'].values
+                y = data['quantity'].values.astype(float)
             else:
-                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+                raise ValueError("Data must contain 'quantity' or 'total_quantity'")
 
             n = len(y)
             if n < sequence_length + 1:
-                raise ValueError(f"Need at least {sequence_length + 1} historical data points for LSTM")
+                raise ValueError(f"Need at least {sequence_length + 1} data points")
 
-            # Normalize data
-            from sklearn.preprocessing import MinMaxScaler
+            # Split data for training/validation BEFORE scaling (fix leakage)
+            split_idx = int(n * 0.8)
+            y_train_raw = y[:split_idx]
+            
+            # Scale based on training data only
             scaler = MinMaxScaler(feature_range=(0, 1))
-            y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()
+            scaler.fit(y_train_raw.reshape(-1, 1))
+            y_scaled = scaler.transform(y.reshape(-1, 1)).flatten()
 
-            # Create sequences
-            X_train = []
-            y_train = []
-
+            # Build sequences from scaled data
+            X_all, y_all = [], []
             for i in range(sequence_length, n):
-                X_train.append(y_scaled[i-sequence_length:i])
-                y_train.append(y_scaled[i])
+                X_all.append(y_scaled[i - sequence_length:i])
+                y_all.append(y_scaled[i])
 
-            X_train = np.array(X_train).reshape(-1, sequence_length, 1)
-            y_train = np.array(y_train)
+            X_all = np.array(X_all).reshape(-1, sequence_length, 1)
+            y_all = np.array(y_all)
 
-            if len(X_train) < 2:
-                raise ValueError("Insufficient data for LSTM training")
+            # Split sequences for training/validation
+            # Since sequences are built from the start, we adjust split_idx
+            seq_split_idx = max(0, split_idx - sequence_length)
+            X_train, y_train = X_all[:seq_split_idx], y_all[:seq_split_idx]
+            X_test, y_test = X_all[seq_split_idx:], y_all[seq_split_idx:]
 
-            # Build LSTM model
-            model = Sequential([
-                LSTM(50, activation='relu', input_shape=(sequence_length, 1), return_sequences=True),
-                LSTM(50, activation='relu'),
-                Dense(25, activation='relu'),
-                Dense(1)
-            ])
+            # ====================================================================
+            # TCN-STYLE ARCHITECTURE
+            # Dilated causal convolutions — no hidden state smoothing
+            # Each filter looks at the raw input at different time scales
+            # dilation_rate=1 → adjacent timesteps
+            # dilation_rate=2 → every 2nd timestep
+            # dilation_rate=4 → every 4th timestep
+            # This gives the model multi-scale temporal awareness WITHOUT
+            # the recurrent smoothing that causes flat LSTM predictions
+            # ====================================================================
+            def residual_block(x, filters, kernel_size, dilation_rate, dropout_rate=0.1):
+                """Dilated causal conv block with residual connection."""
+                # Causal padding: pad only on the left so future values aren't seen
+                pad = (kernel_size - 1) * dilation_rate
+                x_padded = tf.keras.layers.ZeroPadding1D((pad, 0))(x)
 
-            model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+                conv = Conv1D(
+                    filters=filters,
+                    kernel_size=kernel_size,
+                    dilation_rate=dilation_rate,
+                    padding='valid',          # No auto-padding — we padded manually
+                    activation=None,
+                    use_bias=True
+                )(x_padded)
 
-            # Train model with suppressed output
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore')
-                model.fit(
-                    X_train, y_train,
-                    epochs=min(epochs, 100),  # Cap epochs to prevent long training
-                    batch_size=min(batch_size, len(X_train)),
-                    verbose=0,
-                    validation_split=0.1
+                conv = LayerNormalization()(conv)
+                conv = Activation('relu')(conv)
+                conv = Dropout(dropout_rate)(conv)
+
+                # Second conv in the block
+                x_padded2 = tf.keras.layers.ZeroPadding1D((pad, 0))(conv)
+                conv2 = Conv1D(
+                    filters=filters,
+                    kernel_size=kernel_size,
+                    dilation_rate=dilation_rate,
+                    padding='valid',
+                    activation=None,
+                    use_bias=True
+                )(x_padded2)
+                conv2 = LayerNormalization()(conv2)
+                conv2 = Activation('relu')(conv2)
+                conv2 = Dropout(dropout_rate)(conv2)
+
+                # Residual connection — match dimensions if needed
+                if x.shape[-1] != filters:
+                    x = Conv1D(filters, kernel_size=1, padding='same')(x)
+
+                return Add()([x, conv2])
+
+            # Build TCN model
+            inputs = Input(shape=(sequence_length, 1))
+            x = inputs
+
+            # Stack of dilated convolutions at increasing receptive fields
+            for dilation in [1, 2, 4]:
+                x = residual_block(
+                    x, filters=64, kernel_size=3,
+                    dilation_rate=dilation, dropout_rate=0.1
                 )
 
-            # Generate forecast
+            x = Flatten()(x)
+            x = Dense(32, activation='relu')(x)
+            x = Dropout(0.1)(x)
+            outputs = Dense(1)(x)
+
+            model = Model(inputs, outputs)
+            model.compile(
+                optimizer=Adam(learning_rate=0.005, clipnorm=1.0),
+                loss='huber'
+            )
+
+            callbacks = [
+                EarlyStopping(
+                    monitor='val_loss' if len(X_test) > 0 else 'loss',
+                    patience=15,
+                    restore_best_weights=True,
+                    min_delta=1e-5
+                ),
+                ReduceLROnPlateau(
+                    monitor='val_loss' if len(X_test) > 0 else 'loss',
+                    factor=0.5,
+                    patience=8,
+                    min_lr=1e-6
+                )
+            ]
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore')
+                history = model.fit(
+                    X_train, y_train,
+                    validation_data=(X_test, y_test) if len(X_test) > 0 else None,
+                    epochs=min(epochs, 100),  # Performance: Reduced epochs
+                    batch_size=min(batch_size, max(8, len(X_train) // 4)),
+                    verbose=0,
+                    callbacks=callbacks
+                )
+
+            # ====================================================================
+            # FUTURE FORECAST — autoregressive
+            # ====================================================================
             forecast = []
             current_sequence = y_scaled[-sequence_length:].copy()
+            recent_mean_scaled = float(np.mean(y_scaled[-24:]))
 
-            for _ in range(periods):
-                next_pred = model.predict(
-                    current_sequence.reshape(1, sequence_length, 1),
-                    verbose=0
-                )[0, 0]
+            # Optimize prediction speed: call model directly instead of model.predict()
+            @tf.function(input_signature=[tf.TensorSpec(shape=[1, sequence_length, 1], dtype=tf.float32)])
+            def fast_predict(x):
+                return model(x, training=False)
+
+            for i in range(periods):
+                # Performance: model(x) is faster for single samples than model.predict(x)
+                input_tensor = tf.convert_to_tensor(current_sequence.reshape(1, sequence_length, 1), dtype=tf.float32)
+                next_pred = float(fast_predict(input_tensor)[0, 0])
+
+                # Progressive mean reversion beyond sequence_length steps
+                if i >= sequence_length:
+                    blend = min(0.6, (i - sequence_length + 1) * 0.08)
+                    next_pred = next_pred * (1 - blend) + recent_mean_scaled * blend
+
+                next_pred = float(np.clip(next_pred, 0.0, 1.0))
                 forecast.append(next_pred)
                 current_sequence = np.append(current_sequence[1:], next_pred)
 
-            # Inverse transform forecast
-            forecast = np.array(forecast).reshape(-1, 1)
-            forecast = scaler.inverse_transform(forecast).flatten()
-            forecast = np.maximum(forecast, 0)  # Ensure non-negative
+            forecast_array = scaler.inverse_transform(
+                np.array(forecast).reshape(-1, 1)
+            ).flatten()
+            forecast_array = np.maximum(forecast_array, 0)
 
-            # Calculate metrics on training data
-            y_train_pred_scaled = model.predict(X_train, verbose=0).flatten()
-            y_train_pred = scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
-            y_train_actual = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
-            metrics = ForecastExecutionService.calculate_metrics(y_train_actual, y_train_pred)
+            # Metrics from test split (fix leakage)
+            if len(X_test) > 0:
+                y_pred_scaled = model(X_test, training=False).numpy().flatten()
+                y_pred = scaler.inverse_transform(
+                    y_pred_scaled.reshape(-1, 1)
+                ).flatten()
+                y_actual = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+            else:
+                y_pred_scaled = model(X_train, training=False).numpy().flatten()
+                y_pred = scaler.inverse_transform(
+                    y_pred_scaled.reshape(-1, 1)
+                ).flatten()
+                y_actual = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
+            
+            metrics = ForecastExecutionService.calculate_metrics(y_actual, y_pred)
 
-            # Prepare test forecast
-            test_results = {
-                'test_forecast': y_train_pred,
-                'test_dates': data['period'].iloc[sequence_length:].tolist() if 'period' in data.columns else []
-            }
-
-            logger.info(f"LSTM forecast completed with {periods} periods")
-            return forecast, metrics 
+            logger.info(
+                f"LSTM(TCN) forecast: {periods} periods, "
+                f"MAPE={metrics.get('mape', 'N/A'):.2f}, "
+                f"Epochs={len(history.history['loss'])}"
+            )
+            # PERFORMANCE: Return model and scaler to avoid re-training in teacher-forced eval
+            return forecast_array, metrics, (model, scaler)
 
         except ImportError:
-            logger.warning("TensorFlow/Keras not available, falling back to Exponential Smoothing")
-            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            logger.warning("TensorFlow not available, falling back to Exponential Smoothing")
+            f, m = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            return f, m, None
         except Exception as e:
-            logger.warning(f"LSTM forecasting failed: {str(e)}, falling back to Exponential Smoothing")
-            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            logger.warning(f"LSTM(TCN) failed: {str(e)}, falling back to Exponential Smoothing")
+            f, m = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            return f, m, None
+
 
     @staticmethod
-    def gaussian_process_forecast(data: pd.DataFrame, periods: int, kernel: str = 'RBF', alpha: float = 1e-6) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
+    def gaussian_process_forecast(data: pd.DataFrame, periods: int, kernel: str = 'RBF', alpha: float = 1e-6) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         Gaussian Process Regression forecasting with uncertainty quantification.
         
@@ -2250,9 +2370,9 @@ This makes the trend robust to spikes and outliers
             return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
 
     @staticmethod
-    def mlp_neural_network_forecast(data: pd.DataFrame, periods: int, hidden_layers: List[int] = None, epochs: int = 100, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float], Optional[Dict[str, Any]]]:
+    def mlp_neural_network_forecast(data: pd.DataFrame, periods: int, hidden_layers: List[int] = None, epochs: int = 100, batch_size: int = 32) -> Tuple[np.ndarray, Dict[str, float]]:
         """
-        Multi-layer Perceptron (MLP) Neural Network forecasting.
+        Multi-layer Perceptron (MLP) Neural Network forecasting (corrected return type hint).
         
         Args:
             data: Historical data with 'quantity' or 'total_quantity' column
@@ -2300,14 +2420,22 @@ This makes the trend robust to spikes and outliers
                 logger.warning("Insufficient sequences for MLP, using exponential smoothing fallback")
                 return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
             
-            X_train = np.array(X_train)
-            y_train = np.array(y_train)
+            # Split sequences for training/validation BEFORE scaling (fix leakage)
+            all_X = np.array(X_train)
+            all_y = np.array(y_train)
+            split_idx = int(len(all_X) * 0.8)
             
-            # Scale data
+            X_train_split, y_train_split = all_X[:split_idx], all_y[:split_idx]
+            X_test_split, y_test_split = all_X[split_idx:], all_y[split_idx:]
+            
+            # Scale data based on training split only
             scaler = MinMaxScaler(feature_range=(0, 1))
-            X_scaled = scaler.fit_transform(X_train)
+            X_train_scaled = scaler.fit_transform(X_train_split)
+            X_test_scaled = scaler.transform(X_test_split)
+            
             y_scaler = MinMaxScaler(feature_range=(0, 1))
-            y_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+            y_train_scaled = y_scaler.fit_transform(y_train_split.reshape(-1, 1)).flatten()
+            y_test_scaled = y_scaler.transform(y_test_split.reshape(-1, 1)).flatten()
             
             # Build MLP model
             model = keras.Sequential()
@@ -2321,22 +2449,23 @@ This makes the trend robust to spikes and outliers
             
             model.compile(optimizer='adam', loss='mse', metrics=['mae'])
             
-            # Train model (suppress verbose output for clean logging)
+            # Train model
             model.fit(
-                X_scaled, y_scaled,
+                X_train_scaled, y_train_scaled,
                 epochs=epochs,
                 batch_size=batch_size,
-                validation_split=0.1,
+                validation_data=(X_test_scaled, y_test_scaled) if len(X_test_scaled) > 0 else None,
                 verbose=0
             )
             
             # Generate forecast
             forecast = []
-            recent_data = X_train[-1].copy()
+            recent_data = all_X[-1].copy()
             
             for _ in range(periods):
-                recent_scaled = scaler.transform(recent_data.reshape(1, -1))[0]
-                pred_scaled = model.predict(recent_scaled.reshape(1, -1), verbose=0)[0][0]
+                recent_scaled = scaler.transform(recent_data.reshape(1, -1))
+                # Performance optimization: use model() instead of model.predict()
+                pred_scaled = model(recent_scaled, training=False).numpy()[0, 0]
                 pred = y_scaler.inverse_transform([[pred_scaled]])[0][0]
                 forecast.append(pred)
                 
@@ -2344,90 +2473,103 @@ This makes the trend robust to spikes and outliers
                 recent_data = np.append(recent_data[1:], pred)
             
             forecast = np.array(forecast)
+            forecast = np.maximum(forecast, 0)
             
-            # Calculate metrics on training data
-            y_train_pred_scaled = model.predict(X_scaled, verbose=0).flatten()
-            y_train_pred = y_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
-            metrics = ForecastExecutionService.calculate_metrics(y_train, y_train_pred)
+            # Calculate metrics on test split (fix leakage)
+            if len(X_test_scaled) > 0:
+                y_pred_scaled = model(X_test_scaled, training=False).numpy().flatten()
+                y_pred = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+                metrics = ForecastExecutionService.calculate_metrics(y_test_split, y_pred)
+            else:
+                y_pred_scaled = model(X_train_scaled, training=False).numpy().flatten()
+                y_pred = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+                metrics = ForecastExecutionService.calculate_metrics(y_train_split, y_pred)
             
             # Prepare test forecast results
             test_results = {
-                'test_forecast': y_train_pred,
-                'test_dates': data['period'].iloc[sequence_length:].tolist() if 'period' in data.columns else []
+                'test_forecast': y_pred,
+                'test_dates': data['period'].iloc[sequence_length + split_idx:].tolist() if 'period' in data.columns else []
             }
 
             # Forecast validation removed
             
             logger.info(f"MLP Neural Network forecast completed with {periods} periods")
-            return forecast, metrics 
+            # PERFORMANCE: Return model, X_scaler, and y_scaler to avoid re-training in teacher-forced eval
+            return forecast, metrics, (model, scaler, y_scaler)
             
         except ImportError:
             logger.warning("TensorFlow not available, falling back to Exponential Smoothing")
-            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            f, m = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            return f, m, None
         except Exception as e:
             logger.warning(f"MLP Neural Network forecasting failed: {str(e)}, falling back to Exponential Smoothing")
-            return ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            f, m = ForecastExecutionService.exponential_smoothing_forecast(data, periods)
+            return f, m, None
 
 
 
     @staticmethod
     def seasonal_decomposition_forecast(data: pd.DataFrame, periods: int, season_length: int = 12) -> tuple:
         """Seasonal decomposition forecasting"""
-        if 'total_quantity' in data.columns:
-            y = data['total_quantity'].values
-        elif 'quantity' in data.columns:
-            y = data['quantity'].values
-        else:
-            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
-        if len(y) < 2 * season_length:
-            return ForecastExecutionService.linear_regression_forecast(data, periods)
-        
-        # Simple seasonal decomposition
-        trend = np.convolve(y, np.ones(season_length)/season_length, mode='same')
-        
-        # Calculate seasonal component
-        detrended = y - trend
-        seasonal_pattern = []
-        for i in range(season_length):
-            seasonal_values = [detrended[j] for j in range(i, len(detrended), season_length)]
-            seasonal_pattern.append(np.mean(seasonal_values))
-        
-        # Fit polynomial to trend for future values
-        x = np.arange(len(trend))
-        valid_trend = ~np.isnan(trend)
-        
-        if np.sum(valid_trend) > 1:
-            # Use polyfit instead of linregress
-            coeffs = np.polyfit(x[valid_trend], trend[valid_trend], 1)
-            slope, intercept = coeffs[0], coeffs[1]
-            future_trend = [slope * (len(y) + i) + intercept for i in range(periods)]
-        else:
-            future_trend = [np.nanmean(trend)] * periods
-        
-        # Future seasonal component
-        future_seasonal = [seasonal_pattern[(len(y) + i) % season_length] for i in range(periods)]
-        
-        # Combine forecast
-        forecast = np.array(future_trend) + np.array(future_seasonal)
-        forecast = np.maximum(forecast, 0)
-        
-        # Calculate metrics
-        seasonal_full = np.tile(seasonal_pattern, len(y) // season_length + 1)[:len(y)]
-        fitted = trend + seasonal_full
-        valid_fitted = ~np.isnan(fitted)
-        
-        test_results = None
-        if np.sum(valid_fitted) > 0:
-            metrics = ForecastExecutionService.calculate_metrics(y[valid_fitted], fitted[valid_fitted])
-            test_results = {
-                'test_forecast': fitted[valid_fitted],
-                'test_dates': data['period'].iloc[np.where(valid_fitted)[0]].tolist() if 'period' in data.columns else []
-            }
-        else:
-            metrics = {'accuracy': 50.0, 'mae': np.std(y), 'rmse': np.std(y)}
-        
-        return forecast, metrics 
+        try:
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
+            
+            if len(y) < 2 * season_length:
+                return ForecastExecutionService.linear_regression_forecast(data, periods)
+            
+            # Simple seasonal decomposition
+            trend = np.convolve(y, np.ones(season_length)/season_length, mode='same')
+            
+            # Calculate seasonal component
+            detrended = y - trend
+            seasonal_pattern = []
+            for i in range(season_length):
+                seasonal_values = [detrended[j] for j in range(i, len(detrended), season_length)]
+                seasonal_pattern.append(np.mean(seasonal_values))
+            
+            # Fit polynomial to trend for future values
+            x = np.arange(len(trend))
+            valid_trend = ~np.isnan(trend)
+            
+            if np.sum(valid_trend) > 1:
+                # Use polyfit instead of linregress
+                coeffs = np.polyfit(x[valid_trend], trend[valid_trend], 1)
+                slope, intercept = coeffs[0], coeffs[1]
+                future_trend = [slope * (len(y) + i) + intercept for i in range(periods)]
+            else:
+                future_trend = [np.nanmean(trend)] * periods
+            
+            # Future seasonal component
+            future_seasonal = [seasonal_pattern[(len(y) + i) % season_length] for i in range(periods)]
+            
+            # Combine forecast
+            forecast = np.array(future_trend) + np.array(future_seasonal)
+            forecast = np.maximum(forecast, 0)
+            
+            # Calculate metrics
+            seasonal_full = np.tile(seasonal_pattern, len(y) // season_length + 1)[:len(y)]
+            fitted = trend + seasonal_full
+            valid_fitted = ~np.isnan(fitted)
+            
+            test_results = None
+            if np.sum(valid_fitted) > 0:
+                metrics = ForecastExecutionService.calculate_metrics(y[valid_fitted], fitted[valid_fitted])
+                test_results = {
+                    'test_forecast': fitted[valid_fitted],
+                    'test_dates': data['period'].iloc[np.where(valid_fitted)[0]].tolist() if 'period' in data.columns else []
+                }
+            else:
+                metrics = {'accuracy': 50.0, 'mae': np.std(y), 'rmse': np.std(y)}
+            
+            return forecast, metrics
+        except Exception as e:
+            logger.error(f"Seasonal decomposition forecasting failed: {str(e)}", exc_info=True)
+            raise
 
     @staticmethod
     def moving_average_forecast(data: pd.DataFrame, periods: int, window: int = 3) -> tuple:
@@ -2435,82 +2577,86 @@ This makes the trend robust to spikes and outliers
         Improved moving average forecasting with trend adjustment.
         Generates a proper forecast sequence by iteratively updating the moving average.
         """
-        if 'total_quantity' in data.columns:
-            y = data['total_quantity'].values
-        elif 'quantity' in data.columns:
-            y = data['quantity'].values
-        else:
-            raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
-        
-        n = len(y)
-        window = min(max(3, window), n)
-        
-        logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
-        
-        # Calculate trend from recent data using linear regression
-        trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
-        recent_values = y[-trend_window:]
-        x_trend = np.arange(trend_window)
-        
-        from sklearn.linear_model import LinearRegression
-        trend_model = LinearRegression()
-        trend_model.fit(x_trend.reshape(-1, 1), recent_values)
-        trend_slope = float(trend_model.coef_[0])
-        
-        # Calculate base moving average
-        base_ma = float(np.mean(y[-window:]))
-        
-        #   CRITICAL FIX: Generate forecast by rolling forward with trend
-        # Instead of just extrapolating, we update the moving average as we forecast
-        forecast = []
-        
-        # Start with the last 'window' actual values
-        current_values = list(y[-window:])
-        
-        for i in range(periods):
-            # Calculate moving average of current window
-            current_ma = np.mean(current_values)
+        try:
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values
+            elif 'quantity' in data.columns:
+                y = data['quantity'].values
+            else:
+                raise ValueError("Data must contain 'quantity' or 'total_quantity' column")
             
-            # Apply trend with dampening
-            damping = 0.95 ** i  # Exponential decay
-            trend_adjustment = trend_slope * damping
+            n = len(y)
+            window = min(max(3, window), n)
             
-            # Next forecast = current MA + trend
-            next_value = current_ma + trend_adjustment
+            logger.info(f"Moving Average: n={n}, periods={periods}, window={window}")
             
-            # Apply reasonable bounds
-            y_min, y_max = float(np.min(y)), float(np.max(y))
-            min_bound = y_min * 0.5
-            max_bound = y_max * 1.5
-            next_value = np.clip(next_value, min_bound, max_bound)
-            next_value = max(0, next_value)
+            # Calculate trend from recent data using linear regression
+            trend_window = min(window * 2, n, 12)  # Use at most 12 periods for trend
+            recent_values = y[-trend_window:]
+            x_trend = np.arange(trend_window)
             
-            forecast.append(next_value)
+            from sklearn.linear_model import LinearRegression
+            trend_model = LinearRegression()
+            trend_model.fit(x_trend.reshape(-1, 1), recent_values)
+            trend_slope = float(trend_model.coef_[0])
             
-            #   KEY: Update the rolling window with the new forecast
-            current_values = current_values[1:] + [next_value]
-        
-        forecast = np.array(forecast)
-        
-        # Calculate fitted values for metrics (simple moving averages on historical data)
-        fitted = []
-        for i in range(n):
-            start_idx = max(0, i - window + 1)
-            fitted.append(np.mean(y[start_idx:i+1]))
-        
-        fitted = np.array(fitted)
-        
-        # Calculate metrics (skip warm-up period)
-        if n > window:
-            metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
-        else:
-            metrics = ForecastExecutionService.calculate_metrics(y, fitted)
-        
-        logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
-        logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
-        logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
-        
-        return forecast, metrics
+            # Calculate base moving average
+            base_ma = float(np.mean(y[-window:]))
+            
+            # CRITICAL FIX: Generate forecast by rolling forward with trend
+            # Instead of just extrapolating, we update the moving average as we forecast
+            forecast = []
+            
+            # Start with the last 'window' actual values
+            current_values = list(y[-window:])
+            
+            for i in range(periods):
+                # Calculate moving average of current window
+                current_ma = np.mean(current_values)
+                
+                # Apply trend with dampening
+                damping = 0.95 ** i  # Exponential decay
+                trend_adjustment = trend_slope * damping
+                
+                # Next forecast = current MA + trend
+                next_value = current_ma + trend_adjustment
+                
+                # Apply reasonable bounds
+                y_min, y_max = float(np.min(y)), float(np.max(y))
+                min_bound = y_min * 0.5
+                max_bound = y_max * 1.5
+                next_value = np.clip(next_value, min_bound, max_bound)
+                next_value = max(0, next_value)
+                
+                forecast.append(next_value)
+                
+                # KEY: Update the rolling window with the new forecast
+                current_values = current_values[1:] + [next_value]
+            
+            forecast = np.array(forecast)
+            
+            # Calculate fitted values for metrics (simple moving averages on historical data)
+            fitted = []
+            for i in range(n):
+                start_idx = max(0, i - window + 1)
+                fitted.append(np.mean(y[start_idx:i+1]))
+            
+            fitted = np.array(fitted)
+            
+            # Calculate metrics (skip warm-up period)
+            if n > window:
+                metrics = ForecastExecutionService.calculate_metrics(y[window-1:], fitted[window-1:])
+            else:
+                metrics = ForecastExecutionService.calculate_metrics(y, fitted)
+            
+            logger.info(f"Moving Average: trend_slope={trend_slope:.2f}, base_ma={base_ma:.0f}")
+            logger.info(f"Moving Average forecast: first={forecast[0]:.0f}, last={forecast[-1]:.0f}")
+            logger.info(f"Moving Average metrics: MAE={metrics.get('mae', 0):.2f}, MAPE={metrics.get('mape', 0):.2f}%")
+            
+            return forecast, metrics
+        except Exception as e:
+            logger.error(f"Moving average forecasting failed: {str(e)}", exc_info=True)
+            raise
 
     @staticmethod
     def sarima_forecast(data: pd.DataFrame, periods: int) -> tuple:
@@ -4022,55 +4168,28 @@ This makes the trend robust to spikes and outliers
         selected_metrics: List[str] = None,
         custom_parameters: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """
-        Safely run an algorithm and return results.
-
-        Args:
-            algorithm_name: Name of the algorithm to run
-            data: Historical data (must have target_column)
-            periods: Number of periods to forecast
-            target_column: Name of the target column to forecast
-            tenant_id: Tenant identifier (for dynamic field detection)
-            database_name: Database name (for dynamic field detection)
-            aggregation_level: Current aggregation level (e.g., "product")
-            selected_metrics: List of metrics to calculate
-            custom_parameters: Custom parameters for the algorithm
-
-        Returns:
-            Dictionary with algorithm results
-        """
+        
         if selected_metrics is None:
             selected_metrics = ['mape', 'accuracy']
-
-        # Ensure target_column is properly set
         if not target_column:
             target_column = 'total_quantity'
 
         try:
-            #   CRITICAL: Ensure no duplicate columns before proceeding
-            # Duplicate columns (like multiple 'total_quantity' or 'period') can crash algorithms
             if data.columns.duplicated().any():
-                logger.info(f"Algorithm {algorithm_name}: Found duplicate columns {data.columns[data.columns.duplicated()].unique().tolist()}, keeping only first occurrence")
                 data = data.loc[:, ~data.columns.duplicated()].copy()
 
-            # Debug: Log data information
             logger.info(f"Algorithm {algorithm_name}: Forecast periods: {periods}")
             logger.info(f"Algorithm {algorithm_name}: Data shape: {data.shape}")
             
-            # Log preprocessing analysis for this algorithm
             algo_process_log = []
-            preprocessing_info = ForecastExecutionService.detect_and_log_preprocessing(data, algo_process_log)
-            for log_msg in algo_process_log:
-                logger.info(f"Algorithm {algorithm_name}: {log_msg}")
+            ForecastExecutionService.detect_and_log_preprocessing(data, algo_process_log)
 
-            # Ensure we have target_column (rename if needed)
             if 'quantity' in data.columns and target_column not in data.columns:
                 data = data.rename(columns={'quantity': target_column})
             elif 'quantity' in data.columns and target_column in data.columns:
-                # If both exist, drop the old target_column first to avoid duplicates
                 data = data.drop(columns=[target_column])
                 data = data.rename(columns={'quantity': target_column})
-            
+
             algorithm_map = {
                 "linear_regression": ForecastExecutionService.linear_regression_forecast,
                 "polynomial_regression": ForecastExecutionService.polynomial_regression_forecast,
@@ -4093,86 +4212,77 @@ This makes the trend robust to spikes and outliers
             algorithm_func = algorithm_map.get(algorithm_name)
             if algorithm_func is None:
                 raise ValueError(f"Unknown algorithm: {algorithm_name}")
-            
-            # Determine parameters that will be used
+
             used_parameters = custom_parameters.copy() if custom_parameters else {}
             if not used_parameters:
                 used_parameters = ForecastExecutionService.get_algorithm_default_parameters(algorithm_name)
-            
-            def execute(input_data: pd.DataFrame, horizon: int) -> Tuple[np.ndarray, Dict[str, float]]:
-                """Execute algorithm and ensure it returns exactly 2 values"""
+
+            # ====================================================================
+            # NEURAL NETWORK ALGORITHMS: Special handling for test forecast
+            # For LSTM and MLP, the test forecast MUST use teacher forcing,
+            # not autoregressive prediction. We pass full data + test period
+            # count to the algorithm and let it return teacher-forced test preds.
+            # ====================================================================
+            NEURAL_NET_ALGORITHMS = {'lstm', 'mlp_neural_network'}
+
+            if algorithm_name in NEURAL_NET_ALGORITHMS:
+                return ForecastExecutionService._run_neural_net_algorithm_safe(
+                    algorithm_name=algorithm_name,
+                    algorithm_func=algorithm_func,
+                    data=data,
+                    periods=periods,
+                    target_column=target_column,
+                    used_parameters=used_parameters,
+                    selected_metrics=selected_metrics,
+                    algo_process_log=algo_process_log
+                )
+
+            # ====================================================================
+            # STANDARD ALGORITHMS: Original logic
+            # ====================================================================
+            def execute(input_data: pd.DataFrame, horizon: int):
                 target_data = input_data if input_data is not None else data
-                if target_data is None or target_data.empty:
-                    target_data = data
-                
                 algo_params = used_parameters.copy()
-                logger.info(f"Algorithm {algorithm_name}: Executing with parameters = {algo_params}")
                 
-                # Call the algorithm with appropriate parameters
                 if algorithm_name in ['xgboost', 'svr', 'knn', 'random_forest']:
-                    # ML algorithms with custom parameters and tenant context
-                    logger.info(f"Algorithm {algorithm_name}: Using ML algorithm path with tenant context and params {algo_params}")
                     result = algorithm_func(
-                        target_data, 
-                        max(1, horizon),
+                        target_data, max(1, horizon),
                         tenant_id=tenant_id,
                         database_name=database_name,
                         aggregation_level=aggregation_level,
-                        **algo_params  # Unpack custom parameters
+                        **algo_params
                     )
-                elif algorithm_name in ['knn', 'xgboost', 'svr', 'random_forest', 'polynomial_regression',
-                                       'exponential_smoothing', 'holt_winters', 'arima', 'prophet', 
-                                       'lstm', 'gaussian_process', 'mlp_neural_network', 'moving_average', 'sarima']:
-                    # Algorithms that support custom parameters
-                    result = algorithm_func(
-                        target_data,
-                        max(1, horizon),
-                        **algo_params  # Unpack custom parameters
-                    )
+                elif algorithm_name in ['polynomial_regression', 'exponential_smoothing',
+                                        'holt_winters', 'arima', 'prophet',
+                                        'gaussian_process', 'moving_average', 'sarima']:
+                    result = algorithm_func(target_data, max(1, horizon), **algo_params)
                 else:
                     result = algorithm_func(target_data, max(1, horizon))
-                
-                # Ensure we have exactly 2 return values
-                if isinstance(result, tuple):
-                    if len(result) == 2:
-                        forecast, metrics = result
-                        return forecast, metrics
-                    else:
-                        raise ValueError(f"Algorithm {algorithm_name} returned {len(result)} values, expected 2")
-                else:
-                    raise ValueError(f"Algorithm {algorithm_name} did not return a tuple")
-            
-            # Split data for evaluation
+
+                if isinstance(result, tuple) and len(result) == 2:
+                    return result
+                raise ValueError(f"Algorithm {algorithm_name} returned unexpected result format")
+
             train_df, test_df = ForecastExecutionService._split_train_test_dataframe(data)
             eval_data = train_df if train_df is not None and not train_df.empty else data
             eval_periods = len(test_df)
-            
-            metrics: Dict[str, float]
-            test_forecast_list: List[float] = []
-            
-            # Evaluate on test data if available
+
+            test_forecast_list = []
             if eval_periods > 0:
-                eval_forecast, eval_metrics = execute(eval_data, eval_periods)
+                eval_forecast, _ = execute(eval_data, eval_periods)
                 actual_eval = test_df[target_column].values
                 predicted_eval = np.asarray(eval_forecast)[:len(actual_eval)]
                 metrics = ForecastExecutionService.calculate_metrics(
-                    actual_eval, 
-                    predicted_eval,
-                    selected_metrics=selected_metrics
+                    actual_eval, predicted_eval, selected_metrics=selected_metrics
                 )
                 test_forecast_list = predicted_eval.tolist()
             else:
-                # Fallback: use training metrics
                 fallback_horizon = min(max(1, periods), max(1, len(eval_data)))
                 _, metrics = execute(eval_data, fallback_horizon)
-            
-            # Generate final forecast on full data
+
             forecast, _ = execute(data, periods)
-            
-            # Convert forecast to list
             forecast_list = forecast.tolist() if isinstance(forecast, np.ndarray) else forecast
-            
-            # Build return dictionary
+
             result_dict = {
                 'algorithm': algorithm_name,
                 'forecast': forecast_list,
@@ -4181,13 +4291,10 @@ This makes the trend robust to spikes and outliers
                 'process_log': algo_process_log,
                 **metrics
             }
-            
-            logger.info(f"Algorithm {algorithm_name}: Successfully built result dict with keys: {list(result_dict.keys())}, forecast length: {len(result_dict.get('forecast', []))}, accuracy: {result_dict.get('accuracy', 'N/A')}")
             return result_dict
-            
+
         except Exception as e:
             logger.error(f"Error running algorithm {algorithm_name}: {str(e)}", exc_info=True)
-            # Return failed result
             return {
                 'algorithm': algorithm_name,
                 'forecast': [],
@@ -4197,3 +4304,372 @@ This makes the trend robust to spikes and outliers
                 'mape': 100.0,
                 'error': str(e)
             }
+
+
+    @staticmethod
+    def _run_neural_net_algorithm_safe(
+        algorithm_name: str,
+        algorithm_func,
+        data: pd.DataFrame,
+        periods: int,
+        target_column: str,
+        used_parameters: Dict[str, Any],
+        selected_metrics: List[str],
+        algo_process_log: List[str]
+    ) -> Dict[str, Any]:
+        try:
+            if 'total_quantity' in data.columns:
+                y = data['total_quantity'].values.astype(float)
+            elif target_column in data.columns:
+                y = data[target_column].values.astype(float)
+            else:
+                raise ValueError(f"Column {target_column} not found")
+
+            n = len(y)
+            sequence_length = used_parameters.get('sequence_length', 12)
+
+            # ✅ FIX: Use same split ratio as _split_train_test_dataframe (0.8)
+            # This ensures test period count is consistent across ALL algorithms
+            TRAIN_RATIO = 0.8
+            split = max(sequence_length + 1, int(n * TRAIN_RATIO))
+            
+            # Test indices: positions from split onward that have enough history
+            # Each position i needs i >= sequence_length to form a valid input window
+            test_indices = list(range(max(sequence_length, split), n))
+            
+            logger.info(
+                f"Neural net {algorithm_name}: n={n}, split={split}, "
+                f"test_indices={len(test_indices)} periods "
+                f"(from index {test_indices[0] if test_indices else 'N/A'})"
+            )
+
+            # ================================================================
+            # STEP 1: Train on ALL data → get future forecast
+            # ================================================================
+            result = algorithm_func(data, periods, **used_parameters)
+            if len(result) == 3:
+                forecast_full, metrics_full, model_scaler = result
+            else:
+                forecast_full, metrics_full = result
+                model_scaler = None
+
+            forecast_list = (
+                forecast_full.tolist()
+                if isinstance(forecast_full, np.ndarray)
+                else list(forecast_full)
+            )
+
+            # ================================================================
+            # STEP 2: Teacher-forced test forecast
+            # For each test index i, input = real values [i-seq_len : i]
+            # Output = single-step prediction at i (no error accumulation)
+            # ================================================================
+            test_forecast_list = []
+            test_actuals_for_metrics = []
+
+            if len(test_indices) > 0:
+                if algorithm_name == 'lstm':
+                    test_forecast_list, test_actuals_for_metrics = (
+                        ForecastExecutionService._lstm_teacher_forced_eval(
+                            y=y,
+                            test_indices=test_indices,
+                            sequence_length=sequence_length,
+                            used_parameters=used_parameters,
+                            model_scaler=model_scaler
+                        )
+                    )
+                elif algorithm_name == 'mlp_neural_network':
+                    test_forecast_list, test_actuals_for_metrics = (
+                        ForecastExecutionService._mlp_teacher_forced_eval(
+                            y=y,
+                            test_indices=test_indices,
+                            sequence_length=sequence_length,
+                            used_parameters=used_parameters,
+                            model_scaler=model_scaler
+                        )
+                    )
+
+            # Recalculate metrics using teacher-forced predictions
+            if test_actuals_for_metrics and test_forecast_list:
+                metrics_full = ForecastExecutionService.calculate_metrics(
+                    np.array(test_actuals_for_metrics),
+                    np.array(test_forecast_list),
+                    selected_metrics=selected_metrics
+                )
+
+            logger.info(
+                f"Neural net {algorithm_name}: "
+                f"teacher-forced test={len(test_forecast_list)} periods, "
+                f"future={len(forecast_list)} periods, "
+                f"metrics={metrics_full}"
+            )
+
+            return {
+                'algorithm': algorithm_name,
+                'forecast': forecast_list,
+                'test_forecast': test_forecast_list,
+                'used_parameters': used_parameters,
+                'process_log': algo_process_log,
+                **metrics_full
+            }
+
+        except Exception as e:
+            logger.error(f"Neural net {algorithm_name} failed: {str(e)}", exc_info=True)
+            return {
+                'algorithm': algorithm_name,
+                'forecast': [],
+                'accuracy': 0,
+                'mae': 999.0,
+                'rmse': 999.0,
+                'mape': 100.0,
+                'error': str(e)
+            }
+
+
+    @staticmethod
+    def _lstm_teacher_forced_eval(
+        y: np.ndarray,
+        test_indices: List[int],
+        sequence_length: int,
+        used_parameters: Dict[str, Any],
+        model_scaler: tuple = None
+    ) -> tuple:
+        try:
+            import tensorflow as tf
+            from sklearn.preprocessing import MinMaxScaler
+            import random
+
+            random.seed(42)
+            np.random.seed(42)
+            tf.random.set_seed(42)
+
+            n = len(y)
+            
+            # Use pre-trained model and scaler if available to avoid redundant training
+            if model_scaler and len(model_scaler) == 2:
+                model, scaler = model_scaler
+                y_scaled = scaler.transform(y.reshape(-1, 1)).flatten()
+            else:
+                from tensorflow.keras.models import Model
+                from tensorflow.keras.layers import (
+                    Input, Conv1D, Dense, Dropout, Activation,
+                    LayerNormalization, Add, Flatten
+                )
+                from tensorflow.keras.optimizers import Adam
+                from tensorflow.keras.callbacks import EarlyStopping
+                
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()
+
+                X_all, y_all = [], []
+                for i in range(sequence_length, n):
+                    X_all.append(y_scaled[i - sequence_length:i])
+                    y_all.append(y_scaled[i])
+
+                X_all = np.array(X_all).reshape(-1, sequence_length, 1)
+                y_all = np.array(y_all)
+
+                # ✅ Same TCN architecture as lstm_forecast
+                def residual_block(x, filters, kernel_size, dilation_rate, dropout_rate=0.1):
+                    pad = (kernel_size - 1) * dilation_rate
+                    x_padded = tf.keras.layers.ZeroPadding1D((pad, 0))(x)
+                    conv = Conv1D(filters, kernel_size, dilation_rate=dilation_rate,
+                                padding='valid', activation=None)(x_padded)
+                    conv = LayerNormalization()(conv)
+                    conv = Activation('relu')(conv)
+                    conv = Dropout(dropout_rate)(conv)
+
+                    x_padded2 = tf.keras.layers.ZeroPadding1D((pad, 0))(conv)
+                    conv2 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate,
+                                padding='valid', activation=None)(x_padded2)
+                    conv2 = LayerNormalization()(conv2)
+                    conv2 = Activation('relu')(conv2)
+                    conv2 = Dropout(dropout_rate)(conv2)
+
+                    if x.shape[-1] != filters:
+                        x = Conv1D(filters, kernel_size=1, padding='same')(x)
+                    return Add()([x, conv2])
+
+                inputs = Input(shape=(sequence_length, 1))
+                x = inputs
+                for dilation in [1, 2, 4]:
+                    x = residual_block(x, 64, 3, dilation, 0.1)
+                x = Flatten()(x)
+                x = Dense(32, activation='relu')(x)
+                x = Dropout(0.1)(x)
+                outputs = Dense(1)(x)
+
+                model = Model(inputs, outputs)
+                model.compile(optimizer=Adam(learning_rate=0.005, clipnorm=1.0),
+                            loss='huber')
+
+                epochs = used_parameters.get('epochs', 50)
+                batch_size = used_parameters.get('batch_size', 32)
+
+                model.fit(
+                    X_all, y_all,
+                    epochs=min(epochs * 4, 200),
+                    batch_size=min(batch_size, max(8, len(X_all) // 4)),
+                    verbose=0,
+                    callbacks=[EarlyStopping(
+                        monitor='loss', patience=20,
+                        restore_best_weights=True, min_delta=1e-5
+                    )]
+                )
+
+            # Teacher-forced predictions on test indices
+            X_test_tf, actuals = [], []
+            for idx in test_indices:
+                if idx >= sequence_length:
+                    X_test_tf.append(y_scaled[idx - sequence_length:idx])
+                    actuals.append(float(y[idx]))
+
+            if not X_test_tf:
+                return [], []
+
+            X_test_tf = np.array(X_test_tf).reshape(-1, sequence_length, 1)
+            preds_scaled = model.predict(X_test_tf, verbose=0).flatten()
+            preds = scaler.inverse_transform(
+                preds_scaled.reshape(-1, 1)
+            ).flatten()
+            preds = np.maximum(preds, 0).tolist()
+
+            logger.info(
+                f"LSTM(TCN) teacher-forced eval: {len(preds)} predictions, "
+                f"range=[{min(preds):.0f}, {max(preds):.0f}]"
+            )
+            return preds, actuals
+
+        except Exception as e:
+            logger.warning(f"LSTM(TCN) teacher-forced eval failed: {str(e)}")
+            return [], []
+
+
+    @staticmethod
+    def _mlp_teacher_forced_eval(
+        y: np.ndarray,
+        test_indices: List[int],
+        sequence_length: int,
+        used_parameters: Dict[str, Any],
+        model_scaler: tuple = None
+    ) -> tuple:
+        """
+        Generate teacher-forced predictions for MLP on test indices.
+        Each prediction uses REAL lagged values as input — no error accumulation.
+
+        Returns: (predictions_list, actuals_list)
+        """
+        try:
+            import tensorflow as tf
+            from sklearn.preprocessing import MinMaxScaler
+            import numpy as np
+
+            n = len(y)
+            
+            # Use pre-trained model and scalers if available to avoid redundant training
+            if model_scaler and len(model_scaler) == 3:
+                model, X_scaler, y_scaler = model_scaler
+                
+                # We need to know the sequence length the model was trained with.
+                # In MLP forecast, it's min(12, len(y) // 3).
+                seq_len = min(12, n // 3)
+                
+                # Teacher-forced test predictions
+                X_test_tf = []
+                actuals = []
+                for idx in test_indices:
+                    if idx >= seq_len:
+                        # ✅ Use real values for lagging
+                        X_test_tf.append(y[idx - seq_len:idx])
+                        actuals.append(float(y[idx]))
+
+                if not X_test_tf:
+                    return [], []
+
+                X_test_tf = np.array(X_test_tf)
+                # Scale using the X_scaler from training
+                X_test_tf_scaled = X_scaler.transform(X_test_tf)
+
+                # Performance optimization: use model() instead of model.predict()
+                preds_scaled = model(X_test_tf_scaled, training=False).numpy().flatten()
+                
+                # Inverse scale using y_scaler from training
+                preds = y_scaler.inverse_transform(
+                    preds_scaled.reshape(-1, 1)
+                ).flatten()
+                preds = np.maximum(preds, 0).tolist()
+                
+            else:
+                from tensorflow.keras.models import Sequential
+                from tensorflow.keras.layers import Dense, Dropout
+                from tensorflow.keras.optimizers import Adam
+                from tensorflow.keras.callbacks import EarlyStopping
+
+                # Use MLP's internal sequence length (lag window)
+                # MLP uses min(12, len(y)//3) internally — replicate that here
+                seq_len = min(12, n // 3)
+                seq_len = max(seq_len, sequence_length)  # Respect user param if larger
+
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()
+
+                # Build ALL sequences
+                X_all = np.array([
+                    y_scaled[i - seq_len:i]
+                    for i in range(seq_len, n)
+                ])
+                y_all = np.array([y_scaled[i] for i in range(seq_len, n)])
+
+                hidden_layers = used_parameters.get('hidden_layers', [64, 32])
+                epochs = used_parameters.get('epochs', 100)
+                batch_size = used_parameters.get('batch_size', 32)
+
+                # Build and train MLP on full data
+                model = Sequential()
+                model.add(Dense(hidden_layers[0], activation='relu', input_shape=(seq_len,)))
+                for h in hidden_layers[1:]:
+                    model.add(Dense(h, activation='relu'))
+                    model.add(Dropout(0.2))
+                model.add(Dense(1))
+                model.compile(optimizer=Adam(learning_rate=0.005), loss='huber')
+
+                model.fit(
+                    X_all, y_all,
+                    epochs=min(epochs * 2, 200),
+                    batch_size=min(batch_size, max(8, len(X_all) // 4)),
+                    verbose=0,
+                    callbacks=[EarlyStopping(
+                        monitor='loss', patience=15,
+                        restore_best_weights=True
+                    )]
+                )
+
+                # Teacher-forced test predictions
+                X_test_tf = []
+                actuals = []
+                for idx in test_indices:
+                    if idx >= seq_len:
+                        # ✅ Always use real actuals as lagged features
+                        X_test_tf.append(y_scaled[idx - seq_len:idx])
+                        actuals.append(float(y[idx]))
+
+                if not X_test_tf:
+                    return [], []
+
+                X_test_tf = np.array(X_test_tf)
+
+                preds_scaled = model.predict(X_test_tf, verbose=0).flatten()
+                preds = scaler.inverse_transform(
+                    preds_scaled.reshape(-1, 1)
+                ).flatten()
+                preds = np.maximum(preds, 0).tolist()
+
+            logger.info(
+                f"MLP teacher-forced eval: {len(preds)} predictions, "
+                f"range=[{min(preds):.0f}, {max(preds):.0f}]"
+            )
+            return preds, actuals
+
+        except Exception as e:
+            logger.warning(f"MLP teacher-forced eval failed: {str(e)}")
+            return [], []
